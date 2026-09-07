@@ -30,6 +30,59 @@ runbooks/               # backup/restore, 장애 대응
 - **public inbound 0.** SSM은 break-glass. public ingress / Funnel / SSH / API / metrics / NodePort 노출 금지
 - Tailscale Serve → Traefik Gateway API → `persona-web` / `persona-gateway`만 Tailnet에 노출
 
+## 네트워크 경로
+
+```mermaid
+flowchart TB
+    Laptop[개발자 노트북<br/>Tailnet 사용자]
+
+    subgraph Home[홈 Proxmox / Tailnet]
+        CP[Control Plane<br/>스케줄 금지<br/>Kubernetes API]
+
+        subgraph W1[worker1 · 데이터]
+            PodA[PostgreSQL · Qdrant<br/>ingestion Pod]
+            Cilium1[Cilium]
+            VXLAN1[VXLAN encapsulation]
+            TS1[Tailscale]
+            PodA --> Cilium1 --> VXLAN1 --> TS1
+        end
+
+        subgraph W2[worker2 · 관측 · 진입]
+            Serve[Tailscale Serve]
+            Traefik[Traefik<br/>Gateway API]
+            PodB[persona-web · gateway<br/>Prometheus · Tempo]
+            Cilium2[Cilium]
+            VXLAN2[VXLAN decapsulation]
+            TS2[Tailscale]
+            Serve --> Traefik --> PodB
+            PodB --> Cilium2 --> VXLAN2 --> TS2
+        end
+    end
+
+    subgraph AWS[AWS VPC / GPU worker]
+        PodGPU[vLLM Pod<br/>단일 L4 GPU]
+        CiliumGPU[Cilium]
+        VXLANGPU[VXLAN decapsulation]
+        TSGPU[Tailscale]
+        PodGPU --> CiliumGPU --> VXLANGPU --> TSGPU
+    end
+
+    Laptop -->|Tailnet TLS| Serve
+    CP -. Kubernetes control plane .-> W1
+    CP -. Kubernetes control plane .-> W2
+    CP -. Kubernetes control plane .-> AWS
+
+    TS1 <-->|WireGuard 암호화 전송<br/>Internet 또는 DERP| TS2
+    TS2 <-->|WireGuard 암호화 전송<br/>Internet 또는 DERP| TSGPU
+    Cilium1 -. Pod packet: VXLAN inside Tailscale .-> Cilium2
+    Cilium2 -. Pod packet: VXLAN inside Tailscale .-> CiliumGPU
+```
+
+Pod 간 패킷은 **Cilium VXLAN 오버레이**로 캡슐화되고, 그 바깥 패킷이
+**Tailscale WireGuard 언더레이**를 타고 노드 사이를 이동한다. 반면 사용자의 HTTP
+요청은 Tailnet에서 Tailscale Serve로 들어와 Traefik과 Gateway로만 전달된다. 인터넷에
+Kubernetes API, NodePort, vLLM, 데이터베이스 포트를 직접 열지 않는다.
+
 ## 하지 않는 것
 
 - CNI migration, Multus / SR-IOV / RDMA, distributed inference
