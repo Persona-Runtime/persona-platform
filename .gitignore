@@ -11,6 +11,7 @@ quarantine/
 source_manifest.yaml
 !tests/fixtures/**/*.jsonl
 !docs/**/source_manifest.example.yaml
+docs/
 
 # --- 로컬 환경 ---
 .env
