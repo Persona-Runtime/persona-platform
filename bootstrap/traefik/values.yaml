@@ -1,0 +1,52 @@
+# Traefik 41.4.0 (Traefik v3.7.12) — Gateway API 컨트롤러
+# 이 차트는 values 스키마 검증이 있어 모르는 키를 거부한다.
+# 따라서 helm template이 통과하면 키가 실제로 반영된 것으로 신뢰할 수 있다.
+
+nodeSelector:
+  kubernetes.io/hostname: k8s-worker2
+
+deployment:
+  replicas: 1
+
+# public inbound 0 원칙. NodePort/LoadBalancer 금지.
+# Tailnet 노출은 tailscale serve가 노드에서 ClusterIP로 전달하는 방식으로 붙인다.
+#
+# 주의: 41.x에서 타입은 service.spec.type 이다. service.type 은 존재하지 않는 키인데,
+# service 섹션에 additionalProperties:false 가 없어 스키마를 통과한 뒤 무시된다.
+# LoadBalancer로 두면 컨트롤러가 없어 EXTERNAL-IP는 pending이지만 NodePort가 함께
+# 할당되어 모든 노드에 포트가 열린다. 이전 클러스터의 ingress-nginx 상태로 되돌아간다.
+service:
+  spec:
+    type: ClusterIP
+
+providers:
+  kubernetesGateway:
+    enabled: true
+  kubernetesCRD:
+    enabled: false
+  kubernetesIngress:
+    enabled: false
+
+# 기본 Gateway 리소스는 차트가 만들지 않는다 — 우리가 선언하고 버전관리한다.
+gateway:
+  enabled: false
+
+# GatewayClass는 별도 키다. 이것이 있어야 Traefik이 Gateway API 컨트롤러로 동작한다.
+gatewayClass:
+  enabled: true
+
+# Gateway API만 사용하므로 IngressClass는 만들지 않는다.
+ingressClass:
+  enabled: false
+
+priorityClassName: persona-low
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    memory: 256Mi
+
+# log / accessLog 는 하위 키 구조를 확인한 뒤 추가한다:
+#   helm show values traefik/traefik --version 41.4.0 | sed -n '/^log:/,/^metrics:/p'

@@ -1,0 +1,25 @@
+# 자원 압박 시 축출 순서를 의도대로 고정한다.
+# 관측이 흔들리면 실험 결과를 믿을 수 없으므로, 관측·데이터가 stateless보다 먼저 살아남는다.
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: persona-critical
+value: 1000000
+globalDefault: false
+description: "관측(Prometheus·Tempo·Collector)과 데이터(CNPG·Qdrant). 마지막까지 살아남는다."
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: persona-standard
+value: 1000
+globalDefault: false
+description: "Argo CD 등 운영 도구. 관측·데이터 다음."
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: persona-low
+value: 100
+globalDefault: false
+description: "Traefik·gateway·web 등 stateless. 압박 시 가장 먼저 축출된다."

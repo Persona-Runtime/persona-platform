@@ -365,6 +365,33 @@ worker2가 `.2`가 아니라 `.3`을 받았다. 컨트롤러 할당 과정에서
 - [ ] PriorityClass 적용, 자원 압박 시 축출 순서가 의도대로 동작
 - [ ] Argo CD 정상 동기화, 삭제 대상이 되살아나지 않음
 
+## Phase 5 결과 — 완료 (2026-09-07)
+
+| 컴포넌트 | 버전 | 배치 | 확인 |
+| --- | --- | --- | --- |
+| local-path-provisioner | v0.0.37 | — | 0777 setup 적용, `nodePathMap`에 worker1/2만. UID 50000 쓰기 성공 |
+| PriorityClass | — | — | `persona-critical` / `persona-standard` / `persona-low` |
+| metrics-server | chart 3.14.0 | 자유 | `kubectl top` 동작 |
+| Argo CD | chart 10.8.1 (v3.5.2) | worker1 | 설치 완료, **manual sync** (selfHeal/prune 미적용) |
+| Gateway API CRD | v1.6.2 standard | — | 10개 CRD, **단일 소유** |
+| Traefik | chart 41.4.0 (v3.7.12) | **worker2** | GatewayClass `traefik` **ACCEPTED True** |
+
+### public inbound 0 확인
+
+```
+service/traefik   ClusterIP   10.104.208.56   <none>   80/TCP,443/TCP
+kubectl get svc -A | grep NodePort   → 출력 없음
+```
+
+클러스터 전체에 NodePort가 하나도 없다. 이전 클러스터의 ingress-nginx
+30080/30443 노출이 사라진 상태를 유지한다.
+
+### 남은 것
+
+- Tailnet 노출 (`tailscale serve` → Traefik ClusterIP). Gateway와 HTTPRoute를
+  선언한 뒤에 의미가 있으므로 실제 앱이 생길 때 함께 붙인다
+- Argo CD `argocd/applications/` 경로 구성 및 기존 수동 설치분의 Argo 편입
+
 ## 관련 문서
 
 - `storage-and-recovery.md` — local-path 운영 규칙, PVC 삭제 절차, 저장소별 복구 전략
