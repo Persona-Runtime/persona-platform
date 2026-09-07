@@ -1,0 +1,51 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: local-path-config
+  namespace: local-path-storage
+data:
+  # DEFAULT_PATH_FOR_NON_LISTED_NODES를 두지 않는다.
+  # 목록에 없는 노드에서는 프로비저닝이 실패하므로, 워크로드에 nodeSelector를
+  # 빠뜨려도 엉뚱한 노드에 볼륨이 생기지 않는다.
+  config.json: |-
+    {
+      "nodePathMap": [
+        {
+          "node": "k8s-worker1",
+          "paths": ["/opt/local-path-provisioner"]
+        },
+        {
+          "node": "k8s-worker2",
+          "paths": ["/opt/local-path-provisioner"]
+        }
+      ]
+    }
+
+  helperPod.yaml: |-
+    apiVersion: v1
+    kind: Pod
+    metadata:
+      name: helper-pod
+    spec:
+      priorityClassName: system-node-critical
+      tolerations:
+        - key: node.kubernetes.io/disk-pressure
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: helper-pod
+          image: busybox:1.36
+          imagePullPolicy: IfNotPresent
+
+  setup: |-
+    #!/bin/sh
+    set -eu
+    # 0777: 컨테이너가 임의 UID(postgres 등)로 떠도 쓰기 가능하도록.
+    # 0700/0770으로 낮추면 root가 만든 디렉터리를 non-root 컨테이너가 못 써 기동 실패.
+    # 격리: $VOL_DIR은 PVC마다 고유 경로 + 단일노드 단일테넌트라 노드 외 노출 없음(허용 위험).
+    mkdir -m 0777 -p "$VOL_DIR"
+
+  teardown: |-
+    #!/bin/sh
+    set -eu
+    rm -rf "$VOL_DIR"
