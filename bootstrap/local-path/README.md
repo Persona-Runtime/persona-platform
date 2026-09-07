@@ -1,0 +1,31 @@
+# local-path 부트스트랩
+
+재구축 후 **가장 먼저** 설치한다. Kubernetes 기본 기능이 아니라 별도 컴포넌트다.
+
+## 왜 이 설정이어야 하는가
+
+**`setup` 스크립트의 0777** — 기본값으로 두면 root가 만든 디렉터리를 non-root 컨테이너가
+쓰지 못해 CNPG부터 기동에 실패한다. 이전 클러스터에서 확인된 문제이며 반드시 유지한다.
+
+**`nodePathMap`에 `DEFAULT_PATH_FOR_NON_LISTED_NODES`가 없다** — 의도적이다.
+`k8s-worker1`, `k8s-worker2`만 명시했으므로 그 외 노드(컨트롤 플레인, 향후 AWS GPU 워커)
+에서는 프로비저닝이 **실패한다**. 워크로드에 `nodeSelector`를 빠뜨렸을 때 조용히 잘못된
+노드에 볼륨이 생기는 것을 막는 안전장치다.
+
+## 반드시 알아야 할 제약
+
+| 제약 | 결과 |
+| --- | --- |
+| `WaitForFirstConsumer` | 첫 스케줄 시점에 노드가 확정된다. **`nodeSelector`는 첫 배포 전에** 들어가 있어야 한다 |
+| `Retain` | PVC 삭제 ≠ 데이터 삭제. PV 오브젝트와 노드 디렉터리를 수동으로 지워야 한다 |
+| `allowVolumeExpansion: false` | PVC 크기는 영구 고정. 나중에 못 늘린다 |
+| **용량 미강제** | 요청 용량은 강제되지 않는다. 실제 상한은 앱 설정(`retention.size` 등)뿐이다 |
+
+자세한 운영 규칙은 `../../docs/storage-and-recovery.md` 참고.
+
+## 노드 배치
+
+| 노드 | 워크로드 |
+| --- | --- |
+| `k8s-worker1` | CNPG, Qdrant, private corpus, ingestion, Argo CD |
+| `k8s-worker2` | Prometheus, Tempo, Grafana, OTel Collector, Traefik, gateway, web |

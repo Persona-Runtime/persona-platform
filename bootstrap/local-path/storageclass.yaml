@@ -1,0 +1,13 @@
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: local-path
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "true"
+provisioner: rancher.io/local-path
+# 파드가 스케줄된 노드에 볼륨을 만든다. 그 순간부터 파드는 그 노드에 영구 고정된다.
+volumeBindingMode: WaitForFirstConsumer
+# PVC를 지워도 PV와 노드 디렉토리가 남는다. 수동 정리가 필요하다.
+reclaimPolicy: Retain
+# local-path는 확장을 지원하지 않는다. PVC 크기는 생성 시점에 확정된다.
+allowVolumeExpansion: false

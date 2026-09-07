@@ -1,0 +1,34 @@
+# --- 데이터 경계: 절대 커밋 금지 ---
+private-data/
+raw/
+parsed/
+quarantine/
+*.jsonl
+*.parquet
+*.srt
+*.ass
+*.vtt
+source_manifest.yaml
+!tests/fixtures/**/*.jsonl
+!docs/**/source_manifest.example.yaml
+
+# --- 로컬 환경 ---
+.env
+.env.*
+!.env.example
+.DS_Store
+
+# --- Terraform ---
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+crash.log
+.terraform.lock.hcl
+
+# --- 비밀/자격증명 ---
+kubeconfig*
+*.pem
+*.key
+tailscale-authkey*
