@@ -130,10 +130,12 @@ local-path가 파드를 노드에 고정하므로, 무엇을 어디에 둘지가
 
 worker2를 4 vCPU / 8 GiB로 증설하면 **관측 우선 + 경량 stateless 허용**이 성립한다.
 
-| 노드 | 워크로드 | 추정 합계 | allocatable |
-| --- | --- | --- | --- |
-| worker1 | CNPG 1.1 + Qdrant 1.0 + Argo CD 1.5 + Cilium 0.3 + ingestion(일시) | ~3.9 GiB | ~9 GiB |
-| worker2 | Prometheus 2.0 + Tempo 1.0 + Grafana 0.3 + Collector 0.2 + Traefik 0.15 + gateway 0.2 + web 0.1 + Cilium 0.3 | ~4.3 GiB | ~7 GiB |
+| 노드 | 현재 실측 | 추가 예정 | 예상 합계 | allocatable |
+| --- | --- | --- | --- | --- |
+| worker1 | 0.74 GiB | CNPG 1.1 + Qdrant 1.0 + Argo CD 1.5 | **~4.4 GiB** | ~9 GiB |
+| worker2 | 0.76 GiB | Prometheus 2.0 + Tempo 1.0 + Grafana 0.3 + Collector 0.2 + Traefik/gateway/web 0.45 | **~4.8 GiB** | ~7 GiB |
+
+양쪽 모두 2 GiB 이상 여유가 남는다. worker2를 8 GiB로 정한 결정이 유효함을 실측이 확인했다.
 
 양쪽 모두 여유가 남는다. Argo CD를 worker1에 두어 균형을 맞춘다 (PVC가 없어 배치가 자유롭다).
 
@@ -149,7 +151,37 @@ worker2를 4 vCPU / 8 GiB로 증설하면 **관측 우선 + 경량 stateless 허
 
 D1 완료 조건에 **축출 순서가 의도대로 동작하는지 확인**을 포함한다.
 
-## 메모리 예산 (추정 — 실측으로 교체할 것)
+## 실측 기준선 (2026-09-07, Phase 5 중반)
+
+Cilium · CoreDNS · local-path · metrics-server만 올라간 상태.
+
+| 노드 | CPU | 메모리 | 비율 |
+| --- | --- | --- | --- |
+| `k8s-cp` | 54m (2%) | **1310 Mi** | 34% |
+| `k8s-worker1` | 22m (0%) | **739 Mi** | 7% |
+| `k8s-worker2` | 27m (0%) | **761 Mi** | 9% |
+
+주요 파드:
+
+| 파드 | 메모리 |
+| --- | --- |
+| `kube-apiserver` | 318 Mi |
+| `cilium` (노드당) | 85–92 Mi |
+| `kube-controller-manager` | 54 Mi |
+| `etcd` | 45 Mi |
+| `cilium-operator` | 34 Mi |
+| `kube-scheduler` | 23 Mi |
+| `metrics-server` | 17 Mi |
+| `cilium-envoy` (노드당) | 13–14 Mi |
+
+### 추정치 보정
+
+- **Cilium을 노드당 300 Mi로 잡았으나 실제는 ~100 Mi** (agent 90 + envoy 14). 3배 과대추정
+- CPU는 전 노드 합쳐 100m 미만. 이 규모에서 CPU는 제약이 아니다
+- **`k8s-cp`가 비율상 가장 빡빡하다** (34%). 컨트롤 플레인 컴포넌트만으로 1.3 GiB.
+  taint 유지 결정이 옳았음을 실측이 뒷받침한다
+
+## 메모리 예산 (실측 보정 후)
 
 Airflow / MLflow / postgresql-0 삭제를 전제로 한다. 이 셋이 없으면 여유가 생기고,
 그대로 두면 아래 스택이 들어갈 자리가 없다.
@@ -157,7 +189,7 @@ Airflow / MLflow / postgresql-0 삭제를 전제로 한다. 이 셋이 없으면
 | 구성 요소 | 추정 | 배치 |
 | --- | --- | --- |
 | Argo CD (7 파드) | ~1.5 GiB | 자유 |
-| Cilium agent × 2 워커 + operator | ~0.7 GiB | 전 노드 |
+| Cilium agent × 2 워커 + operator | **~0.25 GiB** (실측 기반) | 전 노드 |
 | CNPG operator + Postgres 1 인스턴스 | ~1.1 GiB | worker1 |
 | Qdrant | ~1.0 GiB | worker1 |
 | Prometheus | ~2.0 GiB | worker2 |
@@ -167,7 +199,7 @@ Airflow / MLflow / postgresql-0 삭제를 전제로 한다. 이 셋이 없으면
 | Traefik | ~0.15 GiB | 자유 |
 | persona-gateway / persona-web | ~0.3 GiB | 자유 |
 | kube-state-metrics / node-exporter / metrics-server | ~0.3 GiB | 자유 |
-| **합계** | **~8.5 GiB** | (워커 allocatable ~14 GiB) |
+| **합계** | **~8.0 GiB** | (워커 allocatable ~16 GiB) |
 
 **들어간다. 다만 여유가 크지 않다.** 두 가지를 지켜야 한다.
 
