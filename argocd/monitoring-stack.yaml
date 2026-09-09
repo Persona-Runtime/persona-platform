@@ -1,0 +1,26 @@
+# H1 최소 모니터링. 이 Application 자체의 최초 등록과 이후 동기화는 수동이다.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: monitoring-stack
+  namespace: argocd
+spec:
+  project: default
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  sources:
+    - repoURL: https://prometheus-community.github.io/helm-charts
+      chart: kube-prometheus-stack
+      targetRevision: 89.2.0
+      helm:
+        releaseName: monitoring-stack
+        valueFiles:
+          - $values/helm/values/monitoring-stack.yaml
+    - repoURL: https://github.com/Persona-Runtime/persona-platform.git
+      targetRevision: feat/monitoring-stack
+      ref: values
+  syncPolicy:
+    syncOptions:
+      # kube-prometheus-stack의 큰 CRD는 client-side apply annotation 한도를 넘는다.
+      - ServerSideApply=true

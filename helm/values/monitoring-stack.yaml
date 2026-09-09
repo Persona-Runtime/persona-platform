@@ -1,0 +1,148 @@
+# kube-prometheus-stack 89.2.0 — H1 최소 모니터링
+# 실제 배포는 Argo CD Application의 수동 Sync로만 수행한다.
+
+crds:
+  enabled: true
+
+# H1은 외부 알림 전송을 다루지 않는다.
+alertmanager:
+  enabled: false
+
+# 현재 홈 클러스터는 Linux 노드만 사용한다.
+windowsMonitoring:
+  enabled: false
+
+grafana:
+  enabled: true
+  replicas: 1
+  # 이 Secret은 Git에 두지 않고 수동 bootstrap으로 준비한다.
+  # admin-user / admin-password 키를 고정해 Helm 난수 렌더를 막는다.
+  admin:
+    existingSecret: monitoring-grafana-admin
+    userKey: admin-user
+    passwordKey: admin-password
+  persistence:
+    enabled: false
+  ingress:
+    enabled: false
+  service:
+    type: ClusterIP
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi
+  sidecar:
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
+  affinity: &home_workers
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: In
+                values:
+                  - k8s-worker1
+                  - k8s-worker2
+
+kubeStateMetrics:
+  enabled: true
+
+kube-state-metrics:
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi
+  affinity: *home_workers
+
+nodeExporter:
+  enabled: true
+
+# 현재 H1의 대상은 CP와 두 홈 워커뿐이다. 향후 GPU 노드 조인 시에는
+# 별도 검토로 이 affinity를 확장한다.
+prometheus-node-exporter:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 100m
+      memory: 128Mi
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: In
+                values:
+                  - k8s-cp
+                  - k8s-worker1
+                  - k8s-worker2
+
+prometheusOperator:
+  enabled: true
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  affinity: *home_workers
+  prometheusConfigReloader:
+    resources:
+      requests:
+        cpu: 50m
+        memory: 50Mi
+      limits:
+        cpu: 100m
+        memory: 100Mi
+  admissionWebhooks:
+    patch:
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          cpu: 100m
+          memory: 128Mi
+
+prometheus:
+  enabled: true
+  service:
+    type: ClusterIP
+  prometheusSpec:
+    replicas: 1
+    scrapeInterval: 15s
+    retention: 7d
+    retentionSize: 15GB
+    nodeSelector:
+      kubernetes.io/hostname: k8s-worker2
+    resources:
+      requests:
+        cpu: 250m
+        memory: 1Gi
+      limits:
+        cpu: "1"
+        memory: 2Gi
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: local-path
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 20Gi
