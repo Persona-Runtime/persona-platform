@@ -12,6 +12,26 @@ alertmanager:
 windowsMonitoring:
   enabled: false
 
+# H1에서는 localhost 전용 메트릭을 외부에 열지 않는다.
+# 이 옵션들은 차트의 수집 리소스만 제거하며 K8s 컴포넌트를 중지하지 않는다.
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeEtcd:
+  enabled: false
+kubeProxy:
+  enabled: false
+
+# 미수집 대상에 의존하는 기본 알림·recording rule도 함께 보류한다.
+defaultRules:
+  rules:
+    etcd: false
+    kubeControllerManager: false
+    kubeProxy: false
+    kubeSchedulerAlerting: false
+    kubeSchedulerRecording: false
+
 grafana:
   enabled: true
   replicas: 1
