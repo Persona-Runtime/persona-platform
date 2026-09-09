@@ -1,0 +1,17 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: persona-mock-sse
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: synthetic-sse-test
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/Persona-Runtime/persona-platform.git
+    targetRevision: main
+    path: kustomize/overlays/prod/mock-sse
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: persona-mock-sse
