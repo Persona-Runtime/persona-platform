@@ -1,12 +1,33 @@
 # Traefik 41.4.0 (Traefik v3.7.12) — Gateway API 컨트롤러
-# 이 차트는 values 스키마 검증이 있어 모르는 키를 거부한다.
-# 따라서 helm template이 통과하면 키가 실제로 반영된 것으로 신뢰할 수 있다.
+# 스키마 검사 통과만으로 설정 반영을 보장하지 않는다. 렌더 결과와 실제 Deployment를 확인한다.
 
-nodeSelector:
-  kubernetes.io/hostname: k8s-worker2
+# 홈 서버에서 적용·확인한 목표 배치. 근거: ../../../tradeoff/07-service-replicas.md
+# 기존 Helm 값에 hostname 고정이 있으면 빈 맵을 병합하는 것만으로 제거되지 않을 수 있다.
+# README의 마이그레이션 기록을 확인한다.
+nodeSelector: {}
 
 deployment:
-  replicas: 1
+  replicas: 2
+
+affinity:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - k8s-worker1
+                - k8s-worker2
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          topologyKey: kubernetes.io/hostname
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: traefik
+              app.kubernetes.io/instance: traefik-traefik
 
 # public inbound 0 원칙. NodePort/LoadBalancer 금지.
 # Tailnet 노출은 tailscale serve가 노드에서 ClusterIP로 전달하는 방식으로 붙인다.

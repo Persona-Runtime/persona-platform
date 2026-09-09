@@ -1,5 +1,8 @@
 # Cilium 부트스트랩
 
+역할 분리·대안 비교는 [네트워크 트레이드오프](../../../tradeoff/05-networking.md)에 모았다.
+아래 설치·MTU 수치는 과거 검증 기록이며 AWS 경로 검증 완료를 의미하지 않는다.
+
 ```bash
 helm repo add cilium https://helm.cilium.io/
 helm repo update
@@ -9,16 +12,16 @@ helm install cilium cilium/cilium \
   -f values.yaml
 ```
 
-## 확정된 선택과 이유
+## 기록된 부트스트랩 설정
 
-| 설정 | 값 | 이유 |
-| --- | --- | --- |
-| `kubeProxyReplacement` | **false** | 변수를 하나씩만 바꾼다. Cilium Gateway API도 이것 때문에 비활성 |
-| `gatewayAPI` / `ingressController` | **false** | Gateway API 컨트롤러는 Traefik 하나만. CRD 소유권 충돌 방지 |
-| `routingMode` | tunnel (VXLAN) | Tailscale 위 WAN 구간을 건너야 한다 |
-| `MTU` | **1280** | underlay 기준값. 라우트에 −50이 적용되어 실효 1230. 아래 참고 |
-| `ipam.mode` | kubernetes | `node.spec.podCIDR`을 그대로 사용 — 진실의 출처를 하나로 |
-| `hubble` | 활성 | 드롭 이유 라벨이 K8S-01 원인 확정의 유일한 수단 |
+| 설정 | 값 |
+| --- | --- |
+| `kubeProxyReplacement` | **false** |
+| `gatewayAPI` / `ingressController` | **false** |
+| `routingMode` | tunnel (VXLAN) |
+| `MTU` | **1280** — 아래 실측 기록 참고 |
+| `ipam.mode` | kubernetes — Node PodCIDR 사용 |
+| `hubble` | 활성 — 드롭 원인 진단용 |
 
 ## MTU — 측정으로 확정됨
 
@@ -122,9 +125,10 @@ values에서 MTU만 바꾸면:
 동작(1280)이 달랐고, **측정하지 않았으면 AWS 노드를 붙인 뒤에야 드러났을 문제**다.
 K8S-01의 진단 서사에 그대로 쓸 수 있다.
 
-## 나중에 다룰 것 — AWS 워커 조인 시 (Loop 3)
+## 과거 AWS 조인 검토 메모 — 적용 전 재검증
 
-AWS GPU 워커가 Tailscale 너머에서 조인하면 두 가지가 걸린다.
+아래는 당시 주소 구성을 기준으로 한 후보이며 최종 적용 지시가 아니다.
+AWS GPU 워커가 Tailscale 너머에서 조인하면 다음 접근 경로를 확인한다.
 
 1. **`kubernetes` 서비스 EndpointSlice가 `192.168.50.101:6443`을 가리킨다.**
    AWS 노드는 이 LAN 주소에 도달할 수 없다. 홈 노드 하나를 Tailscale 서브넷 라우터로
@@ -132,4 +136,5 @@ AWS GPU 워커가 Tailscale 너머에서 조인하면 두 가지가 걸린다.
 2. **AWS 노드의 InternalIP를 Tailscale IP로 지정해야** 노드 간 VXLAN이 그 경로를 탄다
    (`kubelet --node-ip`)
 
-둘 다 `persona-platform` Loop 3의 완료 조건에 이미 포함되어 있다.
+현재 실행 순서는 [통합 기획](../../../docs/current-plan.md)을 따른다.
+노드 InternalIP·API 접근·반환 경로를 함께 검증한 뒤 적용 방식을 확정한다.

@@ -26,7 +26,9 @@ docs/
 *.tfvars
 !*.tfvars.example
 crash.log
-.terraform.lock.hcl
+# Provider lockfile is intentionally tracked; plans and local inputs are not.
+*.tfplan
+*.tfvars.json
 
 # --- 비밀/자격증명 ---
 kubeconfig*
