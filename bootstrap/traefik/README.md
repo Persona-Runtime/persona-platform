@@ -1,5 +1,8 @@
 # Traefik — Gateway API 컨트롤러
 
+선택 이유·NGINX와의 비교는 [트레이드오프 문서](../../../tradeoff/01-traefik-vs-nginx.md)에 모았다.
+이 문서는 부트스트랩 절차·차트 검증 기록이다. 실제 values와 아래 목표 정책이 다를 수 있으므로 렌더 결과를 확인한다.
+
 ## 설치 순서
 
 Gateway API CRD가 **먼저** 있어야 한다. CRD는 단일 소유자 원칙을 지킨다 —
@@ -38,15 +41,15 @@ helm install traefik traefik/traefik --version <VER> \
   -n traefik --create-namespace -f values.yaml
 ```
 
-## 확정된 선택
+## 현재 목표 정책
 
 | 설정 | 값 | 이유 |
 | --- | --- | --- |
-| `service.type` | **ClusterIP** | public inbound 0. NodePort/LoadBalancer 금지 |
+| `service.spec.type` | **ClusterIP** | Tailnet Serve를 통해 접근 |
 | `providers.kubernetesGateway` | true | Gateway API만 사용 |
 | `providers.kubernetesIngress` / `kubernetesCRD` | false | 진입 경로를 하나로 고정 |
 | `gateway.enabled` | false | Gateway 리소스는 우리가 선언·버전관리 |
-| `nodeSelector` | `k8s-worker2` | stateless 계층 배치 |
+| 배치·replica | 2개, 두 홈 워커가 후보, 분산 권장 | 사용자 출력으로 두 워커 각각 Ready 1개 확인 |
 | `priorityClassName` | `persona-low` | 압박 시 관측·데이터보다 먼저 축출 |
 
 ## 함정: 스키마 검증은 섹션별로만 걸린다
@@ -85,5 +88,16 @@ Traefik Service가 ClusterIP이므로 클러스터 밖에서는 보이지 않는
 노출은 `tailscale serve`가 노드 쪽에서 ClusterIP로 전달하는 방식으로 붙인다
 (노드는 kube-proxy를 통해 ClusterIP에 도달할 수 있다).
 
-대안으로 Tailscale Kubernetes Operator를 쓰면 Service 애노테이션만으로 tailnet에
-노출할 수 있으나, 컴포넌트가 하나 늘어난다. v1은 Serve 방식으로 간다.
+Serve 유지와 Operator 보류의 근거는 [네트워크 선택](../../../tradeoff/05-networking.md)에 둔다.
+Serve 호스트 위치·장애 처리는 미결이며 Traefik replica 증가만으로 해결되지 않는다.
+
+## 2026-09-08 배치 변경 확인
+
+실제 worker2 고정 1개에서 홈 워커 두 대 허용·2개·분산 권장으로 변경했다.
+초기 `--reuse-values` + hostname `null`은 기존 nodeSelector를 제거하지 못했다.
+현재 사용자 values 전체에서 nodeSelector를 비운 뒤 같은 차트 버전에 `--reset-values`로 다시 전달하여 해결했다.
+`--reset-values`만 단독으로 실행하면 기존 사용자 설정을 잃을 수 있으므로 이 설명을 단독 적용 명령으로 해석하지 않는다.
+
+최종 사용자 출력: worker1·worker2 각각 Traefik 1개 Ready/Running, ClusterIP 10.104.208.56 유지.
+로컬 values의 개수·배치 조건을 이 결과에 맞췄다. 설치 전체 값의 완전한 동기화나 HTTP/SSE 검증 완료를 의미하지 않는다.
+롤링 교체 중 쏠림과 단일 Pod 재생성 결과는 [트레이드오프 기록](../../../tradeoff/07-service-replicas.md)에 남겼다.
