@@ -10,7 +10,7 @@ Go Gateway·dispatcher·업로드 자동화의 개발/배포는 보류한다. �
 [AWS GPU Terraform 준비](terraform/envs/prod/README.md)를 추가했다. 아직 실제 AWS 생성·GPU 조인·vLLM 배포는 하지 않았다.
 서울 GPU 할당량은 증가 요청 대기 중이며 실제 입력/비용/접근 검토 후 생성 여부를 별도로 승인받는다.
 할당량이 승인돼도 홈 준비가 끝날 때까지 EC2는 생성하지 않는다.
-2026-09-09 사용자 출력으로 [홈 현황 수집·문서화](docs/cluster-inventory.md)를 완료했다. 노드 3개 Ready, PV/PVC 없음, Gateway/HTTPRoute 없음, argocd namespace의 Application 없음. 다음은 최소 모니터링 설계다.
+2026-09-09 초기 [홈 현황 수집](docs/cluster-inventory.md) 이후 사용자 출력에서 모니터링 Application의 Synced/Healthy, Prometheus PVC Bound와 Grafana 대시보드 표시를 확인했다. 다음은 H2 CPU 모의 서빙/SSE 경로다.
 
 ## H1 최소 모니터링 선언
 
@@ -33,14 +33,28 @@ retentionSize도 worker2 디스크 고갈을 완전히 막지는 않으며, 실�
 2026-09-09 사용자 제공 출력에서 Grafana 본체가 limit 256Mi 상태로 OOMKilled(137),
 05:56:52 UTC에 종료되고 직후 port-forward가 끊긴 것을 확인했다. Grafana 본체만
 memory request 128Mi → 256Mi, limit 256Mi → 512Mi로 조정했다. CPU·sidecar는 유지한다.
-이 값은 다음 검증 시작점이며 충분함을 보장하지 않는다. Git 반영·Argo 수동 Sync 후 실제
-적용값, 대시보드 사용 중 메모리·재시작 여부를 확인해야 한다. 선언 수정은 배포 완료가 아니다.
+사용자 후속 출력에서 request 256Mi / limit 512Mi 적용과 새 Grafana Pod의 약 7분간
+재시작 0회를 확인했다. 이는 장시간 안정성 보장이 아니다.
+
+### H1 수집 범위와 보류 대상 — 2026-09-09
+
+- 사용자 Targets 화면에서 Grafana·API server·CoreDNS·세 노드 kubelet/cAdvisor의 UP을 확인했다.
+- node-exporter·kube-state-metrics·Prometheus 자체 수집은 선언에 유지한다. 제공된 화면만으로 이들의 모든 target 상태를 검증한 것은 아니다.
+- controller-manager·scheduler·etcd 각 1개, kube-proxy 3개는 connection refused였다. CP의 실제 listen 주소는 모두 127.0.0.1이며 kube-proxy 설정은 기본 주소를 사용한다.
+- 사용자 승인에 따라 위 4종류의 ServiceMonitor·수집용 Service와 관련 기본 알림/recording rule을 H1에서 제외한다. K8s 컴포넌트 자체는 중지하지 않는다.
+- CP의 UFW는 inactive, Cilium 정책 조회는 0개, hostFirewall은 false였다. 이를 이유로 메트릭 포트를 개방하거나 UFW/Host Firewall을 활성화하지 않는다. 다른 계층의 방화벽 유무는 미확인이다.
+- etcd 내부 지연·scheduler/controller 내부 성능·kube-proxy 내부 메트릭은 관측 공백이다. 관련 장애 실험 전에 접근 통제와 probe를 포함해 수집 경로를 별도 설계한다.
+- 이번 보류 변경은 로컬 선언만 수정했다. 렌더 차이는 해당 수집용 Service 4개, ServiceMonitor 4개, PrometheusRule 5개, 전용 대시보드 ConfigMap 4개 제거뿐이다. commit/push 후 Argo Diff에서도 같은 범위인지 확인하고 수동 Sync한다. 기존 리소스 삭제에는 선택적 Prune이 필요하며, PVC·Secret·CRD·다른 리소스가 삭제 대상이면 중단한다. 자동 Prune은 켜지 않는다. 기본 노드·파드 대시보드는 유지한다.
+- Sync 후 의도한 4종류가 Targets에서 제외되는지, 나머지 대상은 UP인지 확인한다. 대상 제거는 해당 컴포넌트의 건강함을 증명하지 않는다. Prometheus Pod 교체 후 데이터 유지 검증은 아직 별도 잔여 항목이다.
+
+선택 이유는 루트 `tradeoff/04-observability.md`에 기록한다.
 
 Argo CD는 외부 차트와 이 저장소의 values를 함께 읽으며 `feat/monitoring-stack`을
 추적한다. 자동 sync/prune은 설정하지 않았다. 따라서 Git push만으로 배포되지 않으며,
 실제 홈 context·StorageClass·worker2 디스크 여유·Argo 소유권을 확인한 뒤 Application
-등록 및 수동 Sync를 별도 요청으로 진행한다. 현재 로컬 context는 minikube이므로 적용
-대상이 아니다.
+등록 및 수동 Sync를 별도 요청으로 진행한다. 노트북에는 별도 kubeconfig
+`~/.kube/persona-home.yaml`의 `persona-home` context를 등록했다. 기본 context를
+가정하지 말고 실제 배포 대상을 매번 명시한다.
 
 최초 홈 배포 전에는 `monitoring` namespace와 `monitoring-grafana-admin` Opaque Secret을
 수동으로 준비한다. Secret은 `admin-user`와 `admin-password` 키를 가져야 하며, 값·매니페스트는
