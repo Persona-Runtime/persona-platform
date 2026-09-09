@@ -34,9 +34,8 @@ raise "mock SSE must target only home workers" unless nodes == ["k8s-worker1", "
 
 container = pod_spec.fetch("containers").find { |item| item["name"] == "mock-sse" } || raise("mock-sse container missing")
 image = container.fetch("image")
-valid_digest = %r{\Aghcr\.io/persona-runtime/persona-mock-sse@sha256:[0-9a-f]{64}\z}
-placeholder = "ghcr.io/persona-runtime/persona-mock-sse@sha256:REPLACE_WITH_LINUX_AMD64_MANIFEST_DIGEST"
-raise "image must be a GHCR digest or the explicit deployment placeholder" unless image == placeholder || valid_digest.match?(image)
+expected_image = "ghcr.io/persona-runtime/persona-mock-sse@sha256:c467296f090f3868d32d82dda92ab2aaf75b096bae1ae0a0c1e1fde4bf58666d"
+raise "image must use the verified linux/amd64 child manifest digest" unless image == expected_image
 raise "container port must be 8080" unless container.dig("ports", 0, "containerPort") == 8080
 raise "grace period must be passed to the server" unless container.dig("env", 0, "name") == "MOCK_SSE_GRACE_PERIOD_SECONDS" && container.dig("env", 0, "value") == "5"
 security = container.fetch("securityContext")
@@ -66,7 +65,7 @@ raise "Route must target the mock Service" unless route.dig("spec", "rules", 0, 
 application = YAML.load_file(application_path)
 raise "Argo Application kind is invalid" unless application["kind"] == "Application"
 app_spec = application.fetch("spec")
-raise "Argo Application must target the main branch" unless app_spec.dig("source", "targetRevision") == "main"
+raise "Argo Application must target the develop branch" unless app_spec.dig("source", "targetRevision") == "develop"
 raise "Argo Application must point to the mock SSE overlay" unless app_spec.dig("source", "path") == "kustomize/overlays/prod/mock-sse"
 raise "Argo Application must not enable sync automation" if app_spec.key?("syncPolicy")
 
@@ -75,5 +74,4 @@ raise "bootstrap Namespace kind is invalid" unless namespace["kind"] == "Namespa
 raise "bootstrap Namespace name is invalid" unless namespace.dig("metadata", "name") == "persona-mock-sse"
 
 puts "mock SSE Kustomize render and manifest policy checks passed"
-puts "image digest is still an intentional deployment placeholder" if image == placeholder
 RUBY

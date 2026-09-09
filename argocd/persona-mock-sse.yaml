@@ -10,7 +10,7 @@ spec:
   project: default
   source:
     repoURL: https://github.com/Persona-Runtime/persona-platform.git
-    targetRevision: main
+    targetRevision: develop
     path: kustomize/overlays/prod/mock-sse
   destination:
     server: https://kubernetes.default.svc

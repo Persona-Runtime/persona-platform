@@ -44,9 +44,9 @@ spec:
                       - k8s-worker2
       containers:
         - name: mock-sse
-          # This is deliberately not deployable until the GHCR linux/amd64 manifest
-          # digest is recorded. Never substitute a tag (including "latest").
-          image: ghcr.io/persona-runtime/persona-mock-sse@sha256:REPLACE_WITH_LINUX_AMD64_MANIFEST_DIGEST
+          # The verified linux/amd64 child manifest. Never substitute a tag (including "latest")
+          # or the parent OCI index digest.
+          image: ghcr.io/persona-runtime/persona-mock-sse@sha256:c467296f090f3868d32d82dda92ab2aaf75b096bae1ae0a0c1e1fde4bf58666d
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
