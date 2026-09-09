@@ -9,52 +9,31 @@ LLM TTFT·생성 성능이 아니다.
 - Argo 배포 경로는 `kustomize/overlays/prod/mock-sse`, Application은
   `argocd/persona-mock-sse.yaml`이다. 테스트 namespace는 Secret보다 먼저
   `bootstrap/namespaces/persona-mock-sse.yaml`로 준비하며 Argo overlay에는 넣지 않는다.
-- Deployment의 이미지 placeholder는 실제 linux/amd64 GHCR manifest digest가 기록되기
-  전까지 배포 금지 상태다. tag만 지정하거나 `latest`를 쓰지 않는다.
+- Deployment는 검증된 linux/amd64 child manifest digest를 직접 고정한다. tag, `latest`,
+  또는 parent OCI index digest로 바꾸지 않는다.
 - Traefik Service의 HTTP 포트 `80`은 클라이언트가 연결하는 Service 포트이고, Gateway
   listener `8000`은 Traefik의 내부 HTTP entryPoint 포트다.
 - 이미지와 registry credential은 Git에 저장하지 않는다. private GHCR package에는
   namespace-local `persona-mock-sse-ghcr` pull Secret만 참조한다.
 
-## 이미지 계약과 로컬 확인
+## 고정 이미지 계약
 
-먼저 `persona-ops-lab`의 모의 서버 변경을 검토·커밋한다. dirty working tree를 배포
-artifact의 출처로 사용하지 않는다.
+| 항목 | 값 |
+| --- | --- |
+| source commit | `77b82d05c309614ea18a3b88507809c47947cf83` |
+| GHCR tag | `ghcr.io/persona-runtime/persona-mock-sse:77b82d05c309614ea18a3b88507809c47947cf83` |
+| OCI index digest | `sha256:89618ac2adaff3d0caf417288ec258039f54c241a7d12ebc1cf66bddb3d8c978` |
+| 배포용 linux/amd64 child manifest | `sha256:c467296f090f3868d32d82dda92ab2aaf75b096bae1ae0a0c1e1fde4bf58666d` |
 
-```sh
-export MOCK_SSE_REV="$(git -C ../persona-ops-lab rev-parse HEAD)"
-cd ../persona-ops-lab
-docker buildx build --platform linux/amd64 --load --tag persona-mock-sse:local .
-docker run --rm --read-only --user 10001:10001 \
-  --name persona-mock-sse-local -p 18080:8080 persona-mock-sse:local
-```
+이 artifact는 non-root UID/GID `10001:10001`, read-only root filesystem, capability 제거,
+`250m` CPU/`128Mi` 메모리 상한으로 로컬 검증 및 private GHCR push를 마쳤다. 현재 배포
+선언은 위 child manifest를 직접 참조한다. 이 기록을 위해 이미지를 재빌드하거나 재-push하지
+않는다.
 
-별도 터미널에서 health/readiness와 SSE 계약을 확인하고, 장기 스트림 동안 `docker stats
-persona-mock-sse-local`을 여러 번 기록해 idle·peak CPU/메모리를 남긴다. 현재
-`50m/64Mi` request 및 `250m/128Mi` limit은 그 관측과 홈 worker allocatable을 근거로만
-조정한다.
-
-```sh
-curl --fail http://127.0.0.1:18080/healthz
-curl --fail http://127.0.0.1:18080/readyz
-curl --no-buffer --fail-with-body -X POST http://127.0.0.1:18080/mock/chat \
-  -H 'Content-Type: application/json' \
-  --data '{"chunks":2,"interval_ms":100}'
-```
-
-`chunk` 두 개가 순서대로 오고 `done`이 한 번만 와야 한다. `--read-only`가 실패하면
-이미지 원인을 해결한다. root filesystem을 writable로 바꾸는 것은 원인이 확인되고 별도
-검토된 경우에만 허용한다.
-
-검증된 source revision만 private GHCR로 push하고 registry가 보고한 manifest digest를
-Deployment placeholder에 기록한다.
-
-```sh
-docker buildx build --platform linux/amd64 --push \
-  --tag "ghcr.io/persona-runtime/persona-mock-sse:${MOCK_SSE_REV}" .
-docker buildx imagetools inspect \
-  "ghcr.io/persona-runtime/persona-mock-sse:${MOCK_SSE_REV}"
-```
+OCI index에는 amd64 실행 manifest와 그 manifest를 가리키는 attestation manifest가 있다.
+arm64 실행 manifest는 없다. 따라서 arm64 Mac의 기본 pull 실패 원인은 amd64 manifest가
+아니라 arm64 manifest 부재다. amd64 worker는 index digest도 자동 선택할 수 있지만, 이번
+Deployment는 검증 대상을 분명히 하려고 amd64 child manifest를 직접 고정한다.
 
 ## 승인된 최초 배포 순서
 
@@ -111,19 +90,19 @@ kubectl --kubeconfig "$PERSONA_HOME_KUBECONFIG" --context "$PERSONA_HOME_CONTEXT
 
 ### 4. 실제 digest와 Argo Git revision/path 확인
 
-이미지 placeholder를 GHCR manifest digest로 교체하고, 변경을 `main`에 push한다. Argo
-Application은 `main`의 `kustomize/overlays/prod/mock-sse`만 읽는다.
+고정 digest 변경을 `develop`에 push한 뒤, Argo Application이 `develop`의
+`kustomize/overlays/prod/mock-sse`를 읽는지 확인한다.
 
 ```sh
 sh scripts/validate-mock-sse-manifests.sh
 kubectl kustomize kustomize/overlays/prod/mock-sse > /tmp/persona-mock-sse.yaml
 rg -n 'REPLACE_WITH|:latest' /tmp/persona-mock-sse.yaml
-git fetch origin main
-git show origin/main:kustomize/base/mock-sse/deployment.yaml
-git show origin/main:kustomize/overlays/prod/mock-sse/kustomization.yaml
+git fetch origin develop
+git show origin/develop:kustomize/base/mock-sse/deployment.yaml
+git show origin/develop:kustomize/overlays/prod/mock-sse/kustomization.yaml
 ```
 
-정적 검증은 성공해야 하며, `rg`는 출력이 없어야 한다. `origin/main`의 Deployment가 같은
+정적 검증은 성공해야 하며, `rg`는 출력이 없어야 한다. `origin/develop`의 Deployment가 같은
 digest를 포함하고 overlay path가 존재하는 것을 확인한다.
 
 ### 5. 서버 측 dry-run
