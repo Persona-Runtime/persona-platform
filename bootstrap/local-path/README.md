@@ -1,5 +1,7 @@
 # local-path 부트스트랩
 
+저장 방식과 공유 저장소 비교는 [트레이드오프 문서](../../../tradeoff/03-input-and-storage.md)에 모았다.
+
 재구축 후 **가장 먼저** 설치한다. Kubernetes 기본 기능이 아니라 별도 컴포넌트다.
 
 ## 왜 이 설정이어야 하는가
@@ -21,11 +23,11 @@
 | `allowVolumeExpansion: false` | PVC 크기는 영구 고정. 나중에 못 늘린다 |
 | **용량 미강제** | 요청 용량은 강제되지 않는다. 실제 상한은 앱 설정(`retention.size` 등)뿐이다 |
 
-자세한 운영 규칙은 `../../docs/storage-and-recovery.md` 참고.
+현재 저장소 책임·복구 및 배치 원칙은 [통합 기획](../../../docs/current-plan.md)을 참고한다.
 
 ## 노드 배치
 
-| 노드 | 워크로드 |
-| --- | --- |
-| `k8s-worker1` | CNPG, Qdrant, private corpus, ingestion, Argo CD |
-| `k8s-worker2` | Prometheus, Tempo, Grafana, OTel Collector, Traefik, gateway, web |
+과거의 서비스/관측 전용 노드 표는 폐기했다. 일반 앱은 두 홈 워커가 배치 후보다.
+저장소별 최초 노드는 후속 결정이며 기존 PV는 현재 바인딩을 확인해야 한다.
+변경 근거는 [공유 워커 비교](../../../tradeoff/02-worker-placement.md)를 따른다.
+이 문서 정리로 기존 볼륨·매니페스트가 이동하거나 변경되지는 않는다.

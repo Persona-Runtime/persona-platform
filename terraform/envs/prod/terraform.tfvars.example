@@ -1,0 +1,12 @@
+# EXAMPLE ONLY: all identifiers/addresses below are synthetic, not a deployable configuration.
+# Copy to ignored terraform.tfvars and replace only after checking the actual account/network.
+expected_account_id  = "000000000000"
+ami_id               = "ami-00000000000000000"
+availability_zone    = "ap-northeast-2a"
+vpc_cidr             = "10.80.0.0/16"
+ssh_public_key       = "ssh-ed25519 REPLACE_WITH_YOUR_PUBLIC_KEY"
+bootstrap_ssh_cidr   = null # For initial SSH, explicitly set your current public IPv4/32.
+tailscale_peer_cidrs = []   # Optional: home peer's public IPv4/32, never its 100.x address.
+
+# Keep false until review and explicit approval to proceed. Not a power on/off switch.
+launch_review_confirmed = false
