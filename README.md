@@ -28,7 +28,13 @@ Prometheus는 worker2의 `local-path` 20 GiB PVC를 사용하며 7일 또는 15 
 `local-path`의 PVC 요청 크기는 실제 디스크 사용량을 강제하지 않는다. 따라서 15 GB
 retentionSize도 worker2 디스크 고갈을 완전히 막지는 않으며, 실제 배포 후에는 노드 디스크
 여유와 Prometheus TSDB 크기를 함께 관측한다. 상주 구성의 초기 메모리 request는 node-exporter
-3개와 Grafana sidecar를 포함해 약 1.8 GiB이며, 이는 실측 전 시작 예산이다.
+3개와 Grafana sidecar·Prometheus config reloader를 포함해 약 2.0 GiB이며, 이는 실측 사용량이 아닌 예약 예산이다.
+
+2026-09-09 사용자 제공 출력에서 Grafana 본체가 limit 256Mi 상태로 OOMKilled(137),
+05:56:52 UTC에 종료되고 직후 port-forward가 끊긴 것을 확인했다. Grafana 본체만
+memory request 128Mi → 256Mi, limit 256Mi → 512Mi로 조정했다. CPU·sidecar는 유지한다.
+이 값은 다음 검증 시작점이며 충분함을 보장하지 않는다. Git 반영·Argo 수동 Sync 후 실제
+적용값, 대시보드 사용 중 메모리·재시작 여부를 확인해야 한다. 선언 수정은 배포 완료가 아니다.
 
 Argo CD는 외부 차트와 이 저장소의 values를 함께 읽으며 `feat/monitoring-stack`을
 추적한다. 자동 sync/prune은 설정하지 않았다. 따라서 Git push만으로 배포되지 않으며,
