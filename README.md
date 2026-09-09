@@ -12,6 +12,50 @@ Go Gateway·dispatcher·업로드 자동화의 개발/배포는 보류한다. �
 할당량이 승인돼도 홈 준비가 끝날 때까지 EC2는 생성하지 않는다.
 2026-09-09 사용자 출력으로 [홈 현황 수집·문서화](docs/cluster-inventory.md)를 완료했다. 노드 3개 Ready, PV/PVC 없음, Gateway/HTTPRoute 없음, argocd namespace의 Application 없음. 다음은 최소 모니터링 설계다.
 
+## H1 최소 모니터링 선언
+
+[kube-prometheus-stack](https://github.com/prometheus-community/helm-charts) `89.2.0`을
+고정해 Prometheus·Grafana·Prometheus Operator·kube-state-metrics·node-exporter만
+선언했다. 값은 [monitoring-stack.yaml](helm/values/monitoring-stack.yaml), Argo CD
+Application은 [monitoring-stack.yaml](argocd/monitoring-stack.yaml)에 있다.
+
+Prometheus는 worker2의 `local-path` 20 GiB PVC를 사용하며 7일 또는 15 GB 중 먼저
+도달하는 시점까지 보존한다. Grafana DB는 영구화하지 않고 Git의 dashboard/data source
+선언으로 복구한다. Alertmanager·Tempo·Loki·Ingress·Gateway·LoadBalancer·NodePort는 H1에
+포함하지 않는다. Grafana와 Prometheus 접근 검증은 이후 홈 클러스터에서 localhost
+`port-forward`로만 시작한다.
+
+`local-path`의 PVC 요청 크기는 실제 디스크 사용량을 강제하지 않는다. 따라서 15 GB
+retentionSize도 worker2 디스크 고갈을 완전히 막지는 않으며, 실제 배포 후에는 노드 디스크
+여유와 Prometheus TSDB 크기를 함께 관측한다. 상주 구성의 초기 메모리 request는 node-exporter
+3개와 Grafana sidecar를 포함해 약 1.8 GiB이며, 이는 실측 전 시작 예산이다.
+
+Argo CD는 외부 차트와 이 저장소의 values를 함께 읽으며 `feat/monitoring-stack`을
+추적한다. 자동 sync/prune은 설정하지 않았다. 따라서 Git push만으로 배포되지 않으며,
+실제 홈 context·StorageClass·worker2 디스크 여유·Argo 소유권을 확인한 뒤 Application
+등록 및 수동 Sync를 별도 요청으로 진행한다. 현재 로컬 context는 minikube이므로 적용
+대상이 아니다.
+
+최초 홈 배포 전에는 `monitoring` namespace와 `monitoring-grafana-admin` Opaque Secret을
+수동으로 준비한다. Secret은 `admin-user`와 `admin-password` 키를 가져야 하며, 값·매니페스트는
+Git에 저장하지 않는다. 이 bootstrap이 끝난 뒤에만 Application을 등록하고 수동 Sync한다.
+비밀번호를 교체하면 Secret 갱신 후 Grafana Pod를 명시적으로 재시작한다.
+
+로컬 렌더 검증은 다음과 같이 수행한다.
+
+```bash
+helm pull oci://ghcr.io/prometheus-community/charts/kube-prometheus-stack \
+  --version 89.2.0 --destination /tmp
+tar -xzf /tmp/kube-prometheus-stack-89.2.0.tgz -C /tmp
+helm lint /tmp/kube-prometheus-stack -f helm/values/monitoring-stack.yaml
+helm template monitoring-stack /tmp/kube-prometheus-stack \
+  --namespace monitoring -f helm/values/monitoring-stack.yaml > /tmp/monitoring-rendered.yaml
+```
+
+차트 기본 selector는 `release: monitoring-stack`이다. `persona-ops-lab`에서 추가하는
+`ServiceMonitor`와 `PrometheusRule`은 이 라벨을 포함해야 수집·평가된다. 대시보드와 규칙의
+실제 작성은 ops-lab 책임이다.
+
 ## 현재 배치 원칙
 
 - 홈 CP 1 + 공용 홈 워커 2 + AWS GPU 워커 1의 단일 Kubernetes 클러스터.
