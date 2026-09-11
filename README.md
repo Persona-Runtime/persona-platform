@@ -48,28 +48,27 @@ weight 100은 배치 확률 100%라는 뜻이 아니다. 노드 여유가 생겼
 - CPU·메모리 `requests`는 스케줄러가 노드에 자리를 배정할 때 사용하는 기준이다.
   `limits`는 실행 중 사용량을 제한한다. CPU 제한은 throttling, 메모리 제한은 OOM에 영향을 줄 수 있다.
   현재 수치는 초기 예산이며 부하 실측으로 확정한 값이 아니다.
-- [커스텀 PriorityClass](bootstrap/priorityclasses/priorityclasses.yaml)는
-  `persona-critical=1000000`, `persona-standard=1000`, `persona-low=100`이다.
-  현재 DB 선언은 critical, Gateway·Web·Traefik 선언은 low를 참조한다. migration Job에는 명시하지 않았다.
-- `preemptionPolicy`를 생략해 기본 선점 정책이 적용된다. 스케줄링할 공간이 부족하면
-  조건에 따라 낮은 우선순위 Pod를 내보내고 높은 우선순위 Pod의 자리를 확보할 수 있다.
-  `low`도 별도 기본 클래스가 없는 일반 Pod의 우선순위 0보다 높다.
-- PriorityClass를 정의하는 것만으로 모든 관측 도구에 적용되지는 않는다. 현재 Prometheus values에는
-  해당 클래스 참조가 없다. 따라서 **“관측·DB가 무조건 마지막까지 살아남는다”는 보장은 없다.**
-  참조하는 클래스가 실제 클러스터에 존재하는지도 배포 전에 확인해야 한다.
+- **2026-09-11 승인: 커스텀 PriorityClass 적용을 보류한다.** DB·Gateway·Web·migration과
+  Traefik values는 커스텀 클래스를 참조하지 않는다. 기본 구성의 자원 부족을 관찰한 뒤
+  우선순위를 실험 변수로 추가한다. 특정 앱을 먼저 살린다는 보장은 두지 않는다.
+- [기존 클래스 정의](bootstrap/priorityclasses/priorityclasses.yaml)는 미적용 참고용으로 남긴다.
+  Kubernetes 시스템 우선순위와 local-path helper의 `system-node-critical`은 유지한다.
+  이는 클러스터 전체 선점 기능을 끄는 설정이 아니다. 이미 배포된 Traefik의 우선순위 변경도
+  별도 CP 적용·검증이 필요하며, 기존 PriorityClass 리소스를 삭제하지 않는다.
 - 현재 Postgres 선언은 메모리 request와 limit만 같고 CPU limit이 없어, 이 설정만으로
   Guaranteed QoS가 되지 않는다. PriorityClass와 QoS는 서로 다른 개념이다.
 
 ### 업데이트 정책 — 스케줄링과 구분
 
-Gateway·Web에 `RollingUpdate`, `maxSurge: 0`, `maxUnavailable: 1`을 명시했다.
-추가 Pod를 먼저 띄우기보다 기존 Pod 수를 줄이고 교체하는 선택이다.
+- **Gateway: replica 1, `RollingUpdate`, `maxSurge: 1`, `maxUnavailable: 0`.**
+  새 Pod가 준비된 뒤 기존 Pod를 내린다. 새 Pod를 배치할 자원이 없으면 기존 Pod를 유지하고
+  업데이트를 기다린다. 현재 추가 Pod의 requests는 CPU 50m·메모리 128Mi이며,
+  실제 사용량·종료 중 Pod·DB 연결의 일시 증가까지 여유를 확인한다.
+- Web: replica 2, `maxSurge: 0`, `maxUnavailable: 1` 유지. 모의 SSE의 교체 방식도 변경하지 않는다.
+- 요청 종료 처리·라우팅 반영 지연·노드 및 DB 장애까지 포함한 **무중단 보장은 아니다.**
+  실제 롤아웃에서 readiness와 연속 요청 성공을 확인해야 한다.
 
-- Gateway는 replica 1개라 업데이트 중 준비된 API가 없는 구간이 생길 수 있다.
-- Web은 replica 2개라 정상적인 교체 중 하나를 유지하도록 하지만, 다른 장애까지 포함한 무중단 보장은 아니다.
-
-**커스텀 우선순위·선점 유지 여부와 Gateway 업데이트 중 중단 허용 여부는 배포 전 재확인할 판단 사항이다.**
-이 설명 추가는 기존 배포 옵션을 변경하거나 새 정책을 승인한 것이 아니다.
+위 정책은 사용자 승인으로 선언에 반영했으며, 홈 클러스터 적용·실측은 아직 수행하지 않았다.
 
 선언 위치: [Postgres](kustomize/base/persona-db/cluster.yaml),
 [Gateway](kustomize/base/persona-gateway/deployment.yaml),
