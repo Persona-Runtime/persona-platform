@@ -1,0 +1,91 @@
+# Alembic migration을 Gateway와 분리해 실행한다.
+#
+# 왜 분리하는가: Gateway 시작 명령에 migration을 넣으면 replica마다 같은 DDL이 경쟁하고,
+# 앱이 뜨지 못하는 이유가 migration 실패인지 DB 장애인지 구분되지 않는다. Gateway 이미지는
+# 앱 시작 시 migration을 실행하지 않도록 만들어져 있고, 이 Job이 그 계약의 반대편이다.
+#
+# 왜 PreSync hook이 아닌가: DB가 아직 없는 첫 설치에서 migration부터 돌게 된다.
+# 이번에는 사람이 단계별로 진행한다 — DB 준비를 눈으로 확인한 뒤 이 Job을 Sync한다.
+#
+# 이름에 alembic revision이 들어간다. Job은 불변 필드가 많아 같은 이름으로 수정할 수 없다.
+# revision이 이름에 있으면 새 migration은 자연히 새 Job이 되고, 이전 Job과 로그가 남아
+# 실패 원인을 나중에도 볼 수 있다. 같은 revision을 다시 돌려야 하면 로그를 확인한 뒤
+# 명시적으로 삭제하고 재생성한다.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: persona-migrate-0001-persona-minimal
+  labels:
+    app.kubernetes.io/name: persona-migrate
+    app.kubernetes.io/component: database-migration
+    app.kubernetes.io/part-of: persona-platform
+    persona.runtime/alembic-revision: "0001-persona-minimal"
+spec:
+  # 실패를 재시도로 덮지 않는다. DDL 실패는 사람이 로그를 보고 판단할 문제다.
+  backoffLimit: 0
+  # 잠금 대기 등으로 영원히 매달리지 않게 상한을 둔다. migration 자체는 수 초면 끝난다.
+  activeDeadlineSeconds: 600
+  # 완료된 Job과 로그를 바로 지우지 않는다. ttlSecondsAfterFinished를 두지 않는 이유다.
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: persona-migrate
+        app.kubernetes.io/component: database-migration
+        app.kubernetes.io/part-of: persona-platform
+    spec:
+      restartPolicy: Never
+      # migration은 Kubernetes API를 쓰지 않는다.
+      automountServiceAccountToken: false
+      imagePullSecrets:
+        - name: persona-app-ghcr
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - k8s-worker1
+                      - k8s-worker2
+      containers:
+        - name: alembic
+          # Gateway와 완전히 같은 이미지를 쓴다. migration 코드와 앱 코드가 갈라지면
+          # readiness가 요구하는 revision과 실제 적용된 revision이 어긋난다.
+          # 검증된 linux/amd64 child manifest다. tag나 parent index digest로 바꾸지 않는다.
+          image: ghcr.io/persona-runtime/persona-minimal-api@sha256:922ae043feaa1a893336816c38ac17f448aa96c44ba06983652181784f52c2f6
+          imagePullPolicy: IfNotPresent
+          command: ["/app/.venv/bin/alembic"]
+          args: ["upgrade", "head"]
+          env:
+            # migrator 전용 자격증명만 준다. runtime Secret을 참조하지 않는다.
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: persona-gateway-migrator
+                  key: DATABASE_URL
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        # read-only rootfs에서 쓰기가 필요한 유일한 경로다.
+        - name: tmp
+          emptyDir: {}

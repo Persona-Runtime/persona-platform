@@ -1,0 +1,20 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: persona-app
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: application
+spec:
+  gatewayClassName: traefik
+  listeners:
+    - name: http
+      protocol: HTTP
+      # Gateway listener는 Traefik의 entryPoint에 붙는다. Traefik Service의 HTTP 포트 80과
+      # 다른 값이며, 이 저장소의 Traefik HTTP entryPoint는 8000이다.
+      port: 8000
+      # hostname을 지정하지 않는다. Tailnet 진입 주소가 아직 확정되지 않았고,
+      # 임의 주소를 지어내면 붙지 않는 라우팅이 선언으로 남는다.
+      allowedRoutes:
+        namespaces:
+          from: Same

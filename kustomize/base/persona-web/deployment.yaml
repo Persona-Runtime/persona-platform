@@ -1,0 +1,118 @@
+# 정적 번들을 제공하는 비루트 Nginx. 이 컨테이너는 /v1을 프록시하지 않고 404로 돌려준다.
+# /v1 라우팅은 Traefik HTTPRoute의 책임이다.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: persona-web
+  labels:
+    app.kubernetes.io/name: persona-web
+    app.kubernetes.io/component: web
+    app.kubernetes.io/part-of: persona-platform
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # 두 대이므로 한 대씩 교체해도 서비스가 끊기지 않는다. 메모리가 빠듯해
+      # 새 파드를 먼저 띄우지 않는다.
+      maxSurge: 0
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: persona-web
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: persona-web
+        app.kubernetes.io/component: web
+        app.kubernetes.io/part-of: persona-platform
+    spec:
+      automountServiceAccountToken: false
+      imagePullSecrets:
+        - name: persona-app-ghcr
+      priorityClassName: persona-low
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - k8s-worker1
+                      - k8s-worker2
+        podAntiAffinity:
+          # 두 대를 다른 노드에 두려 하되 강제하지는 않는다. 워커가 두 대뿐이라
+          # required로 두면 한 노드가 빠질 때 남은 한 대도 재배치되지 못한다.
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: persona-web
+      containers:
+        - name: web
+          # 검증된 linux/amd64 child manifest. 소스 커밋 95d7a55 기준이며
+          # 검증 기록은 docs/ghcr-publication-2026-09-11.md에 있다.
+          image: ghcr.io/persona-runtime/persona-web@sha256:26e6f0ed439ee02374be3b726bb34ee1a8fccbbeace60219084d9acbd3caf968
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          resources:
+            # 초기 제안값이다. 실측으로 확정한 수치가 아니다.
+            # 정적 파일만 내보내므로 번들 크기(약 200 KB)와 nginx 워커 기준으로 작게 잡았다.
+            requests:
+              cpu: 20m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            # nginx-unprivileged 이미지의 기본 사용자다.
+            runAsUser: 101
+            runAsGroup: 101
+          # 세 probe 모두 /healthz다. 이 컨테이너에는 외부 의존성이 없어
+          # 준비 상태와 생존 상태를 가를 기준이 따로 없다.
+          # 아래 수치는 넉넉하게 잡은 초기값이며, 실제 기동 시간을 재기 전까지
+          # 최적값이라고 말하지 않는다.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 2
+            timeoutSeconds: 2
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        # nginx.pid와 client_temp·proxy_temp 등 모든 임시 경로가 /tmp 아래에 있다.
+        # 컨테이너에서 실측해 확인한 내용이며, read-only rootfs에서 필요한 유일한 쓰기 경로다.
+        - name: tmp
+          emptyDir: {}

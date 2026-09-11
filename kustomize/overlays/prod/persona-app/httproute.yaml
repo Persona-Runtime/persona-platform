@@ -1,0 +1,33 @@
+# 같은 진입 주소에서 /v1은 API로, 나머지는 웹으로 보낸다.
+#
+# 경로를 다시 쓰지 않는다(URLRewrite 필터 없음). Python API가 실제로 /v1/me,
+# /v1/personas 를 받는다. 접두사를 떼면 404가 된다.
+#
+# Gateway API는 더 긴 path prefix를 먼저 맞춘다. 따라서 /v1은 / 보다 우선한다.
+# 이 우선순위는 규칙 순서가 아니라 명세가 정하는 것이며, 별도 priority 필드는 없다.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: persona-app
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: application
+spec:
+  parentRefs:
+    - name: persona-app
+      sectionName: http
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /v1
+      backendRefs:
+        - name: persona-gateway
+          port: 8080
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: persona-web
+          port: 8080
