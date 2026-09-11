@@ -14,10 +14,7 @@ curl -s https://api.github.com/repos/kubernetes-sigs/gateway-api/releases/latest
   | grep '"tag_name"'
 kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/<TAG>/standard-install.yaml
 
-# 2) PriorityClass
-kubectl apply -f ../priorityclasses/priorityclasses.yaml
-
-# 3) Traefik
+# 2) Traefik — 커스텀 PriorityClass 설치는 보류
 helm repo add traefik https://traefik.github.io/charts
 helm repo update
 helm search repo traefik/traefik --versions | head -3
@@ -50,7 +47,11 @@ helm install traefik traefik/traefik --version <VER> \
 | `providers.kubernetesIngress` / `kubernetesCRD` | false | 진입 경로를 하나로 고정 |
 | `gateway.enabled` | false | Gateway 리소스는 우리가 선언·버전관리 |
 | 배치·replica | 2개, 두 홈 워커가 후보, 분산 권장 | 사용자 출력으로 두 워커 각각 Ready 1개 확인 |
-| `priorityClassName` | `persona-low` | 압박 시 관측·데이터보다 먼저 축출 |
+| `priorityClassName` | 빈 문자열 | 커스텀 우선순위 튜닝은 자원 압박 측정 뒤로 보류 |
+
+2026-09-11 승인에 따라 로컬 values의 커스텀 우선순위를 해제했다. 실제 Helm 릴리스와
+실행 중인 Pod에 반영된 것은 아니다. 후속 CP 작업에서 기존 values와 렌더 결과를 비교한 뒤
+승인된 Helm 업데이트로 적용한다. 기존 PriorityClass 리소스와 Kubernetes 시스템 우선순위는 삭제하지 않는다.
 
 ## 함정: 스키마 검증은 섹션별로만 걸린다
 
