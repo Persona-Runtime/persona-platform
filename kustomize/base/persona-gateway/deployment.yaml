@@ -14,9 +14,10 @@ spec:
   strategy:
     type: RollingUpdate
     rollingUpdate:
-      # 워커 메모리가 빠듯하다. 새 파드를 띄우기 전에 기존 파드를 내린다.
-      maxSurge: 0
-      maxUnavailable: 1
+      # 새 파드가 준비된 뒤 기존 파드를 내린다. 자리가 없으면 기존 파드를 유지하며 기다린다.
+      # 업데이트 중 추가 파드의 자원 여유가 필요하며, 진행 중 요청의 무중단까지 보장하지 않는다.
+      maxSurge: 1
+      maxUnavailable: 0
   selector:
     matchLabels:
       app.kubernetes.io/name: persona-gateway
@@ -34,7 +35,6 @@ spec:
         - name: persona-app-ghcr
       # Uvicorn graceful shutdown이 25초다. 그보다 길게 준다.
       terminationGracePeriodSeconds: 30
-      priorityClassName: persona-low
       securityContext:
         seccompProfile:
           type: RuntimeDefault

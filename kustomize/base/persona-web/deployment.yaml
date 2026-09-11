@@ -30,7 +30,6 @@ spec:
       automountServiceAccountToken: false
       imagePullSecrets:
         - name: persona-app-ghcr
-      priorityClassName: persona-low
       securityContext:
         seccompProfile:
           type: RuntimeDefault

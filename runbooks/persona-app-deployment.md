@@ -67,17 +67,18 @@
 
 ---
 
-## 배포 전에 아직 정하지 않은 것
+## 승인된 배치·업데이트 기준선
 
-아래 두 가지는 **이 런북이 결정하지 않는다.** 선언에 값이 들어 있다는 것은 지금의 기준선이지
-승인된 정책이라는 뜻이 아니다. 홈 적용 전에 따로 판단한다.
-[README의 "스케줄링 전략"](../README.md)도 같은 항목을 재확인 대상으로 남겨 두었다.
+2026-09-11 사용자 승인으로 아래를 선언에 반영했다. 실제 배포·무중단 검증 완료를 뜻하지 않는다.
+[README의 "스케줄링 전략"](../README.md)에 이유와 대가를 정리한다.
 
-- **커스텀 PriorityClass와 선점 정책을 그대로 갈지.** `persona-critical`/`persona-low`를 쓰고
-  `preemptionPolicy`를 생략해 기본 선점이 적용된다. 관측 스택 일부는 아직 클래스를 참조하지
-  않아 "데이터·관측이 마지막까지 살아남는다"는 보장이 서 있지 않다.
-- **Gateway 업데이트 중 중단 구간을 받아들일지.** replica 1 + `maxSurge: 0`이라 교체 중
-  준비된 API가 없는 순간이 생긴다. 허용할지, replica를 늘릴지, `maxSurge`를 바꿀지는 미결이다.
+- 커스텀 PriorityClass 적용은 보류한다. 기본 구성의 자원 부족을 먼저 관찰한다.
+  시스템 우선순위·클러스터 선점 기능은 유지하고 기존 클래스 리소스를 삭제하지 않는다.
+- Gateway는 replica 1 + `maxSurge: 1` + `maxUnavailable: 0`으로 새 Pod를 먼저 준비한다.
+  업데이트 중 추가 자원·DB 연결 여유와 실제 요청 종료 동작을 검증해야 한다.
+
+로컬 회귀 검사: `sh scripts/test-persona-scheduling.sh`. 임시 복사본에 우선순위 참조와
+과거 교체 설정을 넣어 검사가 거부하는지 확인한다. 원본 선언과 클러스터는 변경하지 않는다.
 
 ## 0. 현재 상태 확인
 
@@ -107,42 +108,32 @@ kubectl --context=kubernetes-admin@kubernetes -n traefik get svc,deploy -o wide
 kubectl --context=kubernetes-admin@kubernetes get ns
 kubectl --context=kubernetes-admin@kubernetes get applications.argoproj.io -A
 
-# PriorityClass — 없으면 파드가 admission에서 거부된다
-kubectl --context=kubernetes-admin@kubernetes get priorityclass persona-critical persona-low
+# 기존 기본 클래스와 실제 Pod 우선순위 — 이번 선언과 live 상태를 구분한다
+kubectl --context=kubernetes-admin@kubernetes get priorityclass
+kubectl --context=kubernetes-admin@kubernetes get pods -A \
+  -o custom-columns='NAMESPACE:.metadata.namespace,NAME:.metadata.name,CLASS:.spec.priorityClassName,PRIORITY:.spec.priority'
 ```
 
 확인할 것: GatewayClass `traefik` 존재, Traefik HTTP entryPoint `8000`,
-`persona-data`·`persona-app` namespace 부재, 같은 이름의 기존 PV 부재,
-`persona-critical`·`persona-low` PriorityClass 존재.
+`persona-data`·`persona-app` namespace 부재, 같은 이름의 기존 PV 부재.
+기존 namespace·PV가 있으면 소유권과 사용 상태를 확인하며 덮어쓰지 않는다.
 
 **Released 상태의 옛 PV가 남아 있으면** 새 PVC가 그것을 재사용하지 않는다.
 노드에서 수동 정리가 필요한지 `docs/storage-and-recovery.md`를 보고 판단한다.
 
-## 1. bootstrap — PriorityClass, namespace, Secret
+## 1. bootstrap — 기존 우선순위 확인, namespace, Secret
 
-### 1-a. PriorityClass
+### 1-a. 커스텀 PriorityClass 설치 생략
 
-DB는 `persona-critical`, Gateway·Web은 `persona-low`를 참조한다.
-**현재 migration 기준선에서는 별도 우선순위를 지정하지 않는다.** 한 번 돌고 끝나는 작업이라
-지금은 축출 순서를 따로 정할 근거가 없다고 보았고, 검증 스크립트도 그 기준선을 지킨다.
-일회성 Job에는 우선순위가 필요 없다는 일반 규칙은 아니다 — 실행 시간이 길어지거나 자원 압박
-중에 돌려야 하면 다시 볼 항목이다.
+DB·Gateway·Web·migration은 커스텀 클래스를 참조하지 않는다. 과거의
+`bootstrap/priorityclasses/priorityclasses.yaml`은 참고용이며 이 배포에서 apply하지 않는다.
+0단계에서 `globalDefault: true`인 클래스가 확인되면 클래스 미지정 Pod에도 적용될 수 있으므로
+현재 기본값과 실제 Pod 우선순위를 기록한다. 클래스 미지정이 클러스터 전체 선점 해제를 뜻하지 않는다.
 
-**클래스가 없으면 Deployment는 만들어지되 파드 생성이 admission에서 거부된다.**
-파드가 아예 생기지 않아 `describe pod`로는 원인을 볼 수 없다 — 10절의 진단 절차를 따른다.
-
-Traefik이 이미 `persona-low`를 쓰고 있어 Traefik이 떠 있다면 존재할 가능성이 높다.
-그래도 확인하고 넘어간다.
-
-```sh
-kubectl --context=kubernetes-admin@kubernetes get priorityclass persona-critical persona-low
-```
-
-없으면 준비한다. 이 선언은 클러스터 전역 자원이라 Argo가 관리하지 않는다.
-
-```sh
-kubectl --context=kubernetes-admin@kubernetes apply -f bootstrap/priorityclasses/priorityclasses.yaml
-```
+Traefik values도 빈 `priorityClassName`으로 바꿨지만, 기존 Helm 릴리스에는 아직 남아 있을 수 있다.
+이 앱의 Argo Sync는 Traefik을 갱신하지 않는다. 기존 Helm values를 보존·비교하는 별도 CP 작업으로
+적용하고, Deployment와 새 Pod의 실제 우선순위를 확인한다. 이번 절차에서 기존 클래스 리소스나
+시스템 우선순위를 삭제하지 않는다.
 
 ### 1-b. namespace
 
@@ -451,8 +442,9 @@ kubectl --context=kubernetes-admin@kubernetes -n <ns> get deploy <deploy> \
   -o jsonpath='{.status.conditions}' | tr ',' '\n'
 ```
 
-- `no PriorityClass with name ... was found` → 1-a의 PriorityClass 준비를 건너뛴 것이다.
-  Deployment에는 `ReplicaFailure` 조건이 함께 나타난다.
+- `no PriorityClass with name ... was found` → 현재 기준선과 달리 과거 overlay나 주입 설정에
+  클래스 참조가 남았는지 확인한다. 클래스를 새로 설치해 덮지 않는다.
+  Deployment에는 `ReplicaFailure` 조건이 함께 나타날 수 있다.
 - 그 밖의 admission 거부(정책·쿼터 등)도 여기 나온다.
 
 #### 파드는 있는데 `Pending`이다
@@ -521,10 +513,9 @@ kubectl --context=kubernetes-admin@kubernetes -n persona-app get secret persona-
 
 ### 파드가 사라졌을 때 — 축출·선점 확인
 
-`persona-low`는 우리가 쓰는 값 중 가장 낮지만, **그것만으로 먼저 밀려난다고 단정할 수 없다.**
-node-pressure 축출은 QoS와 자원 사용량을, 스케줄러 선점은 우선순위를 함께 본다.
-다른 파드의 우선순위·QoS·실제 사용량과 비교해야 정해진다.
-`persona-low`(100)도 PriorityClass가 없는 일반 파드(0)보다는 높다.
+커스텀 클래스 참조를 없애도 시스템 Pod의 선점이나 자원 압박에 따른 축출은 가능하다.
+다른 파드의 실제 우선순위·requests·사용량과 비교하고 OOM·축출·선점을 구분한다.
+이번 정책은 특정 워크로드의 생존을 보장하지 않는다.
 [README의 "자원과 우선순위"](../README.md)가 이 조건을 설명한다.
 
 무슨 일이 있었는지는 추측하지 말고 이벤트로 확인한다.
@@ -534,11 +525,17 @@ kubectl --context=kubernetes-admin@kubernetes -n persona-app get events --sort-b
   | grep -iE 'evict|preempt|oomkill'
 ```
 
-### 업데이트 중 중단 구간
+### 업데이트 대기·요청 연속성 확인
 
-Gateway는 replica 1개에 `maxSurge: 0`이라 **교체 중 준비된 API가 없는 구간이 생긴다.**
-Web은 2개라 정상 교체 중에는 한 대가 남지만 무중단 보장은 아니다.
-브라우저 검증을 롤아웃 직후에 하면 이 구간에 걸릴 수 있다.
+Gateway는 replica 1개, `maxSurge: 1`, `maxUnavailable: 0`으로 새 Pod가 준비된 뒤 기존 Pod를 내린다.
+추가 Pod의 requests는 CPU 50m·메모리 128Mi다. 실제 메모리 사용량과 종료 중 Pod,
+DB pool 연결 수의 일시 증가까지 확인한다. 자리가 없으면 기존 Pod를 내리지 않고 업데이트가 대기한다.
+새 Pod의 `Pending`·이미지 pull·readiness 실패부터 진단한다.
+
+후속 승인된 롤아웃에서 Traefik 경유 연속 요청의 HTTP 상태와 실패 수를 기록하고,
+새 Pod가 Ready가 된 뒤 기존 Pod가 종료되는지 확인한다. 현재는 이 클러스터 검증을 수행하지 않았다.
+Web은 2개·zero-surge를 유지한다. 두 방식 모두 라우팅 전환·진행 중 요청·DB 및 노드 장애까지
+포함한 무중단 보장은 아니다.
 
 ```sh
 kubectl --context=kubernetes-admin@kubernetes -n persona-app rollout status deploy/persona-gateway

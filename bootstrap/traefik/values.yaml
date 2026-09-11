@@ -60,7 +60,8 @@ gatewayClass:
 ingressClass:
   enabled: false
 
-priorityClassName: persona-low
+# 커스텀 우선순위 튜닝은 측정 뒤로 미룬다. 실제 Helm 적용은 별도 승인 후 진행한다.
+priorityClassName: ""
 
 resources:
   requests:
