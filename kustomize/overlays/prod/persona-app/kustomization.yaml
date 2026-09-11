@@ -1,0 +1,10 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# namespace는 bootstrap/namespaces/persona-app.yaml이 소유한다.
+# Argo overlay에 Namespace를 넣지 않아, 앱 정리가 namespace 삭제로 번지지 않게 한다.
+namespace: persona-app
+resources:
+  - ../../../base/persona-gateway
+  - ../../../base/persona-web
+  - gateway.yaml
+  - httproute.yaml

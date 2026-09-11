@@ -1,0 +1,9 @@
+# 데이터 계층 namespace. 앱과 분리해 두는 이유는 삭제·prune 범위를 가르기 위해서다.
+# 앱 Application을 지우거나 되돌려도 DB와 PVC가 따라서 지워지지 않는다.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: persona-data
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: data
