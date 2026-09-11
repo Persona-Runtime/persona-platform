@@ -141,7 +141,10 @@ AWS GPU 연결과 실제 LLM 서빙은 아직 진행 전이다.
 
 ## 관련 문서
 
-- [전체 기획](../docs/current-plan.md)
-- [실행 계획](../docs/execution-roadmap.md)
-- [설계 트레이드오프](../tradeoff/README.md)
+아래 세 개는 **다섯 레포가 나란히 있는 작업 폴더의 공통 문서**다. 이 레포만 단독으로
+checkout하면 없다. 배포에 필요한 계약은 레포 안의 선언과 런북에서 확인할 수 있다.
+
+- [전체 기획](../docs/current-plan.md) *(외부 작업공간)*
+- [실행 계획](../docs/execution-roadmap.md) *(외부 작업공간)*
+- [설계 트레이드오프](../tradeoff/README.md) *(외부 작업공간)*
 - [AWS GPU 준비](terraform/envs/prod/README.md)

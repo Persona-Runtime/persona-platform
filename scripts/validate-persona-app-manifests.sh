@@ -6,16 +6,26 @@ set -eu
 # 홈 API를 호출하지 않는다. kubectl kustomize로 렌더한 결과만 본다.
 #
 # 검사는 두 부류다. 실패 메시지도 그에 맞춰 다르게 읽어야 한다.
+# 어느 쪽이든 "검사 개수"는 완료 조건이 아니다. 무엇을 왜 지키는지가 기준이다.
 #
-#   [기준선] 지금 합의한 값을 그대로 유지하는지 본다. 자원 수치·replica·probe 값처럼
+#   [기준선] 지금 합의한 값을 그대로 유지하는지 본다. 자원 수치·replica·probe 값·PVC 크기처럼
 #            실측이나 실험으로 **바꿀 수 있는** 것들이다. 바꿀 때는 근거를 남기고 이 검사도
 #            함께 고친다. 실패 메시지는 "현재 기준선과 다르다"로 적는다.
 #            영원히 바꾸면 안 되는 규칙이 아니다.
 #
-#   [안전]   어긴 채로 배포하면 되돌리기 어렵거나 비밀·데이터가 걸리는 것들이다.
-#            digest 고정, 외부 노출 금지, 자격증명 분리, 권한 경계, 수동 Sync 유지 등.
-#            바꾸려면 이 파일을 고치는 것으로 끝내지 말고 별도 판단이 필요하다.
-#            실패 메시지는 단정형으로 적는다.
+#   [안전]   두 가지를 함께 담는다. 태그는 하나지만 성격이 조금 다르다.
+#
+#            (1) 안전 — 어긴 채로 배포하면 되돌리기 어렵거나 비밀·데이터가 걸린다.
+#                digest 고정, 외부 노출 금지, 자격증명 분리, 권한 경계, 수동 Sync 유지,
+#                superuser 비활성, DB prune·삭제 차단.
+#
+#            (2) 연결 계약 — 다른 구성요소와 맞물려 있어 한쪽만 바꾸면 연결이 끊긴다.
+#                컨테이너 포트 8080(이미지가 정한 값), probe 경로(/healthz와 /readyz의 구분이
+#                "DB 장애로 재시작하지 않는다"의 핵심), gatewayClassName과 entryPoint 8000,
+#                /v1·/ 라우팅 규칙, namespace 소유권.
+#
+#            둘 다 이 파일만 고쳐서 끝낼 일이 아니다. 상대편 선언이나 이미지·환경까지
+#            함께 봐야 한다. 실패 메시지는 단정형으로 적는다.
 
 # 검사 도구가 없으면 검사가 조용히 건너뛰어진다. 먼저 확인하고 멈춘다.
 for tool in kubectl ruby mktemp; do
@@ -274,7 +284,8 @@ referenced.uniq.each do |name|
   raise "[안전] 선언되지 않은 PriorityClass를 참조한다: #{name}" unless declared_priority_classes.include?(name)
 end
 raise "[기준선] DB는 persona-critical, stateless는 persona-low여야 한다" unless referenced.uniq.sort == ["persona-critical", "persona-low"]
-# migration Job은 PriorityClass를 지정하지 않는다 — 일회성 작업이라 축출 순서를 다툴 이유가 없다.
+# 현재 migration 기준선은 별도 우선순위를 지정하지 않는 것이다. 일회성 Job에 우선순위가
+# 필요 없다는 일반 규칙이 아니라, 지금은 축출 순서를 정할 근거가 없다고 본 결과다.
 raise "[안전] migration Job에는 PriorityClass를 지정하지 않는다" if jpod["priorityClassName"]
 
 # --- bootstrap namespace --------------------------------------------------
