@@ -43,8 +43,12 @@
 | PostgreSQL | `ghcr.io/cloudnative-pg/postgresql:16.15-standard-bookworm` (index `sha256:fe883b2153a4…`) |
 | CNPG operator | v1.30.0 |
 
-두 패키지는 **private GHCR**이다. 게시 기록과 검증 결과는
-`../../docs/ghcr-publication-2026-09-11.md`에 있다.
+두 패키지는 **private GHCR**이다. 그래서 `persona-app`에 pull Secret이 필요하다.
+
+게시 기록과 검증 결과의 원본은 `docs/ghcr-publication-2026-09-11.md`인데, 이 파일은 이 레포가
+아니라 **다섯 레포가 나란히 있는 작업 폴더의 공통 문서**다. 단독 checkout에는 없다.
+배포에 필요한 계약 — 두 digest, 소스 커밋, 실행 사용자 — 은 **바로 위 표에 있으므로
+그 문서 없이도 이 런북만으로 배포할 수 있다.** 원본은 검증 과정을 더 자세히 볼 때 참고한다.
 
 ## Secret 계약 — 값은 여기 적지 않는다
 
@@ -62,6 +66,18 @@
   `persona-mock-sse` namespace의 Secret은 공유되지 않는다.
 
 ---
+
+## 배포 전에 아직 정하지 않은 것
+
+아래 두 가지는 **이 런북이 결정하지 않는다.** 선언에 값이 들어 있다는 것은 지금의 기준선이지
+승인된 정책이라는 뜻이 아니다. 홈 적용 전에 따로 판단한다.
+[README의 "스케줄링 전략"](../README.md)도 같은 항목을 재확인 대상으로 남겨 두었다.
+
+- **커스텀 PriorityClass와 선점 정책을 그대로 갈지.** `persona-critical`/`persona-low`를 쓰고
+  `preemptionPolicy`를 생략해 기본 선점이 적용된다. 관측 스택 일부는 아직 클래스를 참조하지
+  않아 "데이터·관측이 마지막까지 살아남는다"는 보장이 서 있지 않다.
+- **Gateway 업데이트 중 중단 구간을 받아들일지.** replica 1 + `maxSurge: 0`이라 교체 중
+  준비된 API가 없는 순간이 생긴다. 허용할지, replica를 늘릴지, `maxSurge`를 바꿀지는 미결이다.
 
 ## 0. 현재 상태 확인
 
@@ -107,8 +123,10 @@ kubectl --context=kubernetes-admin@kubernetes get priorityclass persona-critical
 ### 1-a. PriorityClass
 
 DB는 `persona-critical`, Gateway·Web은 `persona-low`를 참조한다.
-**migration Job은 PriorityClass를 지정하지 않는다** — 일회성 작업이라 축출 순서를 다툴 이유가
-없기 때문이며, 검증 스크립트도 지정하지 않는 쪽을 강제한다.
+**현재 migration 기준선에서는 별도 우선순위를 지정하지 않는다.** 한 번 돌고 끝나는 작업이라
+지금은 축출 순서를 따로 정할 근거가 없다고 보았고, 검증 스크립트도 그 기준선을 지킨다.
+일회성 Job에는 우선순위가 필요 없다는 일반 규칙은 아니다 — 실행 시간이 길어지거나 자원 압박
+중에 돌려야 하면 다시 볼 항목이다.
 
 **클래스가 없으면 Deployment는 만들어지되 파드 생성이 admission에서 거부된다.**
 파드가 아예 생기지 않아 `describe pod`로는 원인을 볼 수 없다 — 10절의 진단 절차를 따른다.
