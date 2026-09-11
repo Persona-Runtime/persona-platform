@@ -50,9 +50,7 @@ spec:
     nodeSelector:
       kubernetes.io/hostname: k8s-worker1
 
-  # 자원 압박 시 데이터 계층이 마지막까지 남는다.
-  priorityClassName: persona-critical
-
+  # 커스텀 우선순위는 두지 않는다. 기본 구성에서 자원 압박을 먼저 관찰한다.
   # 초기 제안값이다. 실측으로 확정한 수치가 아니다.
   # docs/cluster-inventory.md의 "CNPG operator + Postgres 1 인스턴스 ~1.1 GiB" 예산에서
   # operator 몫을 뺀 크기로 잡았다. 실제 사용량을 본 뒤 조정한다.

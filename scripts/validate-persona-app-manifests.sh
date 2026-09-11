@@ -53,10 +53,10 @@ ruby -ryaml - \
   "$repo_dir/bootstrap/namespaces/persona-data.yaml" \
   "$repo_dir/bootstrap/namespaces/persona-app.yaml" \
   "$repo_dir/db/grants/persona_minimal.sql" \
-  "$repo_dir/bootstrap/priorityclasses/priorityclasses.yaml" <<'RUBY'
+  "$repo_dir/bootstrap/traefik/values.yaml" <<'RUBY'
 db_path, migrate_path, app_path,
   app_db, app_migrate, app_apps,
-  ns_data_path, ns_app_path, grants_path, priorityclass_path = ARGV
+  ns_data_path, ns_app_path, grants_path, traefik_values_path = ARGV
 
 GATEWAY_IMAGE = "ghcr.io/persona-runtime/persona-minimal-api@sha256:922ae043feaa1a893336816c38ac17f448aa96c44ba06983652181784f52c2f6"
 WEB_IMAGE     = "ghcr.io/persona-runtime/persona-web@sha256:26e6f0ed439ee02374be3b726bb34ee1a8fccbbeace60219084d9acbd3caf968"
@@ -120,7 +120,6 @@ raise "[안전] Postgres 이미지는 16 계열 digest로 고정해야 한다" u
 raise "[기준선] PVC 크기가 기준선(20Gi)과 다르다 — local-path는 나중에 확장할 수 없으니 근거를 남기고 바꾼다" unless cspec.dig("storage", "size") == "20Gi"
 raise "[안전] StorageClass는 local-path다" unless cspec.dig("storage", "storageClass") == "local-path"
 raise "[안전] DB는 worker1에 고정한다" unless cspec.dig("affinity", "nodeSelector", "kubernetes.io/hostname") == "k8s-worker1"
-raise "[기준선] DB는 persona-critical 우선순위다" unless cspec["priorityClassName"] == "persona-critical"
 raise "[기준선] DB 자원 requests/limits를 선언한다" if (cspec.dig("resources", "requests") || {}).empty? || (cspec.dig("resources", "limits") || {}).empty?
 # CPU limit을 일부러 두지 않는다. DB에 CPU 상한을 걸면 throttling이 질의 지연으로 나타난다.
 # 그래서 이 파드는 Guaranteed가 아니라 Burstable이다. "등급을 맞추자"며 limit을 붙이면 여기서 잡는다.
@@ -166,10 +165,12 @@ raise "[안전] 앱 overlay에 migration Job을 넣지 않는다" if app.any? { 
 gateway = resource(app, "Deployment", "persona-gateway")
 gspec = gateway.fetch("spec")
 raise "[기준선] Gateway replica가 기준선(1)과 다르다" unless gspec["replicas"] == 1
+raise "[기준선] Gateway는 RollingUpdate로 교체한다" unless gspec.dig("strategy", "type") == "RollingUpdate"
+raise "[기준선] Gateway maxSurge는 1이다" unless gspec.dig("strategy", "rollingUpdate", "maxSurge") == 1
+raise "[기준선] Gateway maxUnavailable은 0이다" unless gspec.dig("strategy", "rollingUpdate", "maxUnavailable") == 0
 gpod = gspec.dig("template", "spec")
 check_hardened_pod(gpod, "Gateway", "persona-app-ghcr")
 raise "[기준선] Gateway 종료 유예가 기준선(30초)과 다르다 — Uvicorn graceful 25초보다 길어야 한다" unless gpod["terminationGracePeriodSeconds"] == 30
-raise "[기준선] Gateway는 persona-low 우선순위다" unless gpod["priorityClassName"] == "persona-low"
 
 gcontainer = gpod.fetch("containers").fetch(0)
 raise "[안전] Gateway 이미지가 검증된 amd64 child digest가 아니다" unless gcontainer["image"] == GATEWAY_IMAGE
@@ -198,7 +199,6 @@ wspec = web.fetch("spec")
 raise "[기준선] Web replica가 기준선(2)과 다르다" unless wspec["replicas"] == 2
 wpod = wspec.dig("template", "spec")
 check_hardened_pod(wpod, "Web", "persona-app-ghcr")
-raise "[기준선] Web은 persona-low 우선순위다" unless wpod["priorityClassName"] == "persona-low"
 anti = wpod.dig("affinity", "podAntiAffinity", "preferredDuringSchedulingIgnoredDuringExecution")
 raise "[기준선] Web은 노드 분산을 선호해야 한다" unless anti.is_a?(Array) && anti.length == 1
 raise "[기준선] Web anti-affinity는 hostname 기준이다" unless anti.dig(0, "podAffinityTerm", "topologyKey") == "kubernetes.io/hostname"
@@ -270,23 +270,13 @@ end
 end
 
 # --- PriorityClass --------------------------------------------------------
-# 선언에 없는 이름을 참조하면 파드가 admission에서 거부된다. 이름 오타를 여기서 잡는다.
-declared_priority_classes = YAML.load_stream(File.read(priorityclass_path)).compact
-  .select { |item| item["kind"] == "PriorityClass" }
-  .map { |item| item.dig("metadata", "name") }
-
-referenced = []
-referenced << cspec["priorityClassName"]
-[jpod, gpod, wpod].each { |pod| referenced << pod["priorityClassName"] }
-referenced.compact!
-
-referenced.uniq.each do |name|
-  raise "[안전] 선언되지 않은 PriorityClass를 참조한다: #{name}" unless declared_priority_classes.include?(name)
+# 기본 구성에서 병목을 관찰한 뒤 우선순위 실험을 추가한다. 시스템 클래스나 기존 클러스터는
+# 변경하지 않으며, 여기서는 이번 서비스 선언과 Traefik values에 참조가 다시 들어오는지만 막는다.
+traefik_values = YAML.load_file(traefik_values_path)
+{ "DB" => cspec, "migration Job" => jpod, "Gateway" => gpod,
+  "Web" => wpod, "Traefik" => traefik_values }.each do |label, spec|
+  raise "[기준선] #{label}: 커스텀 PriorityClass 적용은 보류한다" unless spec["priorityClassName"].to_s.empty?
 end
-raise "[기준선] DB는 persona-critical, stateless는 persona-low여야 한다" unless referenced.uniq.sort == ["persona-critical", "persona-low"]
-# 현재 migration 기준선은 별도 우선순위를 지정하지 않는 것이다. 일회성 Job에 우선순위가
-# 필요 없다는 일반 규칙이 아니라, 지금은 축출 순서를 정할 근거가 없다고 본 결과다.
-raise "[안전] migration Job에는 PriorityClass를 지정하지 않는다" if jpod["priorityClassName"]
 
 # --- bootstrap namespace --------------------------------------------------
 { ns_data_path => "persona-data", ns_app_path => "persona-app" }.each do |path, name|
