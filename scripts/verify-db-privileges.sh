@@ -128,6 +128,25 @@ expect_denied() {
   fi
 }
 
+# 롤백 검사용 실행기. 허용하는 결과는 둘뿐이다.
+#   1) 정상 실행 — 권한이 과도하다는 뜻이지만, 그 판정은 호출부의 DB 상태 비교가 한다
+#   2) 예상한 권한 거부
+# 그 밖의 실패(문법 오류, 접속 실패, 컨테이너 미기동)는 검사 실패다. 시도가 아예 실행되지
+# 않았는데 "DB가 그대로"라는 이유로 통과하면, 이 검사는 아무것도 확인하지 못한 채 ok를 찍는다.
+# 원문 오류는 출력하지 않는다 — 합성값이라도 로그에 남기지 않는다.
+run_rollback_probe() {
+  local sql="$1"
+  local out
+  if out="$(psql_as "$runtime_user" "$runtime_password" --set ON_ERROR_STOP=1 \
+      --command "BEGIN; ${sql}; ROLLBACK;" 2>&1)"; then
+    return 0
+  fi
+  if printf '%s' "$out" | grep -qiE 'permission denied|must be owner'; then
+    return 0
+  fi
+  return 1
+}
+
 step "0. 대상"
 echo "  gateway  : ${gateway_image}"
 echo "  postgres : ${postgres_image}"
@@ -335,21 +354,19 @@ before_version="$(psql_as "$bootstrap_user" "$bootstrap_password" --command \
 if [ "$before_version" != "$expected_version" ]; then
   fail "런북 7-c 실행 전에 이미 revision이 바뀌어 있다: ${before_version} (앞 단계가 DB를 바꿨다)"
 fi
-psql_as "$runtime_user" "$runtime_password" --command "
-  BEGIN;
-  UPDATE persona_minimal.alembic_version SET version_num = 'tampered';
-  ROLLBACK;
-" >/dev/null 2>&1 || true
-psql_as "$runtime_user" "$runtime_password" --command "
-  BEGIN;
-  CREATE TABLE persona_minimal.should_not_exist (id int);
-  ROLLBACK;
-" >/dev/null 2>&1 || true
+probes_ran=true
+run_rollback_probe "UPDATE persona_minimal.alembic_version SET version_num = 'tampered'" || probes_ran=false
+run_rollback_probe "CREATE TABLE persona_minimal.should_not_exist (id int)" || probes_ran=false
+
 after_version="$(psql_as "$bootstrap_user" "$bootstrap_password" --command \
   'SELECT version_num FROM persona_minimal.alembic_version' | tr -d '[:space:]')"
 leftover="$(psql_as "$bootstrap_user" "$bootstrap_password" --command \
   "SELECT count(*) FROM pg_tables WHERE schemaname='persona_minimal' AND tablename='should_not_exist'" | tr -d '[:space:]')"
-if [ "$after_version" = "$expected_version" ] && [ "$leftover" = "0" ]; then
+
+# 시도가 실행되지 않았다면 뒤의 "DB가 그대로다"는 아무것도 증명하지 못한다.
+if [ "$probes_ran" != true ]; then
+  fail "런북 7-c: 시도가 권한 거부가 아닌 이유로 실행되지 않아 rollback 여부를 판정할 수 없다"
+elif [ "$after_version" = "$expected_version" ] && [ "$leftover" = "0" ]; then
   ok "런북 7-c: BEGIN…ROLLBACK 뒤 revision ${after_version} 유지, 잔여 테이블 없음"
 else
   fail "런북 7-c 뒤 DB가 기대 상태가 아니다 (revision ${after_version}, 기대 ${expected_version}, 잔여 ${leftover})"

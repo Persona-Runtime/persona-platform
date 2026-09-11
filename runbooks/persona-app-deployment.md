@@ -106,9 +106,12 @@ kubectl --context=kubernetes-admin@kubernetes get priorityclass persona-critical
 
 ### 1-a. PriorityClass
 
-세 워크로드가 모두 PriorityClass를 참조한다 — DB는 `persona-critical`, Gateway·Web·migration
-Job은 `persona-low`다. **클래스가 없으면 Deployment는 만들어지되 파드가 admission에서 거부된다.**
-파드가 아예 생기지 않으므로 "왜 안 뜨지"를 한참 헤매기 쉽다.
+DB는 `persona-critical`, Gateway·Web은 `persona-low`를 참조한다.
+**migration Job은 PriorityClass를 지정하지 않는다** — 일회성 작업이라 축출 순서를 다툴 이유가
+없기 때문이며, 검증 스크립트도 지정하지 않는 쪽을 강제한다.
+
+**클래스가 없으면 Deployment는 만들어지되 파드 생성이 admission에서 거부된다.**
+파드가 아예 생기지 않아 `describe pod`로는 원인을 볼 수 없다 — 10절의 진단 절차를 따른다.
 
 Traefik이 이미 `persona-low`를 쓰고 있어 Traefik이 떠 있다면 존재할 가능성이 높다.
 그래도 확인하고 넘어간다.
@@ -410,31 +413,107 @@ kubectl --context=kubernetes-admin@kubernetes -n persona-app rollout status depl
 규칙 전체와 그 근거는 **[저장소 README의 "스케줄링 전략"](../README.md)** 에 있다.
 여기서는 배포 중에 실제로 쓰는 진단 절차만 다룬다. 두 곳에 같은 표를 두면 갈라진다.
 
-### 파드가 `Pending`일 때 보는 순서
+### 파드가 안 뜰 때 보는 순서
+
+**먼저 파드가 있는지 없는지를 가른다.** 둘은 원인도 볼 곳도 다르다.
+
+```sh
+kubectl --context=kubernetes-admin@kubernetes -n <ns> get pod,rs,job
+```
+
+#### 파드가 아예 없다
+
+컨트롤러가 파드를 만들지 못한 것이다. 파드가 없으니 `describe pod`로는 아무것도 볼 수 없다.
+**ReplicaSet이나 Job의 Events**에 실제 이유가 있다.
+
+```sh
+kubectl --context=kubernetes-admin@kubernetes -n <ns> describe rs <rs> | sed -n '/Events:/,$p'
+kubectl --context=kubernetes-admin@kubernetes -n <ns> describe job <job> | sed -n '/Events:/,$p'
+kubectl --context=kubernetes-admin@kubernetes -n <ns> get deploy <deploy> \
+  -o jsonpath='{.status.conditions}' | tr ',' '\n'
+```
+
+- `no PriorityClass with name ... was found` → 1-a의 PriorityClass 준비를 건너뛴 것이다.
+  Deployment에는 `ReplicaFailure` 조건이 함께 나타난다.
+- 그 밖의 admission 거부(정책·쿼터 등)도 여기 나온다.
+
+#### 파드는 있는데 `Pending`이다
+
+스케줄러가 자리를 못 찾았거나 볼륨이 묶이지 않은 것이다.
 
 ```sh
 kubectl --context=kubernetes-admin@kubernetes -n <ns> describe pod <pod> | sed -n '/Events:/,$p'
 ```
 
-Events 메시지로 원인을 가른다.
+**`Insufficient cpu` / `Insufficient memory`**
 
-| 메시지 | 원인 | 볼 곳 |
-| --- | --- | --- |
-| `no PriorityClass with name ... was found` | PriorityClass 부재 | 위 1-a |
-| `didn't match Pod's node affinity/selector` | worker1·2에 배치 불가, 또는 노드 이름 불일치 | `kubectl get nodes`로 hostname 확인 |
-| `Insufficient memory` / `Insufficient cpu` | 워커 자원 부족 | `kubectl top nodes`. requests는 초기 예산이라 실측 후 조정 대상이다 |
-| `pod has unbound immediate PersistentVolumeClaims` | PVC 미바인딩 | local-path는 `WaitForFirstConsumer`라 파드 스케줄을 기다리는 정상 상태일 수 있다. 오래 `Pending`이면 worker1 디스크를 본다 |
-| `ImagePullBackOff` (Pending 아님) | pull Secret 부재·만료 | `persona-app-ghcr`. 두 패키지는 private이다 |
-
-필수 조건을 만족하는 노드에 자리가 없으면 파드는 그대로 `Pending`으로 남는다.
-나중에 자리가 나도 **이미 실행 중인 파드가 자동으로 재분산되지는 않는다.**
-
-### 사라진 파드가 축출인지 확인
-
-`persona-low`는 값이 낮아 자원 압박 시 먼저 축출 대상이 된다.
+스케줄러는 실제 사용량이 아니라 **노드 Allocatable에서 이미 할당된 `requests` 합을 뺀 여유**로
+판단한다. 그래서 `kubectl top`이 한가해 보여도 예약량 때문에 배치가 막힐 수 있다.
+`top`이 아니라 아래를 먼저 본다.
 
 ```sh
-kubectl --context=kubernetes-admin@kubernetes -n persona-app get events --sort-by=.lastTimestamp | grep -iE 'evict|preempt'
+kubectl --context=kubernetes-admin@kubernetes describe node k8s-worker1 | sed -n '/Allocated resources/,/Events/p'
+kubectl --context=kubernetes-admin@kubernetes describe node k8s-worker2 | sed -n '/Allocated resources/,/Events/p'
+```
+
+현재 `requests` 수치는 초기 예산이며 실측으로 확정한 값이 아니다. 조정 대상이다.
+
+**`didn't match Pod's node affinity/selector`**
+
+worker1·2로 제한한 조건에 맞는 노드가 없다. 노드 이름이 선언과 다른지 본다.
+
+```sh
+kubectl --context=kubernetes-admin@kubernetes get nodes -o custom-columns=NAME:.metadata.name,HOSTNAME:.metadata.labels.kubernetes\.io/hostname
+```
+
+**`pod has unbound immediate PersistentVolumeClaims`**
+
+이 메시지는 PVC의 binding mode가 **`Immediate`일 때** 나온다.
+`WaitForFirstConsumer`라서 정상적으로 기다리는 상태가 **아니다** — 그 경우 메시지가 다르다.
+PVC가 어떤 StorageClass를 쓰고 binding mode가 무엇인지부터 확인한다.
+
+```sh
+kubectl --context=kubernetes-admin@kubernetes -n <ns> get pvc
+kubectl --context=kubernetes-admin@kubernetes -n <ns> describe pvc <pvc> | sed -n '/Events:/,$p'
+kubectl --context=kubernetes-admin@kubernetes get storageclass local-path \
+  -o jsonpath='{.volumeBindingMode}{"\n"}'
+```
+
+`local-path`는 `WaitForFirstConsumer`이므로, 이 메시지가 나왔다면 PVC가 다른 StorageClass를
+쓰고 있거나 StorageClass 자체가 바뀐 것이다.
+
+#### 파드는 있는데 컨테이너가 안 뜬다 — `ImagePullBackOff`
+
+컨테이너가 하나도 시작하지 못한 동안에는 **Pod phase가 `Pending`으로 보일 수 있다.**
+`Pending`이라고 해서 스케줄링 문제로 단정하지 않는다. `describe pod`의 컨테이너 상태를 본다.
+
+원인은 여러 가지다 — pull Secret 부재·만료, 이미지 이름·태그·digest 오기, 레지스트리 접근 불가,
+해당 아키텍처의 manifest 부재. 두 패키지가 private GHCR이므로 Secret이 흔한 원인이지만
+유일한 원인은 아니다.
+
+```sh
+kubectl --context=kubernetes-admin@kubernetes -n persona-app get secret persona-app-ghcr \
+  -o jsonpath='{.type}{"\n"}'
+```
+
+#### 그 밖
+
+필수 조건을 만족하는 노드에 자리가 없으면 파드는 그대로 `Pending`으로 남는다.
+나중에 자리가 나도 **이미 실행 중인 파드가 자동으로 다른 노드로 재분산되지는 않는다.**
+
+### 파드가 사라졌을 때 — 축출·선점 확인
+
+`persona-low`는 우리가 쓰는 값 중 가장 낮지만, **그것만으로 먼저 밀려난다고 단정할 수 없다.**
+node-pressure 축출은 QoS와 자원 사용량을, 스케줄러 선점은 우선순위를 함께 본다.
+다른 파드의 우선순위·QoS·실제 사용량과 비교해야 정해진다.
+`persona-low`(100)도 PriorityClass가 없는 일반 파드(0)보다는 높다.
+[README의 "자원과 우선순위"](../README.md)가 이 조건을 설명한다.
+
+무슨 일이 있었는지는 추측하지 말고 이벤트로 확인한다.
+
+```sh
+kubectl --context=kubernetes-admin@kubernetes -n persona-app get events --sort-by=.lastTimestamp \
+  | grep -iE 'evict|preempt|oomkill'
 ```
 
 ### 업데이트 중 중단 구간
