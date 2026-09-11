@@ -1,0 +1,74 @@
+# 첫 사용자 흐름(인증·목록·생성)이 쓰는 PostgreSQL 한 대.
+# operator 설치는 이 선언의 범위가 아니다 — bootstrap/cnpg/README.md를 먼저 따른다.
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: persona-db
+  labels:
+    app.kubernetes.io/name: persona-db
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: persona-platform
+  annotations:
+    # 앱 rollback이나 Application 정리가 DB 삭제로 번지지 않게 한다.
+    # local-path는 reclaimPolicy=Retain이라 PV 자체는 남지만, Cluster가 지워지면
+    # 다시 세우는 절차가 필요하므로 Argo가 이 오브젝트를 지우지 못하게 막는다.
+    argocd.argoproj.io/sync-options: Prune=false,Delete=false
+spec:
+  # replica·HA는 이번 범위가 아니다. 노드가 한 대 빠지면 DB도 함께 멈춘다는 뜻이고,
+  # 그 사실을 숨기지 않는다.
+  instances: 1
+
+  # 태그를 남겨 CNPG가 major 버전을 읽을 수 있게 하고, digest로 실제 객체를 고정한다.
+  # 태그만 쓰면 같은 태그가 다른 객체를 가리키게 될 수 있다.
+  # 이것은 multi-arch index digest다. 홈 워커가 amd64이므로 index가 amd64 manifest로
+  # 해석된다. 실제 실행 manifest는 sha256:d404bc4413893a92562435d19cfa571bb9eddeffbd7873a8595c9525aa2a3e4b 다.
+  imageName: ghcr.io/cloudnative-pg/postgresql:16.15-standard-bookworm@sha256:fe883b2153a47b5c76ecd12c3624aa9f4af61f7fff925c06e0488fff30e9d57f
+
+  # Gateway에는 superuser를 주지 않는다. postgres 계정 자체를 활성화하지 않아
+  # 유출될 자격증명을 만들지 않는다.
+  enableSuperuserAccess: false
+
+  bootstrap:
+    initdb:
+      database: persona_app
+      # migrator가 DB 소유자다. 스키마 생성과 migration DDL이 이 계정의 책임이고,
+      # Gateway runtime은 별도 role로 나중에 만든다(db/grants/persona_minimal.sql).
+      owner: persona_migrator
+      # 값은 Git에 없다. 사용자가 CP에서 username/password 키로 만든다.
+      secret:
+        name: persona-db-migrator
+
+  storage:
+    size: 20Gi
+    # local-path는 allowVolumeExpansion=false다. 이 크기는 나중에 늘릴 수 없다.
+    # 20Gi는 docs/cluster-inventory.md의 A안에서 확정한 값이다.
+    storageClass: local-path
+
+  # local-path 볼륨은 파드가 처음 스케줄된 노드에 고정된다. worker1을 데이터 노드로
+  # 정해 두었으므로 여기에 묶는다. CP에는 워크로드를 올리지 않는다.
+  affinity:
+    nodeSelector:
+      kubernetes.io/hostname: k8s-worker1
+
+  # 자원 압박 시 데이터 계층이 마지막까지 남는다.
+  priorityClassName: persona-critical
+
+  # 초기 제안값이다. 실측으로 확정한 수치가 아니다.
+  # docs/cluster-inventory.md의 "CNPG operator + Postgres 1 인스턴스 ~1.1 GiB" 예산에서
+  # operator 몫을 뺀 크기로 잡았다. 실제 사용량을 본 뒤 조정한다.
+  #
+  # 메모리는 requests와 limits를 같게 둔다. 워커 메모리가 빠듯해서(합계 15.5 GiB)
+  # OOM과 축출 경계를 예측 가능하게 두는 편이 낫기 때문이다.
+  #
+  # CPU limit은 일부러 두지 않는다. DB에 CPU 상한을 걸면 throttling이 곧바로 질의 지연으로
+  # 나타나고, 우리가 재려는 신호가 그것이다. 여유 CPU를 쓰게 둔다.
+  #
+  # 그 결과 이 파드의 QoS는 Guaranteed가 아니라 **Burstable**이다. Guaranteed는 모든
+  # 컨테이너가 CPU와 메모리 **둘 다** requests==limits여야 한다. 설명을 맞추려고 CPU limit을
+  # 붙이지 않는다 — 등급보다 지연 특성이 중요하다.
+  resources:
+    requests:
+      cpu: 100m
+      memory: 1Gi
+    limits:
+      memory: 1Gi

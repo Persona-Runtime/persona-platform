@@ -1,0 +1,10 @@
+# Gateway·Web·migration Job이 실행되는 namespace.
+# private GHCR 이미지를 쓰므로 pull Secret도 여기에 있어야 한다.
+# 다른 namespace의 Secret은 공유되지 않는다.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: persona-app
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: application

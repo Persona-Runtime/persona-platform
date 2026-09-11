@@ -1,0 +1,21 @@
+# 3단계: Gateway와 Web. migration Job이 Complete이고 db/grants/persona_minimal.sql이
+# 적용된 뒤에 Sync한다. grant가 없으면 Gateway는 기동하되 readiness가 계속 503이다.
+#
+# syncPolicy를 두지 않는다. 수동 Sync 기준이다.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: persona-app
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: application
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/Persona-Runtime/persona-platform.git
+    targetRevision: develop
+    path: kustomize/overlays/prod/persona-app
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: persona-app
