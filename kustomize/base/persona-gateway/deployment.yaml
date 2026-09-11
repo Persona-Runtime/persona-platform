@@ -1,0 +1,120 @@
+# Python 최소 API. 현재 제공하는 것은 /v1/me, /v1/personas(목록·생성)와 두 probe 경로뿐이다.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: persona-gateway
+  labels:
+    app.kubernetes.io/name: persona-gateway
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: persona-platform
+spec:
+  # 한 대로 시작한다. 캐릭터 생성은 사용자 행 잠금으로 직렬화되므로 여러 대여도 정확하지만,
+  # 이번 단계에서 복제 수를 늘려 얻을 것이 없다.
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # 워커 메모리가 빠듯하다. 새 파드를 띄우기 전에 기존 파드를 내린다.
+      maxSurge: 0
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: persona-gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: persona-gateway
+        app.kubernetes.io/component: api
+        app.kubernetes.io/part-of: persona-platform
+    spec:
+      # 이 앱은 Kubernetes API를 호출하지 않는다.
+      automountServiceAccountToken: false
+      # private GHCR package다. 이 Secret은 Git 밖에서 만들어 두어야 한다.
+      imagePullSecrets:
+        - name: persona-app-ghcr
+      # Uvicorn graceful shutdown이 25초다. 그보다 길게 준다.
+      terminationGracePeriodSeconds: 30
+      priorityClassName: persona-low
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      # CP와 향후 GPU 노드에는 배치하지 않는다.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - k8s-worker1
+                      - k8s-worker2
+      containers:
+        - name: gateway
+          # 검증된 linux/amd64 child manifest. tag, latest, parent OCI index digest로 바꾸지 않는다.
+          # 소스 커밋 34d65f5 기준이며 검증 기록은 docs/ghcr-publication-2026-09-11.md에 있다.
+          image: ghcr.io/persona-runtime/persona-minimal-api@sha256:922ae043feaa1a893336816c38ac17f448aa96c44ba06983652181784f52c2f6
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            # 비밀이 아니다. pool 대기와 readiness의 SQL 실행을 합친 예산이다.
+            - name: PERSONA_DB_TIMEOUT_SECONDS
+              value: "2"
+          envFrom:
+            # DATABASE_URL(runtime 계정)과 정적 토큰·서명 키가 들어 있다.
+            # migrator 자격증명은 여기 없다 — migration Job만 그것을 본다.
+            - secretRef:
+                name: persona-gateway-runtime
+          resources:
+            # 초기 제안값이다. 실측으로 확정한 수치가 아니다.
+            # psycopg pool max_size가 8이라 메모리는 연결 수에 비례해 늘어난다.
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+          # startup과 liveness는 /healthz다. DB가 죽었다고 앱을 재시작시키면
+          # 복구되지도 않는 재시작 루프에 빠진다. DB 상태는 readiness가 본다.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 2
+            timeoutSeconds: 1
+            failureThreshold: 15
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 1
+            failureThreshold: 3
+          # readiness는 DB 연결과 필수 Alembic revision을 확인한다. 앱이 스스로 2초 예산 안에
+          # 답하므로 timeout 3초면 충분하고, 한 번 실패하면 바로 트래픽에서 뺀다.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 1
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        # read-only rootfs에서 필요한 유일한 쓰기 경로다.
+        - name: tmp
+          emptyDir: {}

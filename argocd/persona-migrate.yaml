@@ -1,0 +1,26 @@
+# 2단계: migration. persona-db가 Healthy인 것을 눈으로 확인한 뒤 Sync한다.
+#
+# 이 Application과 persona-db·persona-app 사이의 순서는 sync-wave 숫자가 보장하지 않는다.
+# 서로 다른 Application이라 Argo는 이들 사이의 순서를 알지 못한다. 순서는 사람이
+# 단계별로 Sync해서 만든다. 각 단계의 완료 확인 절차는
+# runbooks/persona-app-deployment.md에 있다.
+#
+# Job은 불변 필드가 많다. 같은 revision을 다시 돌려야 하면 Sync를 반복하지 말고
+# 로그를 보관한 뒤 Job을 명시적으로 삭제하고 다시 Sync한다.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: persona-migrate
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: database-migration
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/Persona-Runtime/persona-platform.git
+    targetRevision: develop
+    path: kustomize/overlays/prod/persona-migrate
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: persona-app

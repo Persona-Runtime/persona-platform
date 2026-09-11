@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: persona-gateway
+  labels:
+    app.kubernetes.io/name: persona-gateway
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: persona-platform
+spec:
+  # 외부에 직접 열지 않는다. 진입은 Traefik Gateway만 담당한다.
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: persona-gateway
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP
