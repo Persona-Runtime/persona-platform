@@ -7,6 +7,15 @@ set -euo pipefail
 # GHCR에 게시된 Gateway digest를 그대로 쓴다.
 # 홈 클러스터를 건드리지 않는다. 합성 자격증명만 사용한다.
 #
+# **이 스크립트는 격리 DB 전용이다.** 전용 network와 Postgres 컨테이너를 직접 만들고 끝나면
+# 지우므로 운영 DB를 가리킬 수 없다. 그래서 실제 자격증명으로 앱을 띄우고 DDL·TRUNCATE까지
+# 실제로 시도해 거부를 확인한다. 다만 그 시도도 BEGIN…ROLLBACK으로 감싼다 — 결함이 있으면
+# 시도가 성공해 버리고, 그러면 이어지는 검사들이 오염된 DB 위에서 돌게 되기 때문이다.
+#
+# 운영 DB에서는 같은 방법을 쓰지 않는다. 찾으려는 결함이 "권한이 과도하다"이므로, 결함이
+# 있으면 그 시도가 성공해 DB가 바뀐다. 운영에서는 카탈로그 조회를 기본으로 하고 실행 시도는
+# BEGIN…ROLLBACK 안에서만 한다 — runbooks/persona-app-deployment.md의 7절을 따른다.
+#
 # 사용법: scripts/verify-db-privileges.sh [gateway-image]
 
 # 도구가 없으면 검사가 조용히 건너뛰어진다. 먼저 확인하고 멈춘다.
@@ -99,10 +108,15 @@ psql_as() {
 }
 
 # 거부되어야 하는 문장을 시험한다. 성공하면 그 자체가 결함이다.
+#
+# 문장을 BEGIN…ROLLBACK으로 감싼다. 격리 DB라 망가져도 버리면 그만이지만, 결함이 실제로
+# 있으면 이 시도가 성공해 DB가 바뀌고 **이어지는 검사들이 오염된 상태 위에서 돌아** 결과를
+# 읽기 어려워진다. 거부/성공을 가리는 데는 롤백이 아무 영향이 없다.
 expect_denied() {
   local desc="$1" sql="$2"
   local out
-  if out="$(psql_as "$runtime_user" "$runtime_password" --set ON_ERROR_STOP=1 --command "$sql" 2>&1)"; then
+  if out="$(psql_as "$runtime_user" "$runtime_password" --set ON_ERROR_STOP=1 \
+      --command "BEGIN; ${sql}; ROLLBACK;" 2>&1)"; then
     fail "${desc}: 거부돼야 하는데 성공했다"
     return
   fi
@@ -274,6 +288,71 @@ if [ "$public_create" = "f" ]; then
   ok "PUBLIC에 public 스키마 CREATE 권한이 없다"
 else
   fail "PUBLIC이 public 스키마에 CREATE를 가진다"
+fi
+
+step "7. 런북의 운영 DB 검사 SQL을 그대로 실행"
+# 런북 7-b(카탈로그 조회)와 7-c(BEGIN…ROLLBACK)에 적은 SQL이 실제로 기대값을 내는지 본다.
+# 문서에만 적고 "검증했다"고 하지 않기 위해서다.
+
+# 7-b: 기대값은 컬럼 이름의 _t / _f 접미사다.
+catalog="$(psql_as "$bootstrap_user" "$bootstrap_password" --command "
+  SELECT has_database_privilege('${runtime_user}','${db_name}','CONNECT')
+       , has_schema_privilege  ('${runtime_user}','persona_minimal','USAGE')
+       , has_schema_privilege  ('${runtime_user}','persona_minimal','CREATE')
+       , has_schema_privilege  ('${runtime_user}','public','CREATE')
+       , has_table_privilege('${runtime_user}','persona_minimal.alembic_version','SELECT')
+       , has_table_privilege('${runtime_user}','persona_minimal.alembic_version','UPDATE')
+       , has_table_privilege('${runtime_user}','persona_minimal.alembic_version','INSERT')
+       , has_table_privilege('${runtime_user}','persona_minimal.alembic_version','DELETE')
+       , has_table_privilege('${runtime_user}','persona_minimal.personas','SELECT')
+       , has_table_privilege('${runtime_user}','persona_minimal.personas','INSERT')
+       , has_table_privilege('${runtime_user}','persona_minimal.personas','UPDATE')
+       , has_table_privilege('${runtime_user}','persona_minimal.personas','DELETE')
+       , has_table_privilege('${runtime_user}','persona_minimal.personas','TRUNCATE')
+       , pg_has_role('${runtime_user}','${migrator_user}','MEMBER')
+" | tr -d '[:space:]')"
+expected_catalog="t|t|f|f|t|f|f|f|t|t|t|f|f|f"
+if [ "$catalog" = "$expected_catalog" ]; then
+  ok "런북 7-b 카탈로그 조회: 기대값과 일치 (${catalog})"
+else
+  fail "런북 7-b 카탈로그 조회 불일치: 기대 ${expected_catalog}, 실제 ${catalog}"
+fi
+
+# 소유권 — ALTER/DROP은 권한이 아니라 소유권이라 has_*_privilege로 볼 수 없다.
+owners="$(psql_as "$bootstrap_user" "$bootstrap_password" --command \
+  "SELECT DISTINCT tableowner FROM pg_tables WHERE schemaname = 'persona_minimal'" | tr -d '[:space:]')"
+if [ "$owners" = "$migrator_user" ]; then
+  ok "런북 7-b 소유권: 모든 테이블이 ${owners} 소유"
+else
+  fail "런북 7-b 소유권이 migrator 단독이 아니다: ${owners}"
+fi
+
+# 7-c: BEGIN…ROLLBACK이 DB를 바꾸지 않는지 확인한다. 검사 자체가 사고가 되면 안 된다.
+# 앞 단계가 이미 DB를 바꿨을 수도 있으므로, 직전 값이 아니라 **기대 revision 자체**와 비교한다.
+expected_version="0001_persona_minimal"
+before_version="$(psql_as "$bootstrap_user" "$bootstrap_password" --command \
+  'SELECT version_num FROM persona_minimal.alembic_version' | tr -d '[:space:]')"
+if [ "$before_version" != "$expected_version" ]; then
+  fail "런북 7-c 실행 전에 이미 revision이 바뀌어 있다: ${before_version} (앞 단계가 DB를 바꿨다)"
+fi
+psql_as "$runtime_user" "$runtime_password" --command "
+  BEGIN;
+  UPDATE persona_minimal.alembic_version SET version_num = 'tampered';
+  ROLLBACK;
+" >/dev/null 2>&1 || true
+psql_as "$runtime_user" "$runtime_password" --command "
+  BEGIN;
+  CREATE TABLE persona_minimal.should_not_exist (id int);
+  ROLLBACK;
+" >/dev/null 2>&1 || true
+after_version="$(psql_as "$bootstrap_user" "$bootstrap_password" --command \
+  'SELECT version_num FROM persona_minimal.alembic_version' | tr -d '[:space:]')"
+leftover="$(psql_as "$bootstrap_user" "$bootstrap_password" --command \
+  "SELECT count(*) FROM pg_tables WHERE schemaname='persona_minimal' AND tablename='should_not_exist'" | tr -d '[:space:]')"
+if [ "$after_version" = "$expected_version" ] && [ "$leftover" = "0" ]; then
+  ok "런북 7-c: BEGIN…ROLLBACK 뒤 revision ${after_version} 유지, 잔여 테이블 없음"
+else
+  fail "런북 7-c 뒤 DB가 기대 상태가 아니다 (revision ${after_version}, 기대 ${expected_version}, 잔여 ${leftover})"
 fi
 
 step "결과"
