@@ -30,10 +30,11 @@ ruby -ryaml - \
   "$repo_dir/argocd/persona-app.yaml" \
   "$repo_dir/bootstrap/namespaces/persona-data.yaml" \
   "$repo_dir/bootstrap/namespaces/persona-app.yaml" \
-  "$repo_dir/db/grants/persona_minimal.sql" <<'RUBY'
+  "$repo_dir/db/grants/persona_minimal.sql" \
+  "$repo_dir/bootstrap/priorityclasses/priorityclasses.yaml" <<'RUBY'
 db_path, migrate_path, app_path,
   app_db, app_migrate, app_apps,
-  ns_data_path, ns_app_path, grants_path = ARGV
+  ns_data_path, ns_app_path, grants_path, priorityclass_path = ARGV
 
 GATEWAY_IMAGE = "ghcr.io/persona-runtime/persona-minimal-api@sha256:922ae043feaa1a893336816c38ac17f448aa96c44ba06983652181784f52c2f6"
 WEB_IMAGE     = "ghcr.io/persona-runtime/persona-web@sha256:26e6f0ed439ee02374be3b726bb34ee1a8fccbbeace60219084d9acbd3caf968"
@@ -99,6 +100,10 @@ raise "StorageClass는 local-path다" unless cspec.dig("storage", "storageClass"
 raise "DB는 worker1에 고정한다" unless cspec.dig("affinity", "nodeSelector", "kubernetes.io/hostname") == "k8s-worker1"
 raise "DB는 persona-critical 우선순위다" unless cspec["priorityClassName"] == "persona-critical"
 raise "DB 자원 requests/limits를 선언해야 한다" if (cspec.dig("resources", "requests") || {}).empty? || (cspec.dig("resources", "limits") || {}).empty?
+# CPU limit을 일부러 두지 않는다. DB에 CPU 상한을 걸면 throttling이 질의 지연으로 나타난다.
+# 그래서 이 파드는 Guaranteed가 아니라 Burstable이다. "등급을 맞추자"며 limit을 붙이면 여기서 잡는다.
+raise "DB에 CPU limit을 두지 않는다 (Burstable 의도, throttling 회피)" if cspec.dig("resources", "limits", "cpu")
+raise "DB 메모리는 requests와 limits가 같아야 한다" unless cspec.dig("resources", "requests", "memory") == cspec.dig("resources", "limits", "memory")
 
 initdb = cspec.dig("bootstrap", "initdb") || raise("bootstrap.initdb가 필요하다")
 raise "DB 이름은 persona_app이다" unless initdb["database"] == "persona_app"
@@ -241,6 +246,24 @@ end
   # 순서는 사람이 단계별로 Sync해서 만든다. 자동 Sync를 켜면 그 순서가 사라진다.
   raise "#{name}: 자동 Sync를 켜면 안 된다" if spec.key?("syncPolicy")
 end
+
+# --- PriorityClass --------------------------------------------------------
+# 선언에 없는 이름을 참조하면 파드가 admission에서 거부된다. 이름 오타를 여기서 잡는다.
+declared_priority_classes = YAML.load_stream(File.read(priorityclass_path)).compact
+  .select { |item| item["kind"] == "PriorityClass" }
+  .map { |item| item.dig("metadata", "name") }
+
+referenced = []
+referenced << cspec["priorityClassName"]
+[jpod, gpod, wpod].each { |pod| referenced << pod["priorityClassName"] }
+referenced.compact!
+
+referenced.uniq.each do |name|
+  raise "선언되지 않은 PriorityClass를 참조한다: #{name}" unless declared_priority_classes.include?(name)
+end
+raise "DB는 persona-critical, stateless는 persona-low여야 한다" unless referenced.uniq.sort == ["persona-critical", "persona-low"]
+# migration Job은 PriorityClass를 지정하지 않는다 — 일회성 작업이라 축출 순서를 다툴 이유가 없다.
+raise "migration Job에는 PriorityClass를 지정하지 않는다" if jpod["priorityClassName"]
 
 # --- bootstrap namespace --------------------------------------------------
 { ns_data_path => "persona-data", ns_app_path => "persona-app" }.each do |path, name|

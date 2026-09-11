@@ -90,30 +90,70 @@ kubectl --context=kubernetes-admin@kubernetes -n traefik get svc,deploy -o wide
 # 기존 namespace·Secret
 kubectl --context=kubernetes-admin@kubernetes get ns
 kubectl --context=kubernetes-admin@kubernetes get applications.argoproj.io -A
+
+# PriorityClass — 없으면 파드가 admission에서 거부된다
+kubectl --context=kubernetes-admin@kubernetes get priorityclass persona-critical persona-low
 ```
 
 확인할 것: GatewayClass `traefik` 존재, Traefik HTTP entryPoint `8000`,
-`persona-data`·`persona-app` namespace 부재, 같은 이름의 기존 PV 부재.
+`persona-data`·`persona-app` namespace 부재, 같은 이름의 기존 PV 부재,
+`persona-critical`·`persona-low` PriorityClass 존재.
 
 **Released 상태의 옛 PV가 남아 있으면** 새 PVC가 그것을 재사용하지 않는다.
 노드에서 수동 정리가 필요한지 `docs/storage-and-recovery.md`를 보고 판단한다.
 
-## 1. bootstrap — namespace와 Secret
+## 1. bootstrap — PriorityClass, namespace, Secret
+
+### 1-a. PriorityClass
+
+세 워크로드가 모두 PriorityClass를 참조한다 — DB는 `persona-critical`, Gateway·Web·migration
+Job은 `persona-low`다. **클래스가 없으면 Deployment는 만들어지되 파드가 admission에서 거부된다.**
+파드가 아예 생기지 않으므로 "왜 안 뜨지"를 한참 헤매기 쉽다.
+
+Traefik이 이미 `persona-low`를 쓰고 있어 Traefik이 떠 있다면 존재할 가능성이 높다.
+그래도 확인하고 넘어간다.
+
+```sh
+kubectl --context=kubernetes-admin@kubernetes get priorityclass persona-critical persona-low
+```
+
+없으면 준비한다. 이 선언은 클러스터 전역 자원이라 Argo가 관리하지 않는다.
+
+```sh
+kubectl --context=kubernetes-admin@kubernetes apply -f bootstrap/priorityclasses/priorityclasses.yaml
+```
+
+### 1-b. namespace
 
 ```sh
 kubectl --context=kubernetes-admin@kubernetes apply -f bootstrap/namespaces/persona-data.yaml
 kubectl --context=kubernetes-admin@kubernetes apply -f bootstrap/namespaces/persona-app.yaml
 ```
 
+### 1-c. Secret
+
 Secret 4개를 위 계약대로 만든다. 값은 이 문서에 적지 않는다.
 이미 있으면 다시 만들지 않고 키 이름만 확인한다.
 
+아래는 **키 이름만** 출력한다. `-o jsonpath='{.data}'`를 쓰지 않는 이유는 그것이 키가 아니라
+base64로 인코딩된 **값 전체**를 내놓기 때문이다. base64는 암호화가 아니므로 DB 비밀번호와
+토큰이 터미널 스크롤백과 셸 기록에 그대로 남는다.
+
 ```sh
-kubectl --context=kubernetes-admin@kubernetes -n persona-data get secret persona-db-migrator -o jsonpath='{.data}' | tr ',' '\n'
-kubectl --context=kubernetes-admin@kubernetes -n persona-app  get secret persona-gateway-migrator -o jsonpath='{.data}' | tr ',' '\n'
-kubectl --context=kubernetes-admin@kubernetes -n persona-app  get secret persona-gateway-runtime  -o jsonpath='{.data}' | tr ',' '\n'
-kubectl --context=kubernetes-admin@kubernetes -n persona-app  get secret persona-app-ghcr
+for ns_secret in \
+  "persona-data persona-db-migrator" \
+  "persona-app persona-gateway-migrator" \
+  "persona-app persona-gateway-runtime" \
+  "persona-app persona-app-ghcr"; do
+  set -- $ns_secret
+  echo "== $2 ($1)"
+  kubectl --context=kubernetes-admin@kubernetes -n "$1" get secret "$2" \
+    -o go-template='{{range $k, $_ := .data}}{{$k}}{{"\n"}}{{end}}'
+done
 ```
+
+`go-template`은 kubectl에 내장돼 있어 `jq` 같은 추가 도구가 필요 없다.
+`$_`로 값을 버리므로 값이 출력 경로에 들어가지 않는다.
 
 ## 2. CNPG operator
 
@@ -143,12 +183,24 @@ PVC가 `Pending`이면 `WaitForFirstConsumer`라 파드 스케줄을 기다리�
 
 migration 전에 role만 만든다. 권한은 migration 뒤에 준다.
 
+비밀번호를 `CREATE ROLE ... PASSWORD '값'`으로 주지 않는다. 그렇게 하면 셸 기록뿐 아니라
+**PostgreSQL 서버 로그에도 평문으로 남는다.** 대신 role을 비밀번호 없이 만든 뒤 psql의
+`\password`로 설정한다. 이 명령은 입력을 숨겨 받아 암호화한 `ALTER ROLE`로 보내며,
+매뉴얼이 밝히듯 *"명령 기록, 서버 로그, 그 밖 어디에도 평문이 남지 않게"* 한다.
+
 ```sh
 kubectl --context=kubernetes-admin@kubernetes -n persona-data exec -it persona-db-1 -- \
-  psql -d persona_app -c "CREATE ROLE persona_runtime LOGIN PASSWORD '<값>'"
+  psql -d persona_app
 ```
 
-이 비밀번호는 `persona-gateway-runtime` Secret의 `DATABASE_URL`과 같아야 한다.
+psql 세션에서:
+
+```
+CREATE ROLE persona_runtime LOGIN;
+\password persona_runtime
+```
+
+이 비밀번호는 `persona-gateway-runtime` Secret의 `DATABASE_URL`에 들어간 것과 같아야 한다.
 
 ## 5. migration
 
@@ -190,20 +242,90 @@ kubectl --context=kubernetes-admin@kubernetes -n persona-data exec -i persona-db
 ## 7. runtime 권한 검증
 
 앱을 올리기 전에 계정 경계가 실제로 서 있는지 본다.
-아래는 **모두 거부되어야** 한다.
+
+**운영 DB와 격리 DB는 검사 방법이 다르다.** 찾으려는 결함이 "권한이 과도하다"이므로,
+운영에서 그 결함을 실행해 확인하면 결함이 있을 때 실제로 DB가 바뀐다.
+`alembic_version`이 바뀌면 readiness가 막히고 다음 migration도 깨진다.
+
+| | 운영 DB (여기) | 격리 DB (`scripts/verify-db-privileges.sh`) |
+| --- | --- | --- |
+| 기본 방법 | **카탈로그 조회** — 쓰기를 시도하지 않는다 | 실제 문장을 실행해 거부를 확인한다 |
+| 실행 시도 | 필요하면 `BEGIN … ROLLBACK` 안에서만 | 제약 없음 |
+| 안전 근거 | DB를 바꾸지 않는다 | 전용 임시 Postgres를 직접 만들고 끝나면 지운다. 운영을 가리킬 수 없다 |
+
+### 7-a. 접속 — 비밀번호를 인자에 넣지 않는다
+
+`postgresql://user:password@…`를 명령 인자로 주면 `ps` 출력과 셸 기록에 노출된다.
+접속 문자열에서 비밀번호를 빼고 `-W`로 숨겨진 프롬프트를 받는다.
 
 ```sh
 kubectl --context=kubernetes-admin@kubernetes -n persona-data exec -it persona-db-1 -- \
-  psql "postgresql://persona_runtime:<값>@127.0.0.1:5432/persona_app" -c \
-  "UPDATE persona_minimal.alembic_version SET version_num = 'tampered'"
-
-kubectl --context=kubernetes-admin@kubernetes -n persona-data exec -it persona-db-1 -- \
-  psql "postgresql://persona_runtime:<값>@127.0.0.1:5432/persona_app" -c \
-  "CREATE TABLE persona_minimal.should_not_exist (id int)"
+  psql -h 127.0.0.1 -U persona_runtime -d persona_app -W
 ```
 
-같은 검사를 로컬에서 격리 Postgres로 먼저 돌려볼 수 있다:
-`scripts/verify-db-privileges.sh` (홈 클러스터를 건드리지 않는다).
+### 7-b. 카탈로그로 권한을 읽는다 (쓰기 없음)
+
+`has_*_privilege`에 권한을 **콤마로 나열하면 "하나라도 있으면 참"**이 된다. 그러면 느슨한
+권한이 통과로 보이므로, 권한마다 컬럼을 나눈다.
+
+```sql
+SELECT has_database_privilege('persona_runtime','persona_app','CONNECT')                    AS connect_t,
+       has_schema_privilege  ('persona_runtime','persona_minimal','USAGE')                  AS schema_usage_t,
+       has_schema_privilege  ('persona_runtime','persona_minimal','CREATE')                 AS schema_create_f,
+       has_schema_privilege  ('persona_runtime','public','CREATE')                          AS public_create_f;
+
+SELECT has_table_privilege('persona_runtime','persona_minimal.alembic_version','SELECT')    AS ver_select_t,
+       has_table_privilege('persona_runtime','persona_minimal.alembic_version','UPDATE')    AS ver_update_f,
+       has_table_privilege('persona_runtime','persona_minimal.alembic_version','INSERT')    AS ver_insert_f,
+       has_table_privilege('persona_runtime','persona_minimal.alembic_version','DELETE')    AS ver_delete_f;
+
+SELECT has_table_privilege('persona_runtime','persona_minimal.personas','SELECT')           AS p_select_t,
+       has_table_privilege('persona_runtime','persona_minimal.personas','INSERT')           AS p_insert_t,
+       has_table_privilege('persona_runtime','persona_minimal.personas','UPDATE')           AS p_update_t,
+       has_table_privilege('persona_runtime','persona_minimal.personas','DELETE')           AS p_delete_f,
+       has_table_privilege('persona_runtime','persona_minimal.personas','TRUNCATE')         AS p_truncate_f;
+
+-- 상속으로 우회할 수 있으면 위 결과가 무의미해진다.
+SELECT pg_has_role('persona_runtime','persona_migrator','MEMBER')                           AS inherits_migrator_f;
+
+-- ALTER와 DROP은 권한이 아니라 소유권이다. has_*_privilege로는 볼 수 없다.
+SELECT tablename, tableowner FROM pg_tables WHERE schemaname = 'persona_minimal';
+```
+
+컬럼 이름의 `_t`/`_f`가 기대값이다. `_f`인데 `t`가 나오면 `db/grants/persona_minimal.sql`을
+다시 본다. 마지막 질의의 `tableowner`는 전부 `persona_migrator`여야 하며,
+`persona_runtime`이 하나라도 있으면 그 테이블은 runtime이 마음대로 바꿀 수 있다.
+
+### 7-c. 실행 동작까지 보고 싶을 때 — 트랜잭션 안에서만
+
+```sql
+BEGIN;
+UPDATE persona_minimal.alembic_version SET version_num = 'tampered';
+ROLLBACK;
+
+BEGIN;
+CREATE TABLE persona_minimal.should_not_exist (id int);
+ROLLBACK;
+```
+
+권한이 정상이면 각 문장이 거부되고 트랜잭션은 abort 상태가 되며 `ROLLBACK`이 그것을 정리한다.
+권한이 과도해서 **성공하더라도 `ROLLBACK`이 되돌린다.** 어느 쪽이든 DB는 바뀌지 않는다.
+`ROLLBACK`을 빠뜨리면 이 검사 자체가 사고가 된다.
+
+확인 후 `alembic_version`이 그대로인지 본다:
+
+```sql
+SELECT version_num FROM persona_minimal.alembic_version;   -- 0001_persona_minimal
+```
+
+### 7-d. 격리 DB에서 먼저 돌려보기
+
+```sh
+scripts/verify-db-privileges.sh
+```
+
+전용 임시 Postgres를 직접 만들어 migration·grant 적용까지 재현한 뒤 거부를 실제로 확인한다.
+홈 클러스터를 건드리지 않으며 운영 DB를 가리킬 수 없다.
 
 ## 8. 앱 배포
 
@@ -280,7 +402,52 @@ kubectl --context=kubernetes-admin@kubernetes -n persona-app rollout restart dep
 kubectl --context=kubernetes-admin@kubernetes -n persona-app rollout status deploy/persona-gateway
 ```
 
-## 10. 실패 시 — 앱 rollback과 DB 복구를 구분한다
+## 10. 스케줄링 — 배포 중 진단
+
+**기본 `kube-scheduler`를 쓴다.** 커스텀 스케줄러나 스케줄러 플러그인은 없다.
+다만 배치·우선순위·업데이트 규칙은 우리가 직접 얹은 것이고, 파드가 안 뜰 때 봐야 할 곳이 그것들이다.
+
+규칙 전체와 그 근거는 **[저장소 README의 "스케줄링 전략"](../README.md)** 에 있다.
+여기서는 배포 중에 실제로 쓰는 진단 절차만 다룬다. 두 곳에 같은 표를 두면 갈라진다.
+
+### 파드가 `Pending`일 때 보는 순서
+
+```sh
+kubectl --context=kubernetes-admin@kubernetes -n <ns> describe pod <pod> | sed -n '/Events:/,$p'
+```
+
+Events 메시지로 원인을 가른다.
+
+| 메시지 | 원인 | 볼 곳 |
+| --- | --- | --- |
+| `no PriorityClass with name ... was found` | PriorityClass 부재 | 위 1-a |
+| `didn't match Pod's node affinity/selector` | worker1·2에 배치 불가, 또는 노드 이름 불일치 | `kubectl get nodes`로 hostname 확인 |
+| `Insufficient memory` / `Insufficient cpu` | 워커 자원 부족 | `kubectl top nodes`. requests는 초기 예산이라 실측 후 조정 대상이다 |
+| `pod has unbound immediate PersistentVolumeClaims` | PVC 미바인딩 | local-path는 `WaitForFirstConsumer`라 파드 스케줄을 기다리는 정상 상태일 수 있다. 오래 `Pending`이면 worker1 디스크를 본다 |
+| `ImagePullBackOff` (Pending 아님) | pull Secret 부재·만료 | `persona-app-ghcr`. 두 패키지는 private이다 |
+
+필수 조건을 만족하는 노드에 자리가 없으면 파드는 그대로 `Pending`으로 남는다.
+나중에 자리가 나도 **이미 실행 중인 파드가 자동으로 재분산되지는 않는다.**
+
+### 사라진 파드가 축출인지 확인
+
+`persona-low`는 값이 낮아 자원 압박 시 먼저 축출 대상이 된다.
+
+```sh
+kubectl --context=kubernetes-admin@kubernetes -n persona-app get events --sort-by=.lastTimestamp | grep -iE 'evict|preempt'
+```
+
+### 업데이트 중 중단 구간
+
+Gateway는 replica 1개에 `maxSurge: 0`이라 **교체 중 준비된 API가 없는 구간이 생긴다.**
+Web은 2개라 정상 교체 중에는 한 대가 남지만 무중단 보장은 아니다.
+브라우저 검증을 롤아웃 직후에 하면 이 구간에 걸릴 수 있다.
+
+```sh
+kubectl --context=kubernetes-admin@kubernetes -n persona-app rollout status deploy/persona-gateway
+```
+
+## 11. 실패 시 — 앱 rollback과 DB 복구를 구분한다
 
 **앱 rollback** (선언을 되돌리는 것)
 
