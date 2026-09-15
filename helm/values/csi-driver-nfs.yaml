@@ -1,0 +1,39 @@
+# 서버는 VM 104가 제공한다. CSI는 공유 아래 PVC별 디렉터리만 만든다.
+# root_squash 환경에서 불필요한 chmod/chown을 피하고 앱 UID/GID를 맞춘다.
+driver:
+  mountPermissions: 0
+controller:
+  replicas: 1
+  enableSnapshotter: false
+  defaultOnDeletePolicy: retain
+  logLevel: 2
+  priorityClassName: ""
+  tolerations: []
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: In
+                values: [k8s-worker1, k8s-worker2]
+node:
+  logLevel: 2
+  priorityClassName: ""
+  tolerations: []
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: In
+                values: [k8s-worker1, k8s-worker2]
+externalSnapshotter:
+  enabled: false
+  customResourceDefinitions:
+    enabled: false
+volumeSnapshotClass:
+  create: false
+storageClass:
+  create: false
