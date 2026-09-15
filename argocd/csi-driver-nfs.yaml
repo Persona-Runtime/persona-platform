@@ -1,0 +1,22 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: csi-driver-nfs
+  namespace: argocd
+spec:
+  project: default
+  sources:
+    - repoURL: https://raw.githubusercontent.com/kubernetes-csi/csi-driver-nfs/master/charts
+      chart: csi-driver-nfs
+      targetRevision: 4.13.4
+      helm:
+        releaseName: csi-driver-nfs
+        valueFiles:
+          - $values/helm/values/csi-driver-nfs.yaml
+    - repoURL: https://github.com/Persona-Runtime/persona-platform.git
+      targetRevision: develop
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kube-system
+  # 수동 Sync. NFS 마운트에 필요한 privileged/hostNetwork는 CSI에만 허용한다.

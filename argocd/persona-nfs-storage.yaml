@@ -1,0 +1,15 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: persona-nfs-storage
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/Persona-Runtime/persona-platform.git
+    targetRevision: develop
+    path: kustomize/overlays/prod/nfs-storage
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: default
+  # CSI 준비를 확인한 뒤 별도로 수동 Sync한다. 테스트 PVC/Pod는 관리하지 않는다.
