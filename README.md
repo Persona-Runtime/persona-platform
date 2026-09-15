@@ -17,6 +17,11 @@ Persona Runtime의 Kubernetes·AWS 인프라와 배포 구성을 관리하는 �
 일반 워크로드는 두 홈 워커를 공유하고, GPU 워크로드는 GPU 노드에 배치한다.
 local-path 저장소는 노드에 종속되며, 고가용성은 현재 목표가 아니다.
 
+2026-09-15: **같은 Proxmox의 NFS 전용 VM + NFS CSI**를 공유 저장소 실험 방향으로 채택했다.
+NFS VM 설치와 두 워커의 수동 마운트·파일 조회는 사용자 출력으로 확인했다.
+CSI·비기본 StorageClass·합성 파일용 테스트 선언은 준비했으며 클러스터 적용은 아직이다.
+기존 DB·Prometheus의 local-path는 변경하지 않는다. [준비·검증 절차](runbooks/nfs-shared-storage.md).
+
 ## 스케줄링 전략
 
 **Kubernetes 기본 스케줄러를 사용하되, 아래 배치 규칙을 직접 추가했다.** 커스텀 스케줄러나

@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nfs-smoke-data
+  namespace: persona-nfs-test
+spec:
+  storageClassName: nfs-shared
+  accessModes: [ReadWriteMany]
+  resources:
+    requests:
+      storage: 1Gi

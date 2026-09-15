@@ -1,0 +1,21 @@
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: nfs-shared
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "false"
+    argocd.argoproj.io/sync-options: Prune=false,Delete=false
+provisioner: nfs.csi.k8s.io
+parameters:
+  server: 192.168.50.205
+  share: /srv/nfs/k8s
+  subDir: ${pv.metadata.name}
+  mountPermissions: "0"
+  onDelete: retain
+# PVC 요청량은 NFS 디렉터리의 quota가 아니다. 삭제도 데이터 소거와 분리한다.
+reclaimPolicy: Retain
+allowVolumeExpansion: false
+volumeBindingMode: Immediate
+mountOptions:
+  - nfsvers=4.1
+  - hard
