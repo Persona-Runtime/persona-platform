@@ -48,14 +48,13 @@ kubectl kustomize "$repo_dir/kustomize/overlays/prod/persona-app"     > "$app_fi
 ruby -ryaml - \
   "$db_file" "$migrate_file" "$app_file" \
   "$repo_dir/argocd/persona-db.yaml" \
-  "$repo_dir/argocd/persona-migrate.yaml" \
   "$repo_dir/argocd/persona-app.yaml" \
   "$repo_dir/bootstrap/namespaces/persona-data.yaml" \
   "$repo_dir/bootstrap/namespaces/persona-app.yaml" \
   "$repo_dir/db/grants/persona_minimal.sql" \
   "$repo_dir/bootstrap/traefik/values.yaml" <<'RUBY'
 db_path, migrate_path, app_path,
-  app_db, app_migrate, app_apps,
+  app_db, app_apps,
   ns_data_path, ns_app_path, grants_path, traefik_values_path = ARGV
 
 GATEWAY_IMAGE = "ghcr.io/persona-runtime/persona-minimal-api@sha256:922ae043feaa1a893336816c38ac17f448aa96c44ba06983652181784f52c2f6"
@@ -253,9 +252,13 @@ rules.each do |rule|
 end
 
 # --- Argo Application -----------------------------------------------------
+# persona-migrate Application 선언은 2026-09-16에 저장소에서 뺐다. 완료된 Job은 같은 선언을
+# 다시 Sync해도 재실행되지 않지만, Job을 지운 뒤 Sync하면 재생성되고 끝난 일회성 작업이
+# 목록에 남으면 무엇이 상시 운영 대상인지 흐려진다. 아래 Job 계약 검사와 overlay 렌더 검사는
+# 그대로 두어 다음 revision 선언을 계속 검증한다.
+# 재등록 절차와 선언 원문은 runbooks/test-resource-cleanup.md에 있다.
 {
   app_db      => ["persona-db", "kustomize/overlays/prod/persona-db", "persona-data"],
-  app_migrate => ["persona-migrate", "kustomize/overlays/prod/persona-migrate", "persona-app"],
   app_apps    => ["persona-app", "kustomize/overlays/prod/persona-app", "persona-app"],
 }.each do |path, (name, source_path, namespace)|
   application = YAML.load_file(path)
