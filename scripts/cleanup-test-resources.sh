@@ -20,10 +20,11 @@ usage() {
 사용법: sh scripts/cleanup-test-resources.sh <단계> [--confirm]
 
 단계
-  migration   persona-migrate Application 등록 해제와 완료된 Job 회수
-  mock-sse    persona-mock-sse Application·워크로드·namespace 회수
-  nfs         nfs-smoke-data PVC 와 연결된 PV 회수 (서버 디렉터리는 런북 D절)
-  verify      남은 Application·서비스·저장소 상태 확인 (삭제 없음)
+  migration       persona-migrate Application 등록 해제와 완료된 Job 회수
+  mock-sse        persona-mock-sse Application·워크로드·namespace 회수
+  mock-sse-finish mock-sse 가 namespace 삭제 직전에 멈췄을 때 마무리만 다시 수행
+  nfs             nfs-smoke-data PVC 와 연결된 PV 회수 (서버 디렉터리는 런북 D절)
+  verify          남은 Application·서비스·저장소 상태 확인 (삭제 없음)
 
 --confirm 이 없으면 dry-run 이다. 읽기 전용 게이트만 돌고 삭제는 출력만 한다.
 USAGE
@@ -73,7 +74,7 @@ WANT_SUBDIR=$WANT_PV
 
 # ---- 공통 ------------------------------------------------------------------
 require_tools() {
-  for tool in kubectl; do
+  for tool in kubectl mktemp; do
     command -v "$tool" >/dev/null 2>&1 || { echo "중단: 필요한 도구가 없다: $tool" >&2; return 1; }
   done
 }
@@ -266,30 +267,67 @@ assert_sa_has_no_pull_secret() {
   echo "확인: ServiceAccount 에 pull Secret 참조 없음"
 }
 
-# 삭제 후 검사 — Deployment 를 실제로 지운 뒤에만 부른다.
-assert_no_pull_secret_ref() {
-  if ! pods=$(pull_secret_consumers 2>&1); then
-    echo "중단: pull Secret 소비자 조회가 실패했다 — $pods" >&2; return 1
-  fi
-  if printf '%s\n' "$pods" | grep -q "$MOCK_APP-ghcr"; then
-    echo "중단: pull Secret 참조가 남아 있다 — $pods" >&2; return 1
-  fi
-  echo "확인: pull Secret 참조 없음"
-}
-
 # namespace 자원을 전수 열거한다. 조회 실패를 빈 목록으로 읽지 않는다.
+#
+# stdout 과 stderr 를 분리해서 받는다($STDERR_FILE). 합쳐서 받으면(2>&1) rc=0 인 조회의
+# stderr 경고까지 인벤토리 목록에 섞여 들어간다. 이 클러스터(서버 1.36 대)는 Endpoints
+# 조회마다 "Warning: v1 Endpoints is deprecated ..." 를 stderr 로 찍는데, 그 문구가
+# for 루프의 word-split 에서 공백 단위로 쪼개져 자원 이름처럼 취급되면서 실제로는
+# 항상 승인 실패로 이어졌다(직접 재현해 확인함). 경고는 버리지 않고 별도로 남긴다.
 ns_inventory() {          # ns_inventory <ns> — 성공 시 "kind/name" 목록을 출력
   ns=$1
-  if ! kinds=$($K api-resources --verbs=list --namespaced -o name 2>&1); then
-    echo "중단: api-resources 조회가 실패했다 — $kinds" >&2; return 1
+  if ! kinds=$($K api-resources --verbs=list --namespaced -o name 2>"$STDERR_FILE"); then
+    echo "중단: api-resources 조회가 실패했다 — $(cat "$STDERR_FILE")" >&2; return 1
   fi
+  warn=$(cat "$STDERR_FILE")
+  test -z "$warn" || echo "경고: api-resources 조회 stderr — $warn" >&2
   test -n "$kinds" || { echo "중단: api-resources 결과가 비어 있다" >&2; return 1; }
   for kind in $kinds; do
-    if ! got=$($K -n "$ns" get "$kind" --ignore-not-found -o name 2>&1); then
-      echo "중단: $ns 의 $kind 조회가 실패했다 — $got" >&2; return 1
+    if ! got=$($K -n "$ns" get "$kind" --ignore-not-found -o name 2>"$STDERR_FILE"); then
+      echo "중단: $ns 의 $kind 조회가 실패했다 — $(cat "$STDERR_FILE")" >&2; return 1
     fi
+    warn=$(cat "$STDERR_FILE")
+    test -z "$warn" || echo "경고: $ns 의 $kind 조회 stderr — $warn" >&2
     test -z "$got" || printf '%s\n' "$got"
   done
+}
+
+# Event 는 다른 객체에서 일어난 일을 설명하는 감사 기록이다. 그 자체로는 데이터를 갖지
+# 않으므로, 실제 리소스 승인((a)(b)(c))만큼 엄격하게 다루지 않아도 손실 위험이 없다 —
+# 잘못 허용해도 최악의 경우 무해한 감사 기록 하나가 namespace 삭제에 함께 쓸려갈 뿐,
+# 실제 자원이 오삭제되는 것은 아니다. involvedObject 가 우리가 관리하는 kind·이름과
+# 관련될 때만 허용한다. Pod·ReplicaSet 은 Deployment 가 매번 다른 접미사로 이름을 짓고,
+# 이 시점엔 대상이 이미 지워진 뒤라 uid 로 대조할 살아 있는 객체가 없다. 그래서 이
+# 판정에서만 예외적으로 접두사를 쓴다 — 3cf6a32 에서 없앤 자원 승인용 접두사 허용과는
+# 위험 성격이 다르다.
+event_is_managed() {          # event_is_managed <involvedObject kind> <involvedObject name>
+  iokind=$1; ioname=$2
+  case "$iokind" in
+    Deployment|Service|Secret|Gateway|HTTPRoute) test "$ioname" = "$MOCK_APP" ;;
+    Pod|ReplicaSet)
+      case "$ioname" in
+        "$MOCK_APP"|"$MOCK_APP"-*) return 0 ;;
+        *) return 1 ;;
+      esac ;;
+    *) return 1 ;;
+  esac
+}
+
+# ns_inventory 가 event/ 나 event.events.k8s.io/ 항목을 내놓으면 involvedObject 를 조회해
+# event_is_managed 로 판정한다. events 와 events.events.k8s.io 는 api-resources 에 둘 다
+# 나열되고 같은 저장소를 공유하므로, 같은 Event 가 두 kind 문자열로 중복 열거될 수 있다 —
+# 조회 결과는 같으므로 판정도 같게 나온다. 반환값은 0=승인, 1=미승인, 2=조회 실패로
+# 나눠, 조회 실패는 호출부가 즉시 전체 단계를 중단시키게 한다.
+classify_event() {            # classify_event <ns> <kind> <name>
+  ns=$1; kind=$2; name=$3
+  if ! io=$($K -n "$ns" get "$kind" "$name" -o jsonpath='{.involvedObject.kind}|{.involvedObject.name}' 2>"$STDERR_FILE"); then
+    echo "중단: $kind/$name 의 involvedObject 조회가 실패했다 — $(cat "$STDERR_FILE")" >&2; return 2
+  fi
+  warn=$(cat "$STDERR_FILE")
+  test -z "$warn" || echo "경고: $kind/$name involvedObject 조회 stderr — $warn" >&2
+  iokind=$(printf '%s' "$io" | cut -d'|' -f1)
+  ioname=$(printf '%s' "$io" | cut -d'|' -f2)
+  event_is_managed "$iokind" "$ioname"
 }
 
 # namespace 전체 자원을 승인 조건과 대조한다.
@@ -352,6 +390,14 @@ assert_ns_inventory_approved() {
         pod_uid=$(uid_of pod "$name") || { echo "중단: Pod uid 조회 실패 — $pod_uid" >&2; return 1; }
         if owner_matches "$ref" Pod "$name" "$pod_uid" no; then continue; fi
         ;;
+      event|event.events.k8s.io)
+        # classify_event 를 단독 명령으로 부르면 set -e 가 nonzero 반환에서 곧바로
+        # 스크립트를 끝내 event_rc=$? 조차 실행되지 못한다. AND-OR 목록으로 감싸
+        # 이 명령의 실패가 즉시 종료를 유발하지 않게 한다.
+        classify_event "$ns" "$kind" "$name" && event_rc=0 || event_rc=$?
+        test "$event_rc" -eq 2 && return 1
+        test "$event_rc" -eq 0 && continue
+        ;;
     esac
     unexpected="$unexpected  $item
 "
@@ -385,15 +431,29 @@ assert_ns_inventory_approved() {
 }
 
 # namespace 삭제 직전 검사. 인벤토리 게이트와 다른, 더 좁은 목록을 쓴다.
-# 이 시점에는 앞 단계가 모두 지워졌으므로 쿠버네티스가 자동으로 만드는 두 개만 남아야 한다.
+# 이 시점에는 앞 단계가 모두 지워졌으므로 쿠버네티스가 자동으로 만드는 기본 자원 둘과,
+# 정리 대상과 연관이 확인된 Event(classify_event) 만 남아야 한다. Pod 종료 과정에서
+# 남는 Killing 같은 Event 를 무조건 막으면 정상 종료도 항상 여기서 멈추기 때문이다.
 # 삭제 후 조건이므로 dry-run 에서는 부르지 않는다.
 assert_ns_residue_only_defaults() {
   ns=$1
   found=$(ns_inventory "$ns") || return 1
   leftovers=""
   for item in $(printf '%s\n' "$found" | sort -u); do
+    kind=${item%%/*}
+    name=${item#*/}
     case "$item" in
       configmap/kube-root-ca.crt|serviceaccount/default) continue ;;
+    esac
+    case "$kind" in
+      event|event.events.k8s.io)
+        # classify_event 를 단독 명령으로 부르면 set -e 가 nonzero 반환에서 곧바로
+        # 스크립트를 끝내 event_rc=$? 조차 실행되지 못한다. AND-OR 목록으로 감싸
+        # 이 명령의 실패가 즉시 종료를 유발하지 않게 한다.
+        classify_event "$ns" "$kind" "$name" && event_rc=0 || event_rc=$?
+        test "$event_rc" -eq 2 && return 1
+        test "$event_rc" -eq 0 && continue
+        ;;
     esac
     leftovers="$leftovers  $item
 "
@@ -401,7 +461,8 @@ assert_ns_residue_only_defaults() {
   test -z "$leftovers" || {
     echo "중단: $ns 에 기본 자원 외의 것이 남아 있어 namespace 를 지우지 않는다" >&2
     printf '%s' "$leftovers" >&2
-    echo "  앞 삭제가 아직 정착되지 않았으면 잠시 뒤 이 단계를 다시 실행한다" >&2
+    echo "  앞 삭제가 아직 정착되지 않았으면 sh scripts/cleanup-test-resources.sh mock-sse-finish --confirm 으로 마무리한다" >&2
+    echo "  mock-sse 를 처음부터 다시 실행하지 않는다 — Application 이 이미 없어 finalizer 재조회가 NotFound 로 실패한다" >&2
     echo "  그 사이 새로 생긴 자원이면 사람이 먼저 확인한다" >&2
     return 1
   }
@@ -467,17 +528,45 @@ stage_mock_sse() {
   fi
   run_delete -n "$MOCK_NS" delete secret "$MOCK_APP-ghcr"
 
-  # namespace 삭제 직전 — 여기가 실제 방어선이다. 인벤토리 게이트가 아니라 더 좁은
-  # 잔여물 검사를 쓴다. 삭제 후 조건이므로 dry-run 에서는 부르지 않는다.
+  mock_sse_finish_sequence
+  echo "mock SSE 단계 완료 (confirm=$CONFIRM)"
+}
+
+# namespace 삭제 직전 검사와 삭제. stage_mock_sse 의 마지막과 stage_mock_sse_finish 가
+# 공유해 두 경로의 잔여물 판정이 어긋나지 않게 한다. 여기가 실제 방어선이다 —
+# 인벤토리 게이트가 아니라 더 좁은 잔여물 검사를 쓴다. 삭제 후 조건이므로 dry-run 에서는
+# 강제하지 않되, 정보로는 보여준다(round 6에서 세운 "삭제 후 조건은 dry-run 에서
+# 요구하지 않는다" 원칙은 실패시키지 않는다는 뜻이지 정보를 숨긴다는 뜻이 아니다).
+mock_sse_finish_sequence() {
   if test "$CONFIRM" = yes; then
     assert_no_pvc "$MOCK_NS"
     assert_ns_residue_only_defaults "$MOCK_NS"
+  else
+    echo "--- 현재 남은 자원 (dry-run, 정보용 — 실패해도 이 단계를 막지 않는다) ---"
+    ns_inventory "$MOCK_NS" || return 1
   fi
   run_delete delete namespace "$MOCK_NS" --wait=true --timeout=180s
   if test "$CONFIRM" = yes; then
     assert_absent "namespace $MOCK_NS" get namespace "$MOCK_NS"
   fi
-  echo "mock SSE 단계 완료 (confirm=$CONFIRM)"
+}
+
+# mock SSE 정리가 namespace 삭제 직전에 멈춘 뒤 다시 이어서 끝내는 전용 단계.
+#
+# stage_mock_sse 를 처음부터 다시 실행하면 안 된다 — Application 은 이미 지워졌고,
+# assert_no_finalizer 는 그 조회에 --ignore-not-found 를 쓰지 않으므로 NotFound 를
+# 조회 실패로 보고 즉시 중단한다. "잠시 뒤 다시 실행한다" 는 안내가 실제로는 완료할 수
+# 없는 경로였다. 이 단계는 Application·워크로드 삭제를 다시 시도하지 않고 마무리만 한다.
+stage_mock_sse_finish() {
+  if ! gone=$($K get namespace "$MOCK_NS" --ignore-not-found -o name 2>&1); then
+    echo "중단: namespace $MOCK_NS 조회가 실패했다 — $gone" >&2; return 1
+  fi
+  if test -z "$gone"; then
+    echo "확인: namespace $MOCK_NS 는 이미 없다 — 마무리할 것이 없다"
+    return 0
+  fi
+  mock_sse_finish_sequence
+  echo "mock SSE 마무리 완료 (confirm=$CONFIRM)"
 }
 
 # ---- 단계: NFS --------------------------------------------------------------
@@ -594,10 +683,15 @@ stage_verify() {
 # ---- 실행 ------------------------------------------------------------------
 require_tools
 assert_context
+# stdout 과 stderr 를 분리해서 받을 때 쓰는 임시 파일. 매 호출마다 새로 만들지 않고
+# 계속 덮어써 파일 수를 늘리지 않는다. ns_inventory·classify_event 가 쓴다.
+STDERR_FILE=$(mktemp "${TMPDIR:-/tmp}/persona-cleanup-stderr.XXXXXX")
+trap 'rm -f "$STDERR_FILE"' EXIT HUP INT TERM
 case "$STAGE" in
-  migration) stage_migration ;;
-  mock-sse)  stage_mock_sse ;;
-  nfs)       stage_nfs ;;
-  verify)    stage_verify ;;
-  *)         echo "알 수 없는 단계: $STAGE" >&2; usage ;;
+  migration)       stage_migration ;;
+  mock-sse)        stage_mock_sse ;;
+  mock-sse-finish) stage_mock_sse_finish ;;
+  nfs)             stage_nfs ;;
+  verify)          stage_verify ;;
+  *)               echo "알 수 없는 단계: $STAGE" >&2; usage ;;
 esac

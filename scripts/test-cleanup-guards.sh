@@ -25,6 +25,18 @@ printf '%s\n' "$*" >> "$CALL_LOG"
 FAKE_ARGS="$*"
 
 emit_err() { echo "$1" >&2; exit 1; }
+# stderr 에 경고만 남기고 rc=0 로 계속 진행한다. Endpoints deprecation 경고처럼
+# 성공한 조회에 stderr 가 섞이는 상황을 재현할 때 쓴다.
+emit_warn() { echo "$1" >&2; }
+
+# mock-sse-finish 사례는 독립된 새 프로세스 하나로 "이전 실행에서 이미 지워진 상태"를
+# 흉내낸다. 그 안에서는 delete deployment 호출이 이번 CALL_LOG 에 남지 않으므로,
+# 기존의 "grep -q 로그" 판정만으로는 워크로드가 이미 없다는 것을 알 수 없다.
+case "$SCENARIO" in
+  already-finished|finish-정상|finish-막힘) WORKLOAD_GONE=yes ;;
+  *) WORKLOAD_GONE=no ;;
+esac
+workload_gone() { test "$WORKLOAD_GONE" = yes || grep -q "delete deployment persona-mock-sse" "$CALL_LOG"; }
 
 # 공통 정상 응답
 case "$*" in
@@ -34,7 +46,7 @@ esac
 # ---- namespace 인벤토리 ------------------------------------------------------
 # 실제 클러스터의 91개 kind 를 다 흉내낼 필요는 없다. 자원이 실제로 있는 kind 와
 # 빈 kind 를 섞어, 스윕이 전 kind 를 돌고 결과를 모으는 경로를 검사한다.
-INV_KINDS="pods replicasets.apps deployments.apps services endpoints secrets configmaps serviceaccounts persistentvolumeclaims gateways.gateway.networking.k8s.io httproutes.gateway.networking.k8s.io endpointslices.discovery.k8s.io ciliumendpoints.cilium.io podmetrics.metrics.k8s.io"
+INV_KINDS="pods replicasets.apps deployments.apps services endpoints secrets configmaps serviceaccounts persistentvolumeclaims gateways.gateway.networking.k8s.io httproutes.gateway.networking.k8s.io endpointslices.discovery.k8s.io ciliumendpoints.cilium.io podmetrics.metrics.k8s.io events events.events.k8s.io"
 
 case "$SCENARIO" in
   api-resources-fail)
@@ -55,7 +67,7 @@ esac
 # "지금 namespace 에 무엇이 있는가" 만 답한다.
 case "$FAKE_ARGS" in
   *"-n persona-mock-sse get pods --ignore-not-found"*)
-    if grep -q "delete deployment persona-mock-sse" "$CALL_LOG"; then
+    if workload_gone; then
       case "$SCENARIO" in
         residue-pod) echo "pod/persona-mock-sse-6665f6c5bf-r575j" ;;
       esac
@@ -69,10 +81,10 @@ case "$FAKE_ARGS" in
     esac
     exit 0 ;;
   *"-n persona-mock-sse get replicasets.apps --ignore-not-found"*)
-    if grep -q "delete deployment persona-mock-sse" "$CALL_LOG"; then exit 0; fi
+    if workload_gone; then exit 0; fi
     echo "replicaset.apps/persona-mock-sse-6665f6c5bf"; exit 0 ;;
   *"-n persona-mock-sse get deployments.apps --ignore-not-found"*)
-    if grep -q "delete deployment persona-mock-sse" "$CALL_LOG"; then
+    if workload_gone; then
       case "$SCENARIO" in unrelated-deploy) echo "deployment.apps/other-app" ;; esac
       exit 0
     fi
@@ -83,7 +95,7 @@ case "$FAKE_ARGS" in
     case "$SCENARIO" in unrelated-pvc) echo "persistentvolumeclaim/other-data" ;; esac
     exit 0 ;;
   *"-n persona-mock-sse get secrets --ignore-not-found"*)
-    if ! grep -q "delete secret persona-mock-sse-ghcr" "$CALL_LOG"; then
+    if ! workload_gone && ! grep -q "delete secret persona-mock-sse-ghcr" "$CALL_LOG"; then
       echo "secret/persona-mock-sse-ghcr"
     fi
     case "$SCENARIO" in
@@ -99,26 +111,46 @@ case "$FAKE_ARGS" in
     esac
     exit 0 ;;
   *"-n persona-mock-sse get ciliumendpoints.cilium.io --ignore-not-found"*)
-    if grep -q "delete deployment persona-mock-sse" "$CALL_LOG"; then exit 0; fi
+    if workload_gone; then exit 0; fi
     echo "ciliumendpoint.cilium.io/persona-mock-sse-6665f6c5bf-r575j"; exit 0 ;;
   *"-n persona-mock-sse get podmetrics.metrics.k8s.io --ignore-not-found"*)
-    if grep -q "delete deployment persona-mock-sse" "$CALL_LOG"; then exit 0; fi
+    if workload_gone; then exit 0; fi
     echo "podmetrics.metrics.k8s.io/persona-mock-sse-6665f6c5bf-r575j"; exit 0 ;;
   *"-n persona-mock-sse get configmaps --ignore-not-found"*)
     echo "configmap/kube-root-ca.crt"; exit 0 ;;
   *"-n persona-mock-sse get serviceaccounts --ignore-not-found"*)
     echo "serviceaccount/default"; exit 0 ;;
-  *"-n persona-mock-sse get services --ignore-not-found"*|*"-n persona-mock-sse get endpoints --ignore-not-found"*)
-    if grep -q "delete service persona-mock-sse" "$CALL_LOG"; then exit 0; fi
+  *"-n persona-mock-sse get services --ignore-not-found"*)
+    if test "$WORKLOAD_GONE" = yes || grep -q "delete service persona-mock-sse" "$CALL_LOG"; then exit 0; fi
     echo "service/persona-mock-sse"; exit 0 ;;
+  *"-n persona-mock-sse get endpoints --ignore-not-found"*)
+    # 실제 kubectl 은 Endpoints 를 별도 kind(endpoints/)로 반환한다. 예전엔 services 와
+    # 같은 분기로 묶여 service/persona-mock-sse 를 냈고, 그래서 (c) 의 endpoints/$MOCK_APP
+    # 승인 분기가 한 번도 실제로 검사되지 않았다.
+    if test "$WORKLOAD_GONE" = yes || grep -q "delete service persona-mock-sse" "$CALL_LOG"; then exit 0; fi
+    # 이 클러스터에서 실제로 나는 stderr 경고를 그대로 흉내낸다. 진짜 프로세스라 stdout·
+    # stderr 가 실제 fd 로 분리되므로, ns_inventory 가 이를 올바르게 나누는지 검사할 수 있다.
+    case "$SCENARIO" in
+      endpoints-경고) emit_warn "Warning: v1 Endpoints is deprecated in v1.33+; use discovery.k8s.io/v1 EndpointSlice" ;;
+    esac
+    echo "endpoints/persona-mock-sse"; exit 0 ;;
+  *"-n persona-mock-sse get events --ignore-not-found"*)
+    if workload_gone; then
+      case "$SCENARIO" in
+        killing-event-연관) echo "event/persona-mock-sse.killing" ;;
+        무관한-event)       echo "event/other-app.warn" ;;
+        finish-막힘)        echo "event/other-app.warn" ;;
+      esac
+    fi
+    exit 0 ;;
   *"-n persona-mock-sse get gateways"*--ignore-not-found*)
-    if grep -q "delete gateway persona-mock-sse" "$CALL_LOG"; then exit 0; fi
+    if test "$WORKLOAD_GONE" = yes || grep -q "delete gateway persona-mock-sse" "$CALL_LOG"; then exit 0; fi
     echo "gateway.gateway.networking.k8s.io/persona-mock-sse"; exit 0 ;;
   *"-n persona-mock-sse get httproutes"*--ignore-not-found*)
-    if grep -q "delete httproute persona-mock-sse" "$CALL_LOG"; then exit 0; fi
+    if test "$WORKLOAD_GONE" = yes || grep -q "delete httproute persona-mock-sse" "$CALL_LOG"; then exit 0; fi
     echo "httproute.gateway.networking.k8s.io/persona-mock-sse"; exit 0 ;;
   *"-n persona-mock-sse get endpointslices"*--ignore-not-found*)
-    if grep -q "delete service persona-mock-sse" "$CALL_LOG"; then exit 0; fi
+    if test "$WORKLOAD_GONE" = yes || grep -q "delete service persona-mock-sse" "$CALL_LOG"; then exit 0; fi
     echo "endpointslice.discovery.k8s.io/persona-mock-sse-kvh6v"; exit 0 ;;
 esac
 
@@ -229,6 +261,26 @@ case "$SCENARIO" in
     case "$FAKE_ARGS" in
       *"jsonpath={.spec.volumeName}"*)
         echo "pvc-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"; exit 0 ;;
+    esac ;;
+  killing-event-연관)
+    # Pod 종료 과정에서 남는 Killing 류 Event. involvedObject 가 정리 대상 Pod 를
+    # 가리키므로 classify_event 가 승인해야 한다.
+    case "$FAKE_ARGS" in
+      *"get event persona-mock-sse.killing"*jsonpath*involvedObject*)
+        echo "Pod|persona-mock-sse-6665f6c5bf-r575j"; exit 0 ;;
+    esac ;;
+  무관한-event|finish-막힘)
+    # involvedObject 가 우리가 관리하지 않는 자원을 가리킨다. classify_event 가
+    # 미승인으로 판정해야 한다.
+    case "$FAKE_ARGS" in
+      *"get event other-app.warn"*jsonpath*involvedObject*)
+        echo "Pod|other-app-999"; exit 0 ;;
+    esac ;;
+  already-finished)
+    # mock-sse-finish 가 시작하자마자 보는 namespace 존재 확인. 이전 실행에서
+    # namespace 삭제까지 이미 끝난 상태를 흉내낸다.
+    case "$FAKE_ARGS" in
+      *"get namespace persona-mock-sse --ignore-not-found"*) exit 0 ;;
     esac ;;
   credential-helper)
     # 부재 확인 조회만 자격증명 도구 오류로 만든다. finalizer 조회(jsonpath)는 통과시켜야
@@ -414,6 +466,17 @@ run_case endpointslice-소유다름 eps-wrong-owner  mock-sse  yes nonzero 0 "�
 # 삭제가 정착되지 않았거나 잔여물이 있으면 namespace 를 지우지 않는다.
 run_case 잔여물-Pod남음       residue-pod        mock-sse  yes nonzero 6 "기본 자원 외의 것이 남아"
 
+# 성공한 조회의 stderr 경고를 자원 이름으로 오판하면 안 된다. 이 클러스터에서 Endpoints
+# 조회는 항상 이 경고를 낸다 — dry-run 의 사전 인벤토리 대조에서 실제로 겪는 경로다.
+run_case endpoints-경고       endpoints-경고     mock-sse  no  0       0 "dry-run"
+
+# Pod 종료 과정에서 남는 Event 는 involvedObject 가 우리가 관리하는 자원을 가리키면
+# 허용해 정상 완료로 이어진다.
+run_case killing-event-연관   killing-event-연관 mock-sse  yes 0       7 "mock SSE 단계 완료"
+
+# involvedObject 가 우리가 관리하지 않는 자원을 가리키면 Event 라도 허용하지 않는다.
+run_case 무관한-event        무관한-event       mock-sse  yes nonzero 6 "기본 자원 외의 것이 남아"
+
 # 이름이 아니라 참조 필드를 봐야 잡힌다. 이름 검색 방식은 이 사례를 통과시켰다.
 run_case VA-PV참조           va-references-pv   nfs       yes nonzero 0 "참조하는 VolumeAttachment 가 있다"
 
@@ -422,6 +485,25 @@ run_case PVC-재생성          pvc-recreated      nfs       yes nonzero 0 "승�
 
 # PV 신원이 다르면 PVC·PV 삭제가 한 건도 나가면 안 된다.
 run_case PV신원-불일치       pv-mismatch        nfs       yes nonzero 0 "신원이 기대값과 다르다"
+
+# mock-sse 가 namespace 삭제 직전에 멈춘 뒤 다시 이어서 끝내는 전용 단계.
+# 각 사례는 독립된 새 프로세스로 실행되므로 "이전 실행에서 이미 지워진 상태에서
+# 재개한다" 는 시나리오를 그대로 검사한다 — mock-sse 를 처음부터 다시 실행하면
+# 이미 없는 Application 조회가 NotFound 로 실패해 항상 중단됐다.
+run_case 이미-완료됨         already-finished   mock-sse-finish yes 0       0 "마무리할 것이 없다"
+run_case finish-정상         finish-정상        mock-sse-finish yes 0       1 "마무리 완료"
+run_case finish-막힘         finish-막힘        mock-sse-finish yes nonzero 0 "기본 자원 외의 것이 남아"
+run_case dry-run-mock-sse-finish normal         mock-sse-finish no  0       0 "dry-run"
+
+# delete 개수만으로는 "Application 을 다시 건드리지 않았다" 는 핵심 주장을 증명하지
+# 못한다. finish-정상 의 호출 로그에 워크로드·Application 삭제가 한 번도 없어야 한다.
+if grep -qE 'delete application|delete deployment|delete service |delete httproute|delete gateway|delete secret' "$work/calls-finish-정상.log"; then
+  echo "실패 [finish-호출없음]: mock-sse-finish 가 Application·워크로드 삭제를 다시 시도했다"
+  sed 's/^/    호출: /' "$work/calls-finish-정상.log"
+  exit 1
+fi
+echo "검출: finish-호출없음 (Application·워크로드 재시도 없음)"
+pass=$((pass + 1))
 
 # --confirm 없으면 어떤 단계도 삭제를 호출하지 않는다.
 run_case dry-run-migration   normal             migration no  0       0 "dry-run"
