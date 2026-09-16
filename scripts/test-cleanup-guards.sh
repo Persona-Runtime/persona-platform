@@ -31,6 +31,103 @@ case "$*" in
   *"config current-context"*) echo "kubernetes-admin@kubernetes"; exit 0 ;;
 esac
 
+# ---- namespace 인벤토리 ------------------------------------------------------
+# 실제 클러스터의 91개 kind 를 다 흉내낼 필요는 없다. 자원이 실제로 있는 kind 와
+# 빈 kind 를 섞어, 스윕이 전 kind 를 돌고 결과를 모으는 경로를 검사한다.
+INV_KINDS="pods replicasets.apps deployments.apps services endpoints secrets configmaps serviceaccounts persistentvolumeclaims gateways.gateway.networking.k8s.io httproutes.gateway.networking.k8s.io endpointslices.discovery.k8s.io"
+
+case "$SCENARIO" in
+  api-resources-fail)
+    case "$FAKE_ARGS" in
+      *"api-resources"*) emit_err 'Error from server (Forbidden): api-resources is forbidden' ;;
+    esac ;;
+  kind-list-fail)
+    case "$FAKE_ARGS" in
+      *"get secrets --ignore-not-found"*) emit_err 'Error from server (Forbidden): secrets is forbidden' ;;
+    esac ;;
+esac
+
+case "$FAKE_ARGS" in
+  *"api-resources"*) printf '%s\n' $INV_KINDS; exit 0 ;;
+esac
+
+# 인벤토리 스윕의 kind 별 조회. 삭제된 것은 뒤의 상태 추적이 처리하므로 여기서는
+# "지금 namespace 에 무엇이 있는가" 만 답한다.
+case "$FAKE_ARGS" in
+  *"-n persona-mock-sse get pods --ignore-not-found"*)
+    if grep -q "delete deployment persona-mock-sse" "$CALL_LOG"; then exit 0; fi
+    echo "pod/persona-mock-sse-6665f6c5bf-r575j"
+    case "$SCENARIO" in
+      unrelated-pod|outsider-secret-ref) echo "pod/other-app-7d9f" ;;
+      # 이름은 정리 대상처럼 보이지만 소유가 다른 Pod. 인벤토리는 통과하고
+      # 소유 검사에서 걸려야 한다.
+      pod-wrong-owner) echo "pod/persona-mock-sse-imposter" ;;
+    esac
+    exit 0 ;;
+  *"-n persona-mock-sse get replicasets.apps --ignore-not-found"*)
+    if grep -q "delete deployment persona-mock-sse" "$CALL_LOG"; then exit 0; fi
+    echo "replicaset.apps/persona-mock-sse-6665f6c5bf"; exit 0 ;;
+  *"-n persona-mock-sse get deployments.apps --ignore-not-found"*)
+    if grep -q "delete deployment persona-mock-sse" "$CALL_LOG"; then
+      case "$SCENARIO" in unrelated-deploy) echo "deployment.apps/other-app" ;; esac
+      exit 0
+    fi
+    echo "deployment.apps/persona-mock-sse"
+    case "$SCENARIO" in unrelated-deploy) echo "deployment.apps/other-app" ;; esac
+    exit 0 ;;
+  *"-n persona-mock-sse get persistentvolumeclaims --ignore-not-found"*|*"-n persona-mock-sse get pvc --ignore-not-found"*)
+    case "$SCENARIO" in unrelated-pvc) echo "persistentvolumeclaim/other-data" ;; esac
+    exit 0 ;;
+  *"-n persona-mock-sse get secrets --ignore-not-found"*)
+    if ! grep -q "delete secret persona-mock-sse-ghcr" "$CALL_LOG"; then
+      echo "secret/persona-mock-sse-ghcr"
+    fi
+    case "$SCENARIO" in
+      # 삭제 도중에 새 자원이 생긴 경우. namespace 삭제 직전 재검사가 잡아야 한다.
+      late-resource) if grep -q "delete secret persona-mock-sse-ghcr" "$CALL_LOG"; then
+                       echo "secret/appeared-later"
+                     fi ;;
+    esac
+    exit 0 ;;
+  *"-n persona-mock-sse get configmaps --ignore-not-found"*)
+    echo "configmap/kube-root-ca.crt"; exit 0 ;;
+  *"-n persona-mock-sse get serviceaccounts --ignore-not-found"*)
+    echo "serviceaccount/default"; exit 0 ;;
+  *"-n persona-mock-sse get services --ignore-not-found"*|*"-n persona-mock-sse get endpoints --ignore-not-found"*)
+    if grep -q "delete service persona-mock-sse" "$CALL_LOG"; then exit 0; fi
+    echo "service/persona-mock-sse"; exit 0 ;;
+  *"-n persona-mock-sse get gateways"*--ignore-not-found*)
+    if grep -q "delete gateway persona-mock-sse" "$CALL_LOG"; then exit 0; fi
+    echo "gateway.gateway.networking.k8s.io/persona-mock-sse"; exit 0 ;;
+  *"-n persona-mock-sse get httproutes"*--ignore-not-found*)
+    if grep -q "delete httproute persona-mock-sse" "$CALL_LOG"; then exit 0; fi
+    echo "httproute.gateway.networking.k8s.io/persona-mock-sse"; exit 0 ;;
+  *"-n persona-mock-sse get endpointslices"*--ignore-not-found*)
+    if grep -q "delete service persona-mock-sse" "$CALL_LOG"; then exit 0; fi
+    echo "endpointslice.discovery.k8s.io/persona-mock-sse-kvh6v"; exit 0 ;;
+esac
+
+# ---- 소유 사슬 ---------------------------------------------------------------
+# 소유 응답은 대상 이름에 따라 달라야 한다. 이름과 무관하게 같은 값을 주면
+# 소유 검사가 무력해지고 잘못된 구현도 통과한다.
+case "$FAKE_ARGS" in
+  *"get pod "*ownerReferences*)
+    owner_target=$(printf '%s\n' "$FAKE_ARGS" | sed 's/.*get pod \([^ ]*\).*/\1/')
+    case "$SCENARIO" in
+      pod-wrong-owner) echo "ReplicaSet|other-app-1234"; exit 0 ;;
+    esac
+    case "$owner_target" in
+      persona-mock-sse-*) echo "ReplicaSet|persona-mock-sse-6665f6c5bf"; exit 0 ;;
+      *) echo "ReplicaSet|other-app-1234"; exit 0 ;;
+    esac ;;
+  *"get replicaset "*ownerReferences*)
+    owner_target=$(printf '%s\n' "$FAKE_ARGS" | sed 's/.*get replicaset \([^ ]*\).*/\1/')
+    case "$owner_target" in
+      persona-mock-sse-*) echo "Deployment|persona-mock-sse"; exit 0 ;;
+      *) echo "Deployment|other-app"; exit 0 ;;
+    esac ;;
+esac
+
 case "$SCENARIO" in
   forbidden-secret)
     # 삭제 후 참조 부재 검사에서만 막는다. 삭제 전 대상 확인은 통과시켜야 그 지점까지 간다.
@@ -41,11 +138,18 @@ case "$SCENARIO" in
         fi ;;
     esac ;;
   outsider-secret-ref)
-    # 정리 대상이 아닌 Pod 가 pull Secret 을 참조하는 경우
+    # 정리 대상이 아닌 Pod 가 pull Secret 을 참조하는 경우.
+    # 이 Pod 는 namespace 에 실제로 있으므로 인벤토리 대조가 먼저 잡는다.
     case "$FAKE_ARGS" in
-      *"-n persona-mock-sse get pod"*)
+      *"-n persona-mock-sse get pod -o jsonpath"*)
         echo "persona-mock-sse-6665f6c5bf-r575j persona-mock-sse-ghcr,"
         echo "other-app-7d9f persona-mock-sse-ghcr,"
+        exit 0 ;;
+    esac ;;
+  pod-wrong-owner)
+    case "$FAKE_ARGS" in
+      *"-n persona-mock-sse get pod -o jsonpath"*)
+        echo "persona-mock-sse-imposter persona-mock-sse-ghcr,"
         exit 0 ;;
     esac ;;
   job-running)
@@ -236,7 +340,22 @@ run_case Job-이미지불일치     job-image-mismatch migration yes nonzero 0 "
 run_case forbidden-소비자조회 forbidden-secret  mock-sse  yes nonzero 5 "소비자 조회가 실패했다"
 
 # 정리 대상 밖의 Pod 가 pull Secret 을 쓰면 삭제 전에 멈춘다.
-run_case 대상외-Secret소비자  outsider-secret-ref mock-sse yes nonzero 0 "대상 밖의 Pod"
+run_case 대상외-Secret소비자  outsider-secret-ref mock-sse yes nonzero 0 "승인 목록 밖의 자원"
+
+# namespace 삭제는 그 안의 모든 것을 가져간다. pull Secret 을 참조하지 않는 자원도
+# 승인 목록 밖이면 멈춘다. "소비자 없음" 과 "보존할 자원 없음" 은 다른 조건이다.
+run_case 무관한-Pod          unrelated-pod      mock-sse  yes nonzero 0 "승인 목록 밖의 자원"
+run_case 무관한-PVC          unrelated-pvc      mock-sse  yes nonzero 0 "PVC 가 있다"
+run_case replicas0-Deployment unrelated-deploy  mock-sse  yes nonzero 0 "승인 목록 밖의 자원"
+run_case Pod-소유자다름       pod-wrong-owner    mock-sse  yes nonzero 0 "소유가 아니다"
+
+# 인벤토리 조회가 실패하면 빈 목록으로 읽지 않는다.
+run_case api-resources-실패   api-resources-fail mock-sse  yes nonzero 0 "api-resources 조회가 실패"
+run_case kind-조회실패        kind-list-fail     mock-sse  yes nonzero 0 "조회가 실패했다"
+
+# 삭제 도중에 새 자원이 생기면 namespace 삭제 직전 재검사가 잡는다.
+# Application·httproute·gateway·deployment·service·secret 6건까지만 나간다.
+run_case 삭제중-자원출현      late-resource      mock-sse  yes nonzero 6 "승인 목록 밖의 자원"
 
 # 이름이 아니라 참조 필드를 봐야 잡힌다. 이름 검색 방식은 이 사례를 통과시켰다.
 run_case VA-PV참조           va-references-pv   nfs       yes nonzero 0 "참조하는 VolumeAttachment 가 있다"

@@ -227,6 +227,26 @@ pull_secret_consumers() {
     -o jsonpath='{range .items[*]}{.metadata.name}{" "}{range .spec.imagePullSecrets[*]}{.name}{","}{end}{"\n"}{end}'
 }
 
+# Pod 가 정말 mock SSE 것인지 소유 사슬로 본다. 이름 접두사는 증거가 약하다 —
+# 누가 persona-mock-sse-foo 라고 이름 붙이면 그대로 통과한다.
+# 사슬: Pod -> ReplicaSet -> Deployment persona-mock-sse
+assert_pod_owned_by_mock_deploy() {
+  pod=$1
+  if ! rs=$($K -n "$MOCK_NS" get pod "$pod" -o jsonpath='{.metadata.ownerReferences[0].kind}|{.metadata.ownerReferences[0].name}' 2>&1); then
+    echo "중단: Pod $pod 소유 조회가 실패했다 — $rs" >&2; return 1
+  fi
+  rs_kind=$(printf '%s' "$rs" | cut -d'|' -f1)
+  rs_name=$(printf '%s' "$rs" | cut -d'|' -f2)
+  test "$rs_kind" = ReplicaSet || {
+    echo "중단: Pod $pod 의 소유자가 ReplicaSet 이 아니다 [$rs]" >&2; return 1; }
+  if ! dp=$($K -n "$MOCK_NS" get replicaset "$rs_name" -o jsonpath='{.metadata.ownerReferences[0].kind}|{.metadata.ownerReferences[0].name}' 2>&1); then
+    echo "중단: ReplicaSet $rs_name 소유 조회가 실패했다 — $dp" >&2; return 1
+  fi
+  test "$dp" = "Deployment|$MOCK_APP" || {
+    echo "중단: Pod $pod 가 $MOCK_APP Deployment 소유가 아니다 [$dp]" >&2; return 1; }
+  echo "확인: Pod $pod 는 $MOCK_APP Deployment 소유"
+}
+
 # 삭제 전 검사 — 참조가 전부 정리 대상(mock SSE Deployment 의 Pod)인지 본다.
 assert_pull_secret_refs_are_targets() {
   if ! pods=$(pull_secret_consumers 2>&1); then
@@ -241,13 +261,76 @@ assert_pull_secret_refs_are_targets() {
     echo "중단: ServiceAccount 가 pull Secret 을 참조한다 — $sas" >&2; return 1
   fi
 
-  outsiders=$(printf '%s\n' "$pods" \
-    | grep "$MOCK_APP-ghcr" \
-    | grep -v "^$MOCK_APP-" || true)
-  test -z "$outsiders" || {
-    echo "중단: 정리 대상 밖의 Pod 가 pull Secret 을 참조한다 — $outsiders" >&2; return 1
-  }
+  # 참조하는 Pod 마다 소유 사슬을 확인한다.
+  consumers=$(printf '%s\n' "$pods" | grep "$MOCK_APP-ghcr" | awk '{print $1}' || true)
+  for pod in $consumers; do
+    assert_pod_owned_by_mock_deploy "$pod"
+  done
   echo "확인: pull Secret 참조가 모두 정리 대상이다"
+}
+
+# namespace 전체 자원을 열거해 승인 목록과 대조한다.
+#
+# "pull Secret 소비자 없음" 은 namespace 삭제의 근거가 되지 못한다. 공개 이미지를 쓰는 Pod,
+# replicas 0 인 다른 Deployment, 다른 PVC 는 pull Secret 을 참조하지 않으므로 그 검사를
+# 통과하지만 delete namespace 는 그것까지 가져간다. 두 조건은 다르다.
+#
+# api-resources 전수 스윕이라 모르는 CRD 도 잡힌다. 약 25초 걸린다.
+assert_ns_inventory_approved() {
+  ns=$1
+  if ! kinds=$($K api-resources --verbs=list --namespaced -o name 2>&1); then
+    echo "중단: api-resources 조회가 실패했다 — $kinds" >&2; return 1
+  fi
+  test -n "$kinds" || { echo "중단: api-resources 결과가 비어 있다" >&2; return 1; }
+
+  found=""
+  for kind in $kinds; do
+    # 조회 실패를 빈 목록으로 읽지 않는다. aggregated API 가 내려가도 kind 이름과 함께 멈춘다.
+    if ! got=$($K -n "$ns" get "$kind" --ignore-not-found -o name 2>&1); then
+      echo "중단: $ns 의 $kind 조회가 실패했다 — $got" >&2; return 1
+    fi
+    test -z "$got" || found="$found$got
+"
+  done
+
+  unexpected=""
+  for item in $(printf '%s' "$found" | sort -u); do
+    name=${item#*/}
+    case "$item" in
+      # 쿠버네티스가 모든 namespace 에 자동으로 만든다.
+      configmap/kube-root-ca.crt|serviceaccount/default) continue ;;
+    esac
+    case "$name" in
+      # 정리 대상: Argo 가 관리하던 4개, 수동 생성 pull Secret, 그리고 파생 자원.
+      # 파생 자원의 접두사 판정은 소유 증명이 아니다. 인벤토리 대조가 1차 방어이고
+      # Pod·ReplicaSet 의 실제 소유는 assert_pod_owned_by_mock_deploy 가 따로 확인한다.
+      "$MOCK_APP"|"$MOCK_APP-ghcr"|"$MOCK_APP"-*) continue ;;
+    esac
+    unexpected="$unexpected  $item
+"
+  done
+
+  test -z "$unexpected" || {
+    echo "중단: $ns 에 승인 목록 밖의 자원이 있다. namespace 를 지우면 함께 사라진다" >&2
+    printf '%s' "$unexpected" >&2
+    echo "  보존해야 할 자원이면 먼저 옮기고, 지워도 되면 승인 목록을 갱신한다" >&2
+    return 1
+  }
+  echo "확인: $ns 자원이 모두 승인 목록 안에 있다"
+}
+
+# 데이터를 가진 자원은 따로 못 박는다. 인벤토리 대조가 이미 잡지만 손실이 가장 크므로
+# 원인이 바로 보이게 메시지를 분리한다.
+assert_no_pvc() {
+  ns=$1
+  if ! pvcs=$($K -n "$ns" get pvc --ignore-not-found -o name 2>&1); then
+    echo "중단: $ns 의 PVC 조회가 실패했다 — $pvcs" >&2; return 1
+  fi
+  test -z "$pvcs" || {
+    echo "중단: $ns 에 PVC 가 있다. namespace 를 지우면 이 볼륨도 사라진다 — $pvcs" >&2
+    return 1
+  }
+  echo "확인: $ns 에 PVC 없음"
 }
 
 # 삭제 후 검사 — Deployment 를 실제로 지운 뒤에만 부른다.
@@ -264,6 +347,9 @@ assert_no_pull_secret_ref() {
 stage_mock_sse() {
   assert_ns_exists argocd
   assert_ns_exists "$MOCK_NS"
+  # 삭제 전 1회 — dry-run 에서도 돌아 예상 밖 자원을 미리 보여준다.
+  assert_no_pvc "$MOCK_NS"
+  assert_ns_inventory_approved "$MOCK_NS"
   assert_pull_secret_refs_are_targets
   assert_no_finalizer "$MOCK_APP"
 
@@ -291,6 +377,11 @@ stage_mock_sse() {
     assert_no_pull_secret_ref
   fi
   run_delete -n "$MOCK_NS" delete secret "$MOCK_APP-ghcr"
+
+  # namespace 삭제 직전 1회 — 여기가 실제 방어선이다. 앞 단계에서 Deployment·Pod 가
+  # 사라졌으므로 목록에는 자동 생성 자원만 남아야 한다. 그 사이에 무언가 생겼다면 멈춘다.
+  assert_no_pvc "$MOCK_NS"
+  assert_ns_inventory_approved "$MOCK_NS"
   run_delete delete namespace "$MOCK_NS" --wait=true --timeout=180s
   if test "$CONFIRM" = yes; then
     assert_absent "namespace $MOCK_NS" get namespace "$MOCK_NS"
