@@ -55,12 +55,21 @@ MOCK_NS=persona-mock-sse
 APP_NS=persona-app
 NFS_NS=persona-nfs-test
 NFS_PVC=nfs-smoke-data
+# migration Job 이 우리가 승인한 그 실행인지 확인하는 기대값.
+WANT_MIGRATE_IMAGE=${PERSONA_MIGRATE_IMAGE:-ghcr.io/persona-runtime/persona-minimal-api@sha256:922ae043feaa1a893336816c38ac17f448aa96c44ba06983652181784f52c2f6}
+
 # PV 신원 기대값. 20Gi 운영 PV(persona-db·Prometheus)와 혼동하지 않기 위한 관문이다.
 WANT_SC=nfs-shared
 WANT_CAP=1Gi
 WANT_RECLAIM=Retain
 WANT_SERVER=192.168.50.205
 WANT_SHARE=/srv/nfs/k8s
+# 이번 정리는 "조건에 맞는 아무 PV"가 아니라 승인받은 대상 하나를 지우는 일회성 작업이다.
+# 대상을 고정하지 않으면, 같은 이름의 PVC 가 재생성됐을 때 새 PV 를 지우면서
+# 런북 D 절은 옛 서버 디렉터리를 지우는 불일치가 생긴다.
+# 다음 정리에서는 승인된 새 값을 환경변수로 넘긴다.
+WANT_PV=${PERSONA_CLEANUP_PV:-pvc-96341d34-df4e-4a1e-8d74-3b91ccf5be15}
+WANT_SUBDIR=$WANT_PV
 
 # ---- 공통 ------------------------------------------------------------------
 require_tools() {
@@ -134,9 +143,50 @@ run_delete() {
 }
 
 # ---- 단계: migration --------------------------------------------------------
+# Job 이 "있다"는 것만 보고 지우면, 같은 이름으로 migration 이 다시 돌고 있어도 끊는다.
+# 2절의 과거 완료 기록은 "그때 적용됐다"는 증거일 뿐 "지금 돌고 있지 않다"는 증거가 아니다.
+# 그래서 삭제 직전 상태를 직접 본다. 읽기 전용이라 dry-run 에서도 그대로 실행한다.
+assert_job_complete() {
+  job=$1
+  # jsonpath 는 없는 조건·필드를 빈 문자열로 준다. 공백으로 구분하면 빈 필드가 사라져
+  # 뒤 값이 앞자리로 밀린다(Failed 없는 정상 Job 의 이미지가 active 자리로 온다).
+  # 그래서 | 로 구분하고 cut 으로 자리를 고정해 읽는다.
+  if ! st=$($K -n "$APP_NS" get job "$job" -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}|{.status.conditions[?(@.type=="Failed")].status}|{.status.active}|{.status.succeeded}|{.spec.template.spec.containers[0].image}' 2>&1); then
+    echo "중단: Job $job 상태 조회가 실패했다 — $st" >&2; return 1
+  fi
+  complete=$(printf  '%s' "$st" | cut -d'|' -f1)
+  failed=$(printf    '%s' "$st" | cut -d'|' -f2)
+  active=$(printf    '%s' "$st" | cut -d'|' -f3)
+  succeeded=$(printf '%s' "$st" | cut -d'|' -f4)
+  image=$(printf     '%s' "$st" | cut -d'|' -f5)
+
+  # Failed 를 먼저 본다. 실패한 Job 은 Complete 조건도 없으므로, 순서를 바꾸면
+  # "Complete 가 아니다" 라는 덜 구체적인 이유만 나오고 실패 사실이 묻힌다.
+  test "$failed" != True || {
+    echo "중단: Job $job 이 Failed 다. 로그를 보관하고 원인을 먼저 본다" >&2; return 1; }
+  test "$complete" = True || {
+    echo "중단: Job $job 이 Complete 가 아니다 [conditions=$st]" >&2; return 1; }
+  # 실행 중인 재시도를 끊지 않기 위한 핵심 검사다.
+  case "${active:-0}" in
+    ''|0) : ;;
+    *) echo "중단: Job $job 에 실행 중인 Pod 가 $active 개 있다" >&2; return 1 ;;
+  esac
+  case "${succeeded:-0}" in
+    ''|0) echo "중단: Job $job 의 succeeded 가 0 이다" >&2; return 1 ;;
+  esac
+  test "$image" = "$WANT_MIGRATE_IMAGE" || {
+    echo "중단: Job $job 의 이미지가 기대값과 다르다" >&2
+    echo "  기대: $WANT_MIGRATE_IMAGE" >&2
+    echo "  실제: $image" >&2
+    return 1
+  }
+  echo "확인: Job $job 완료 (succeeded=$succeeded, 활성 없음, 이미지 일치)"
+}
+
 stage_migration() {
   assert_ns_exists argocd
   assert_ns_exists "$APP_NS"
+  assert_job_complete "$MIGRATE_JOB"
   assert_no_finalizer "$MIGRATE_APP"
 
   run_delete -n argocd delete application "$MIGRATE_APP" --wait=true --timeout=60s
@@ -165,14 +215,48 @@ stage_migration() {
 }
 
 # ---- 단계: mock SSE ---------------------------------------------------------
-# pull Secret 소비자 조회. 조회가 실패하면 여기서 끝낸다.
-# 이전 판에서는 실패를 알리고도 다음 검사로 넘어가 "참조 없음"을 출력했다.
-assert_no_pull_secret_ref() {
-  if ! refs=$($K -n "$MOCK_NS" get pod,sa -o json 2>&1); then
-    echo "중단: pull Secret 소비자 조회가 실패했다 — $refs" >&2; return 1
+# pull Secret 검사는 삭제 전과 삭제 후가 다르다.
+#
+# 삭제 전에는 mock SSE Deployment 가 아직 살아 있으므로 그 Pod 가 Secret 을 참조하는 것이
+# 정상이다. 여기에 "참조가 전혀 없어야 한다"를 적용하면 정상 클러스터에서 dry-run 이 중단된다.
+# 그래서 삭제 전에는 "참조가 모두 정리 대상인가"만 보고, 완전한 부재는 실제로 지운 뒤에 본다.
+
+# 참조하는 Pod 이름을 한 줄씩 뽑는다. Secret 은 namespace 를 넘지 않으므로 이 namespace 만 본다.
+pull_secret_consumers() {
+  $K -n "$MOCK_NS" get pod \
+    -o jsonpath='{range .items[*]}{.metadata.name}{" "}{range .spec.imagePullSecrets[*]}{.name}{","}{end}{"\n"}{end}'
+}
+
+# 삭제 전 검사 — 참조가 전부 정리 대상(mock SSE Deployment 의 Pod)인지 본다.
+assert_pull_secret_refs_are_targets() {
+  if ! pods=$(pull_secret_consumers 2>&1); then
+    echo "중단: pull Secret 소비자 조회가 실패했다 — $pods" >&2; return 1
   fi
-  if printf '%s\n' "$refs" | grep -q imagePullSecrets; then
-    echo "중단: pull Secret 참조가 남아 있다" >&2; return 1
+  # ServiceAccount 에 붙어 있으면 우리가 모르는 배선이 있다는 신호다. namespace 를 지우면
+  # 사라지지만, 그 전에 사람이 확인해야 한다.
+  if ! sas=$($K -n "$MOCK_NS" get sa -o jsonpath='{range .items[*]}{.metadata.name}{" "}{range .imagePullSecrets[*]}{.name}{","}{end}{"\n"}{end}' 2>&1); then
+    echo "중단: ServiceAccount 조회가 실패했다 — $sas" >&2; return 1
+  fi
+  if printf '%s\n' "$sas" | grep -q "$MOCK_APP-ghcr"; then
+    echo "중단: ServiceAccount 가 pull Secret 을 참조한다 — $sas" >&2; return 1
+  fi
+
+  outsiders=$(printf '%s\n' "$pods" \
+    | grep "$MOCK_APP-ghcr" \
+    | grep -v "^$MOCK_APP-" || true)
+  test -z "$outsiders" || {
+    echo "중단: 정리 대상 밖의 Pod 가 pull Secret 을 참조한다 — $outsiders" >&2; return 1
+  }
+  echo "확인: pull Secret 참조가 모두 정리 대상이다"
+}
+
+# 삭제 후 검사 — Deployment 를 실제로 지운 뒤에만 부른다.
+assert_no_pull_secret_ref() {
+  if ! pods=$(pull_secret_consumers 2>&1); then
+    echo "중단: pull Secret 소비자 조회가 실패했다 — $pods" >&2; return 1
+  fi
+  if printf '%s\n' "$pods" | grep -q "$MOCK_APP-ghcr"; then
+    echo "중단: pull Secret 참조가 남아 있다 — $pods" >&2; return 1
   fi
   echo "확인: pull Secret 참조 없음"
 }
@@ -180,6 +264,7 @@ assert_no_pull_secret_ref() {
 stage_mock_sse() {
   assert_ns_exists argocd
   assert_ns_exists "$MOCK_NS"
+  assert_pull_secret_refs_are_targets
   assert_no_finalizer "$MOCK_APP"
 
   run_delete -n argocd delete application "$MOCK_APP" --wait=true --timeout=60s
@@ -200,7 +285,11 @@ stage_mock_sse() {
     assert_present "Gateway persona-app" -n "$APP_NS" get gateway persona-app
   fi
 
-  assert_no_pull_secret_ref
+  # 완전한 부재는 Deployment 를 실제로 지운 뒤에만 성립한다. dry-run 에서는 Pod 가 그대로
+  # 살아 있는 것이 정상이므로 이 검사를 돌리지 않는다.
+  if test "$CONFIRM" = yes; then
+    assert_no_pull_secret_ref
+  fi
   run_delete -n "$MOCK_NS" delete secret "$MOCK_APP-ghcr"
   run_delete delete namespace "$MOCK_NS" --wait=true --timeout=180s
   if test "$CONFIRM" = yes; then
@@ -210,15 +299,20 @@ stage_mock_sse() {
 }
 
 # ---- 단계: NFS --------------------------------------------------------------
+# 참조 필드는 .spec.source.persistentVolumeName 이다. 객체 이름에 PV 이름이 들어간다는
+# 보장이 없으므로 -o name 과 이름 검색으로는 참조를 놓친다.
+# nfs.csi.k8s.io 는 attachRequired=false 라 보통 이 객체가 없지만, 안전 검사로 유지한다.
 assert_no_volumeattachment() {
   pv=$1
-  if ! va=$($K get volumeattachment -o name 2>&1); then
+  if ! va=$($K get volumeattachment -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.source.persistentVolumeName}{"\n"}{end}' 2>&1); then
     echo "중단: VolumeAttachment 조회가 실패했다 — $va" >&2; return 1
   fi
-  if printf '%s\n' "$va" | grep -q "$pv"; then
-    echo "중단: $pv 에 대한 VolumeAttachment 가 남아 있다" >&2; return 1
-  fi
-  echo "확인: VolumeAttachment 없음"
+  # 두 번째 필드를 정확히 비교한다. 부분 일치에 기대지 않는다.
+  hit=$(printf '%s\n' "$va" | awk -v pv="$pv" '$2 == pv {print $1}')
+  test -z "$hit" || {
+    echo "중단: $pv 를 참조하는 VolumeAttachment 가 있다 — $hit" >&2; return 1
+  }
+  echo "확인: $pv 를 참조하는 VolumeAttachment 없음"
 }
 
 # 삭제 전에 PVC 와 PV 의 신원을 대조한다. PV 이름을 사람이 적지 않고 PVC 에서 끌어온다.
@@ -227,7 +321,9 @@ assert_pv_identity() {
   if ! got=$($K get pv "$pv" -o jsonpath='{.spec.claimRef.namespace}/{.spec.claimRef.name} {.spec.capacity.storage} {.spec.persistentVolumeReclaimPolicy} {.spec.storageClassName} {.spec.csi.volumeAttributes.server} {.spec.csi.volumeAttributes.share} {.spec.csi.volumeAttributes.subDir}' 2>&1); then
     echo "중단: PV $pv 조회가 실패했다 — $got" >&2; return 1
   fi
-  want="$NFS_NS/$NFS_PVC $WANT_CAP $WANT_RECLAIM $WANT_SC $WANT_SERVER $WANT_SHARE $pv"
+  # subDir 기대값은 $pv(자기 자신)가 아니라 승인된 WANT_SUBDIR 이다. 자기 자신과 비교하면
+  # 어떤 PV 를 넣어도 이 필드는 항상 일치해 검사가 되지 않는다.
+  want="$NFS_NS/$NFS_PVC $WANT_CAP $WANT_RECLAIM $WANT_SC $WANT_SERVER $WANT_SHARE $WANT_SUBDIR"
   test "$got" = "$want" || {
     echo "중단: PV 신원이 기대값과 다르다" >&2
     echo "  기대: $want" >&2
@@ -245,7 +341,16 @@ stage_nfs() {
     echo "중단: PVC $NFS_PVC 조회가 실패했다 — $pvname" >&2; return 1
   fi
   test -n "$pvname" || { echo "중단: PVC $NFS_PVC 에 연결된 PV 가 없다" >&2; return 1; }
-  echo "확인: PVC $NFS_PVC → PV $pvname"
+  # 승인된 대상과 같은지 본다. 같은 이름의 PVC 가 재생성돼 다른 PV 에 붙었다면 이번 정리
+  # 범위가 아니다. 그대로 진행하면 새 PV 를 지우고 런북 D 절은 옛 디렉터리를 지운다.
+  test "$pvname" = "$WANT_PV" || {
+    echo "중단: PVC 가 승인된 PV 와 다른 PV 에 연결돼 있다" >&2
+    echo "  승인: $WANT_PV" >&2
+    echo "  현재: $pvname" >&2
+    echo "  PVC 가 재생성된 것으로 보인다. 정리 대상을 다시 승인받고 PERSONA_CLEANUP_PV 로 넘긴다" >&2
+    return 1
+  }
+  echo "확인: PVC $NFS_PVC → PV $pvname (승인된 대상)"
 
   assert_no_volumeattachment "$pvname"
   assert_pv_identity "$pvname"

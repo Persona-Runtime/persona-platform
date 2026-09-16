@@ -33,8 +33,54 @@ esac
 
 case "$SCENARIO" in
   forbidden-secret)
+    # 삭제 후 참조 부재 검사에서만 막는다. 삭제 전 대상 확인은 통과시켜야 그 지점까지 간다.
     case "$FAKE_ARGS" in
-      *"get pod,sa"*) emit_err 'Error from server (Forbidden): pods is forbidden' ;;
+      *"-n persona-mock-sse get pod"*)
+        if grep -q "delete deployment persona-mock-sse" "$CALL_LOG"; then
+          emit_err 'Error from server (Forbidden): pods is forbidden'
+        fi ;;
+    esac ;;
+  outsider-secret-ref)
+    # 정리 대상이 아닌 Pod 가 pull Secret 을 참조하는 경우
+    case "$FAKE_ARGS" in
+      *"-n persona-mock-sse get pod"*)
+        echo "persona-mock-sse-6665f6c5bf-r575j persona-mock-sse-ghcr,"
+        echo "other-app-7d9f persona-mock-sse-ghcr,"
+        exit 0 ;;
+    esac ;;
+  job-running)
+    case "$FAKE_ARGS" in
+      *"get job persona-migrate"*conditions*)
+        echo '||1|0|ghcr.io/persona-runtime/persona-minimal-api@sha256:922ae043feaa1a893336816c38ac17f448aa96c44ba06983652181784f52c2f6'
+        exit 0 ;;
+    esac ;;
+  job-failed)
+    case "$FAKE_ARGS" in
+      *"get job persona-migrate"*conditions*)
+        echo '|True||0|ghcr.io/persona-runtime/persona-minimal-api@sha256:922ae043feaa1a893336816c38ac17f448aa96c44ba06983652181784f52c2f6'
+        exit 0 ;;
+    esac ;;
+  job-image-mismatch)
+    case "$FAKE_ARGS" in
+      *"get job persona-migrate"*conditions*)
+        echo 'True|||1|ghcr.io/persona-runtime/persona-minimal-api@sha256:0000000000000000000000000000000000000000000000000000000000000000'
+        exit 0 ;;
+    esac ;;
+  va-references-pv)
+    # 이름에는 PV 가 안 들어가지만 참조 필드는 대상 PV 다.
+    # 실제 kubectl 처럼 질의 형태에 따라 응답을 나눈다. 같은 출력을 주면 이름 대조 방식과
+    # 참조 필드 대조 방식을 구분하지 못해, 잘못된 검사도 이 사례를 통과한다.
+    case "$FAKE_ARGS" in
+      *"get volumeattachment"*persistentVolumeName*)
+        echo "csi-123abc pvc-96341d34-df4e-4a1e-8d74-3b91ccf5be15"; exit 0 ;;
+      *"get volumeattachment"*)
+        echo "volumeattachment.storage.k8s.io/csi-123abc"; exit 0 ;;
+    esac ;;
+  pvc-recreated)
+    # 같은 이름의 PVC 가 재생성돼 다른 PV 에 결속된 경우
+    case "$FAKE_ARGS" in
+      *"jsonpath={.spec.volumeName}"*)
+        echo "pvc-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"; exit 0 ;;
     esac ;;
   credential-helper)
     # 부재 확인 조회만 자격증명 도구 오류로 만든다. finalizer 조회(jsonpath)는 통과시켜야
@@ -57,8 +103,10 @@ case "$SCENARIO" in
         echo "application.argoproj.io/persona-migrate"; exit 0 ;;
     esac ;;
   cascade-violation)
-    # Application 을 지웠더니 Job 까지 사라진 경우 (비연쇄 전제 위반)
-    case "$*" in
+    # Application 을 지웠더니 Job 까지 사라진 경우 (비연쇄 전제 위반).
+    # 완료 상태 조회(conditions)까지 가로채면 그 앞 게이트에서 멈춰 이 사례를 검사하지 못한다.
+    case "$FAKE_ARGS" in
+      *conditions*) ;;
       *"get job persona-migrate"*) exit 0 ;;
     esac ;;
   pv-mismatch)
@@ -90,7 +138,16 @@ if test -n "$kind" && test -n "$name" && grep -q "delete $kind $name" "$CALL_LOG
   exit 0      # --ignore-not-found 의 부재 응답: rc=0 + 빈 출력
 fi
 
-# 시나리오가 가로채지 않은 조회의 기본 정상 응답
+# Deployment 를 지우면 그 Pod 도 사라진다. 이름 없는 목록 조회라 위 규칙으로는 안 잡히므로
+# 따로 처리한다. 이것이 있어야 "삭제 후 참조 부재" 검사를 정상 경로에서 확인할 수 있다.
+case "$FAKE_ARGS" in
+  *"-n persona-mock-sse get pod"*)
+    if grep -q "delete deployment persona-mock-sse" "$CALL_LOG"; then exit 0; fi ;;
+esac
+
+# 시나리오가 가로채지 않은 조회의 기본 정상 응답.
+# 정리 전 정상 운영 상태를 그대로 흉내낸다. 예전에는 get pod 가 늘 빈 목록이라
+# "dry-run 에서 Pod 가 pull Secret 을 참조하는 것이 정상" 이라는 사실을 놓쳤다.
 case "$FAKE_ARGS" in
   *"get namespace"*)                 echo "namespace/x"; exit 0 ;;
   *"jsonpath={.metadata.finalizers}"*) exit 0 ;;
@@ -99,10 +156,17 @@ case "$FAKE_ARGS" in
   *"get pv "*jsonpath*claimRef*)
     echo "persona-nfs-test/nfs-smoke-data 1Gi Retain nfs-shared 192.168.50.205 /srv/nfs/k8s pvc-96341d34-df4e-4a1e-8d74-3b91ccf5be15"
     exit 0 ;;
+  # attachRequired=false 라 실제로도 0건이다.
   *"get volumeattachment"*)          exit 0 ;;
-  *"get pod,sa"*)                    echo '{"items":[]}'; exit 0 ;;
-  *"get all -A"*)                    echo "pod/persona-gateway-1"; exit 0 ;;
+  # migration Job: Complete=True, Failed 없음, 활성 없음, succeeded=1, 승인된 digest
+  *"get job persona-migrate"*conditions*)
+    echo 'True|||1|ghcr.io/persona-runtime/persona-minimal-api@sha256:922ae043feaa1a893336816c38ac17f448aa96c44ba06983652181784f52c2f6'
+    exit 0 ;;
   *"get job persona-migrate"*)       echo "job.batch/persona-migrate-0001-persona-minimal"; exit 0 ;;
+  # mock SSE Deployment 가 살아 있으므로 그 Pod 가 pull Secret 을 참조한다(정상).
+  *"-n persona-mock-sse get pod"*)   echo "persona-mock-sse-6665f6c5bf-r575j persona-mock-sse-ghcr,"; exit 0 ;;
+  *"-n persona-mock-sse get sa"*)    echo "default "; exit 0 ;;
+  *"get all -A"*)                    echo "pod/persona-gateway-1"; exit 0 ;;
   *"get gateway persona-app"*)       echo "gateway.gateway.networking.k8s.io/persona-app"; exit 0 ;;
   *delete*)                          exit 0 ;;
   *get*|*rollout*)                   exit 0 ;;
@@ -161,9 +225,24 @@ run_case namespace-부재      missing-ns         migration yes nonzero 0 "names
 run_case 삭제후-잔존         still-exists       migration yes nonzero 1 "아직 있다"
 run_case 비연쇄-위반         cascade-violation  migration yes nonzero 1 "이(가) 없다"
 
+# migration Job 이 끝나지 않았으면 삭제가 한 건도 나가면 안 된다.
+# 같은 이름으로 다시 도는 migration 을 끊는 것이 가장 큰 사고다.
+run_case Job-실행중          job-running        migration yes nonzero 0 "Complete 가 아니다"
+run_case Job-실패            job-failed         migration yes nonzero 0 "Failed 다"
+run_case Job-이미지불일치     job-image-mismatch migration yes nonzero 0 "이미지가 기대값과 다르다"
+
 # 소비자 조회 실패는 Secret·namespace 삭제로 이어지면 안 된다.
 # Application·httproute·gateway·deployment·service 5건까지만 나간다.
 run_case forbidden-소비자조회 forbidden-secret  mock-sse  yes nonzero 5 "소비자 조회가 실패했다"
+
+# 정리 대상 밖의 Pod 가 pull Secret 을 쓰면 삭제 전에 멈춘다.
+run_case 대상외-Secret소비자  outsider-secret-ref mock-sse yes nonzero 0 "대상 밖의 Pod"
+
+# 이름이 아니라 참조 필드를 봐야 잡힌다. 이름 검색 방식은 이 사례를 통과시켰다.
+run_case VA-PV참조           va-references-pv   nfs       yes nonzero 0 "참조하는 VolumeAttachment 가 있다"
+
+# 같은 이름의 PVC 가 재생성돼 다른 PV 에 붙으면 이번 승인 범위가 아니다.
+run_case PVC-재생성          pvc-recreated      nfs       yes nonzero 0 "승인된 PV 와 다른 PV"
 
 # PV 신원이 다르면 PVC·PV 삭제가 한 건도 나가면 안 된다.
 run_case PV신원-불일치       pv-mismatch        nfs       yes nonzero 0 "신원이 기대값과 다르다"
