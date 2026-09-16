@@ -33,7 +33,7 @@ emit_warn() { echo "$1" >&2; }
 # 흉내낸다. 그 안에서는 delete deployment 호출이 이번 CALL_LOG 에 남지 않으므로,
 # 기존의 "grep -q 로그" 판정만으로는 워크로드가 이미 없다는 것을 알 수 없다.
 case "$SCENARIO" in
-  already-finished|finish-정상|finish-막힘) WORKLOAD_GONE=yes ;;
+  already-finished|finish-정상|finish-막힘|finish-pvc잔존) WORKLOAD_GONE=yes ;;
   *) WORKLOAD_GONE=no ;;
 esac
 workload_gone() { test "$WORKLOAD_GONE" = yes || grep -q "delete deployment persona-mock-sse" "$CALL_LOG"; }
@@ -92,7 +92,7 @@ case "$FAKE_ARGS" in
     case "$SCENARIO" in unrelated-deploy) echo "deployment.apps/other-app" ;; esac
     exit 0 ;;
   *"-n persona-mock-sse get persistentvolumeclaims --ignore-not-found"*|*"-n persona-mock-sse get pvc --ignore-not-found"*)
-    case "$SCENARIO" in unrelated-pvc) echo "persistentvolumeclaim/other-data" ;; esac
+    case "$SCENARIO" in unrelated-pvc|finish-pvc잔존) echo "persistentvolumeclaim/other-data" ;; esac
     exit 0 ;;
   *"-n persona-mock-sse get secrets --ignore-not-found"*)
     if ! workload_gone && ! grep -q "delete secret persona-mock-sse-ghcr" "$CALL_LOG"; then
@@ -137,9 +137,22 @@ case "$FAKE_ARGS" in
   *"-n persona-mock-sse get events --ignore-not-found"*)
     if workload_gone; then
       case "$SCENARIO" in
-        killing-event-연관) echo "event/persona-mock-sse.killing" ;;
-        무관한-event)       echo "event/other-app.warn" ;;
-        finish-막힘)        echo "event/other-app.warn" ;;
+        killing-event-연관)    echo "event/persona-mock-sse.killing" ;;
+        killing-event-양쪽표현) echo "event/persona-mock-sse.killing" ;;
+        무관한-event)          echo "event/other-app.warn" ;;
+        finish-막힘)           echo "event/other-app.warn" ;;
+      esac
+    fi
+    exit 0 ;;
+  *"-n persona-mock-sse get events.events.k8s.io --ignore-not-found"*)
+    # 이전엔 이 kind 에 실제 Event 를 반환하는 전용 핸들러가 없어 범용 fallback(항상
+    # 빈 목록)이 대신 답했다. events.k8s.io/v1 은 core 와 참조 필드명이 달라(regarding
+    # vs involvedObject) 실제로 열거되지 않으면 그 결함이 어떤 테스트에도 걸리지 않는다.
+    if workload_gone; then
+      case "$SCENARIO" in
+        killing-event-grouped)  echo "event.events.k8s.io/persona-mock-sse.killing" ;;
+        killing-event-양쪽표현) echo "event.events.k8s.io/persona-mock-sse.killing" ;;
+        무관한-event-grouped)   echo "event.events.k8s.io/other-app.warn" ;;
       esac
     fi
     exit 0 ;;
@@ -269,11 +282,33 @@ case "$SCENARIO" in
       *"get event persona-mock-sse.killing"*jsonpath*involvedObject*)
         echo "Pod|persona-mock-sse-6665f6c5bf-r575j"; exit 0 ;;
     esac ;;
+  killing-event-grouped)
+    # events.k8s.io/v1 은 involvedObject 가 아니라 regarding 을 쓴다. 이 필드로만
+    # 열거되는 경우를 검사한다 — core 쪽 응답은 없다.
+    case "$FAKE_ARGS" in
+      *"get event.events.k8s.io persona-mock-sse.killing"*jsonpath*regarding*)
+        echo "Pod|persona-mock-sse-6665f6c5bf-r575j"; exit 0 ;;
+    esac ;;
+  killing-event-양쪽표현)
+    # 같은 Event 가 events 와 events.events.k8s.io 양쪽으로 동시에 열거되는 경우.
+    # 두 필드(involvedObject·regarding)를 각각 올바르게 읽어야 둘 다 승인된다.
+    case "$FAKE_ARGS" in
+      *"get event persona-mock-sse.killing"*jsonpath*involvedObject*)
+        echo "Pod|persona-mock-sse-6665f6c5bf-r575j"; exit 0 ;;
+      *"get event.events.k8s.io persona-mock-sse.killing"*jsonpath*regarding*)
+        echo "Pod|persona-mock-sse-6665f6c5bf-r575j"; exit 0 ;;
+    esac ;;
   무관한-event|finish-막힘)
     # involvedObject 가 우리가 관리하지 않는 자원을 가리킨다. classify_event 가
     # 미승인으로 판정해야 한다.
     case "$FAKE_ARGS" in
       *"get event other-app.warn"*jsonpath*involvedObject*)
+        echo "Pod|other-app-999"; exit 0 ;;
+    esac ;;
+  무관한-event-grouped)
+    # regarding 이 우리가 관리하지 않는 자원을 가리킨다.
+    case "$FAKE_ARGS" in
+      *"get event.events.k8s.io other-app.warn"*jsonpath*regarding*)
         echo "Pod|other-app-999"; exit 0 ;;
     esac ;;
   already-finished)
@@ -477,6 +512,17 @@ run_case killing-event-연관   killing-event-연관 mock-sse  yes 0       7 "mo
 # involvedObject 가 우리가 관리하지 않는 자원을 가리키면 Event 라도 허용하지 않는다.
 run_case 무관한-event        무관한-event       mock-sse  yes nonzero 6 "기본 자원 외의 것이 남아"
 
+# events.k8s.io/v1 은 involvedObject 가 아니라 regarding 을 쓴다. 하나로만 조회하면
+# 이 kind 는 필드가 없어 빈 값만 나오고 정상 Event 도 미승인으로 잡힌다.
+run_case killing-event-grouped killing-event-grouped mock-sse yes 0      7 "mock SSE 단계 완료"
+
+# 같은 Event 가 events 와 events.events.k8s.io 양쪽으로 동시에 열거되는 경우. 두
+# 필드를 각각 올바르게 읽어야 둘 다 승인되고 정상 종료된다.
+run_case killing-event-양쪽표현 killing-event-양쪽표현 mock-sse yes 0     7 "mock SSE 단계 완료"
+
+# regarding 이 무관한 자원을 가리키면 grouped Event 라도 허용하지 않는다.
+run_case 무관한-event-grouped 무관한-event-grouped mock-sse yes nonzero 6 "기본 자원 외의 것이 남아"
+
 # 이름이 아니라 참조 필드를 봐야 잡힌다. 이름 검색 방식은 이 사례를 통과시켰다.
 run_case VA-PV참조           va-references-pv   nfs       yes nonzero 0 "참조하는 VolumeAttachment 가 있다"
 
@@ -493,7 +539,22 @@ run_case PV신원-불일치       pv-mismatch        nfs       yes nonzero 0 "�
 run_case 이미-완료됨         already-finished   mock-sse-finish yes 0       0 "마무리할 것이 없다"
 run_case finish-정상         finish-정상        mock-sse-finish yes 0       1 "마무리 완료"
 run_case finish-막힘         finish-막힘        mock-sse-finish yes nonzero 0 "기본 자원 외의 것이 남아"
-run_case dry-run-mock-sse-finish normal         mock-sse-finish no  0       0 "dry-run"
+
+# finish 단계는 워크로드를 다시 지우지 않으므로 지금 상태가 곧 삭제 전제조건이다.
+# dry-run 도 PVC·잔여물 검사를 실제로 통과해야 "삭제 가능" 확인이 의미가 있다 — 이전엔
+# dry-run 에서 검사를 건너뛰고 정보만 보여줘 --confirm 에서 뒤집히는 성공을 보고했다.
+
+# 상태가 실제로 정리됐으면 dry-run 도 정상 종료해야 한다(거짓 성공이 아니라 확인된 성공).
+run_case dry-run-finish-정상 finish-정상        mock-sse-finish no  0       0 "마무리 완료"
+
+# normal 시나리오는 워크로드가 전혀 지워지지 않은 상태다. finish 는 그 상태를 다시
+# 지우지 않으므로, dry-run 도 비정상 종료해야 정상이다 — 예전엔 정보만 보여주고
+# rc=0 으로 끝나 "지금 --confirm 을 걸어도 되는지"를 알려주지 못했다.
+run_case dry-run-mock-sse-finish normal         mock-sse-finish no  nonzero 0 "기본 자원 외의 것이 남아"
+
+# 리뷰가 재현한 정확한 경우 — 워크로드는 이미 없지만 무관한 PVC 가 남았다. dry-run 이
+# 여기서 멈춰야 --confirm 에서 뒤집히지 않는다.
+run_case finish-dry-run-PVC잔존 finish-pvc잔존  mock-sse-finish no  nonzero 0 "PVC 가 있다"
 
 # delete 개수만으로는 "Application 을 다시 건드리지 않았다" 는 핵심 주장을 증명하지
 # 못한다. finish-정상 의 호출 로그에 워크로드·Application 삭제가 한 번도 없어야 한다.

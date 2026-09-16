@@ -295,12 +295,12 @@ ns_inventory() {          # ns_inventory <ns> — 성공 시 "kind/name" 목록�
 # Event 는 다른 객체에서 일어난 일을 설명하는 감사 기록이다. 그 자체로는 데이터를 갖지
 # 않으므로, 실제 리소스 승인((a)(b)(c))만큼 엄격하게 다루지 않아도 손실 위험이 없다 —
 # 잘못 허용해도 최악의 경우 무해한 감사 기록 하나가 namespace 삭제에 함께 쓸려갈 뿐,
-# 실제 자원이 오삭제되는 것은 아니다. involvedObject 가 우리가 관리하는 kind·이름과
-# 관련될 때만 허용한다. Pod·ReplicaSet 은 Deployment 가 매번 다른 접미사로 이름을 짓고,
-# 이 시점엔 대상이 이미 지워진 뒤라 uid 로 대조할 살아 있는 객체가 없다. 그래서 이
-# 판정에서만 예외적으로 접두사를 쓴다 — 3cf6a32 에서 없앤 자원 승인용 접두사 허용과는
-# 위험 성격이 다르다.
-event_is_managed() {          # event_is_managed <involvedObject kind> <involvedObject name>
+# 실제 자원이 오삭제되는 것은 아니다. 참조 필드(누구에 대한 기록인지)가 우리가 관리하는
+# kind·이름과 관련될 때만 허용한다. Pod·ReplicaSet 은 Deployment 가 매번 다른 접미사로
+# 이름을 짓고, 이 시점엔 대상이 이미 지워진 뒤라 uid 로 대조할 살아 있는 객체가 없다.
+# 그래서 이 판정에서만 예외적으로 접두사를 쓴다 — 3cf6a32 에서 없앤 자원 승인용 접두사
+# 허용과는 위험 성격이 다르다.
+event_is_managed() {          # event_is_managed <참조 kind> <참조 name>
   iokind=$1; ioname=$2
   case "$iokind" in
     Deployment|Service|Secret|Gateway|HTTPRoute) test "$ioname" = "$MOCK_APP" ;;
@@ -313,18 +313,28 @@ event_is_managed() {          # event_is_managed <involvedObject kind> <involved
   esac
 }
 
-# ns_inventory 가 event/ 나 event.events.k8s.io/ 항목을 내놓으면 involvedObject 를 조회해
+# ns_inventory 가 event/ 나 event.events.k8s.io/ 항목을 내놓으면 참조 필드를 조회해
 # event_is_managed 로 판정한다. events 와 events.events.k8s.io 는 api-resources 에 둘 다
-# 나열되고 같은 저장소를 공유하므로, 같은 Event 가 두 kind 문자열로 중복 열거될 수 있다 —
-# 조회 결과는 같으므로 판정도 같게 나온다. 반환값은 0=승인, 1=미승인, 2=조회 실패로
-# 나눠, 조회 실패는 호출부가 즉시 전체 단계를 중단시키게 한다.
+# 나열되고 같은 저장소를 공유하므로, 같은 Event 가 두 kind 문자열로 중복 열거될 수 있다.
+# 다만 필드명은 API 그룹마다 다르다 — core v1 은 involvedObject, events.k8s.io/v1 은
+# regarding 이다(kubectl explain events --api-version=v1 과
+# --api-version=events.k8s.io/v1 로 직접 확인함). 같은 Event 를 가리켜도 응답 스키마
+# 자체가 다르므로 kind 에 맞는 필드로 읽어야 판정이 같게 나온다 — 하나로만 조회하면
+# events.k8s.io 쪽은 필드가 없어 빈 값만 나오고 정상 Event 도 미승인으로 잡힌다.
+# 반환값은 0=승인, 1=미승인, 2=조회 실패로 나눠, 조회 실패는 호출부가 즉시 전체 단계를
+# 중단시키게 한다.
 classify_event() {            # classify_event <ns> <kind> <name>
   ns=$1; kind=$2; name=$3
-  if ! io=$($K -n "$ns" get "$kind" "$name" -o jsonpath='{.involvedObject.kind}|{.involvedObject.name}' 2>"$STDERR_FILE"); then
-    echo "중단: $kind/$name 의 involvedObject 조회가 실패했다 — $(cat "$STDERR_FILE")" >&2; return 2
+  case "$kind" in
+    event)               field='{.involvedObject.kind}|{.involvedObject.name}' ;;
+    event.events.k8s.io) field='{.regarding.kind}|{.regarding.name}' ;;
+    *) echo "중단: $kind 는 처리할 수 없는 Event kind 다" >&2; return 2 ;;
+  esac
+  if ! io=$($K -n "$ns" get "$kind" "$name" -o jsonpath="$field" 2>"$STDERR_FILE"); then
+    echo "중단: $kind/$name 의 참조 필드 조회가 실패했다 — $(cat "$STDERR_FILE")" >&2; return 2
   fi
   warn=$(cat "$STDERR_FILE")
-  test -z "$warn" || echo "경고: $kind/$name involvedObject 조회 stderr — $warn" >&2
+  test -z "$warn" || echo "경고: $kind/$name 참조 필드 조회 stderr — $warn" >&2
   iokind=$(printf '%s' "$io" | cut -d'|' -f1)
   ioname=$(printf '%s' "$io" | cut -d'|' -f2)
   event_is_managed "$iokind" "$ioname"
@@ -528,17 +538,24 @@ stage_mock_sse() {
   fi
   run_delete -n "$MOCK_NS" delete secret "$MOCK_APP-ghcr"
 
-  mock_sse_finish_sequence
+  # 메인 흐름의 dry-run 은 "아직 아무것도 안 지운 상태" 다. 잔여물 검사를 강제하면
+  # 정상 클러스터에서도 항상 실패하므로 여기서는 정보만 보여준다(round 6 원칙).
+  mock_sse_finish_sequence no
   echo "mock SSE 단계 완료 (confirm=$CONFIRM)"
 }
 
 # namespace 삭제 직전 검사와 삭제. stage_mock_sse 의 마지막과 stage_mock_sse_finish 가
 # 공유해 두 경로의 잔여물 판정이 어긋나지 않게 한다. 여기가 실제 방어선이다 —
-# 인벤토리 게이트가 아니라 더 좁은 잔여물 검사를 쓴다. 삭제 후 조건이므로 dry-run 에서는
-# 강제하지 않되, 정보로는 보여준다(round 6에서 세운 "삭제 후 조건은 dry-run 에서
-# 요구하지 않는다" 원칙은 실패시키지 않는다는 뜻이지 정보를 숨긴다는 뜻이 아니다).
-mock_sse_finish_sequence() {
-  if test "$CONFIRM" = yes; then
+# 인벤토리 게이트가 아니라 더 좁은 잔여물 검사를 쓴다.
+#
+# dry-run 처리 방식은 호출부에 따라 달라야 한다. stage_mock_sse 의 메인 흐름에서
+# dry-run 은 "아직 아무것도 안 지운 상태" 라 잔여물 검사를 강제하면 정상 클러스터에서도
+# 항상 실패한다(round 6 원칙). 반면 stage_mock_sse_finish 는 워크로드를 다시 지우지
+# 않으므로 지금 상태가 곧 삭제 전제조건이다 — 거기서는 dry-run 도 검사를 실제로 통과해야
+# "삭제 가능"이라는 확인이 의미가 있다. enforce_dry_run 으로 두 경우를 구분한다.
+mock_sse_finish_sequence() {      # mock_sse_finish_sequence <enforce_dry_run:yes|no>
+  enforce_dry_run=$1
+  if test "$CONFIRM" = yes || test "$enforce_dry_run" = yes; then
     assert_no_pvc "$MOCK_NS"
     assert_ns_residue_only_defaults "$MOCK_NS"
   else
@@ -565,7 +582,10 @@ stage_mock_sse_finish() {
     echo "확인: namespace $MOCK_NS 는 이미 없다 — 마무리할 것이 없다"
     return 0
   fi
-  mock_sse_finish_sequence
+  # 이 단계는 워크로드를 다시 지우지 않으므로 지금 상태가 곧 삭제 전제조건이다.
+  # dry-run 에서도 PVC·잔여물 검사를 실제로 돌려, 확인 없이 --confirm 을 걸면 뒤집히는
+  # 거짓 성공을 보고하지 않는다. 삭제 명령만 run_delete 의 기존 dry-run 분기로 미룬다.
+  mock_sse_finish_sequence yes
   echo "mock SSE 마무리 완료 (confirm=$CONFIRM)"
 }
 
