@@ -34,7 +34,7 @@ esac
 # ---- namespace 인벤토리 ------------------------------------------------------
 # 실제 클러스터의 91개 kind 를 다 흉내낼 필요는 없다. 자원이 실제로 있는 kind 와
 # 빈 kind 를 섞어, 스윕이 전 kind 를 돌고 결과를 모으는 경로를 검사한다.
-INV_KINDS="pods replicasets.apps deployments.apps services endpoints secrets configmaps serviceaccounts persistentvolumeclaims gateways.gateway.networking.k8s.io httproutes.gateway.networking.k8s.io endpointslices.discovery.k8s.io"
+INV_KINDS="pods replicasets.apps deployments.apps services endpoints secrets configmaps serviceaccounts persistentvolumeclaims gateways.gateway.networking.k8s.io httproutes.gateway.networking.k8s.io endpointslices.discovery.k8s.io ciliumendpoints.cilium.io podmetrics.metrics.k8s.io"
 
 case "$SCENARIO" in
   api-resources-fail)
@@ -55,13 +55,17 @@ esac
 # "지금 namespace 에 무엇이 있는가" 만 답한다.
 case "$FAKE_ARGS" in
   *"-n persona-mock-sse get pods --ignore-not-found"*)
-    if grep -q "delete deployment persona-mock-sse" "$CALL_LOG"; then exit 0; fi
+    if grep -q "delete deployment persona-mock-sse" "$CALL_LOG"; then
+      case "$SCENARIO" in
+        residue-pod) echo "pod/persona-mock-sse-6665f6c5bf-r575j" ;;
+      esac
+      exit 0
+    fi
     echo "pod/persona-mock-sse-6665f6c5bf-r575j"
     case "$SCENARIO" in
       unrelated-pod|outsider-secret-ref) echo "pod/other-app-7d9f" ;;
-      # 이름은 정리 대상처럼 보이지만 소유가 다른 Pod. 인벤토리는 통과하고
-      # 소유 검사에서 걸려야 한다.
-      pod-wrong-owner) echo "pod/persona-mock-sse-imposter" ;;
+      # 이름은 정리 대상처럼 보이지만 소유가 다른 Pod. 접두사 판정은 이것을 승인했다.
+      prefix-pod) echo "pod/persona-mock-sse-independent" ;;
     esac
     exit 0 ;;
   *"-n persona-mock-sse get replicasets.apps --ignore-not-found"*)
@@ -87,8 +91,19 @@ case "$FAKE_ARGS" in
       late-resource) if grep -q "delete secret persona-mock-sse-ghcr" "$CALL_LOG"; then
                        echo "secret/appeared-later"
                      fi ;;
+      # 같은 접두사를 쓴 무관한 Secret. 이름만 보던 판정은 이것을 승인했다.
+      backup-secret) echo "secret/persona-mock-sse-backup" ;;
+      late-backup-secret) if grep -q "delete secret persona-mock-sse-ghcr" "$CALL_LOG"; then
+                            echo "secret/persona-mock-sse-backup"
+                          fi ;;
     esac
     exit 0 ;;
+  *"-n persona-mock-sse get ciliumendpoints.cilium.io --ignore-not-found"*)
+    if grep -q "delete deployment persona-mock-sse" "$CALL_LOG"; then exit 0; fi
+    echo "ciliumendpoint.cilium.io/persona-mock-sse-6665f6c5bf-r575j"; exit 0 ;;
+  *"-n persona-mock-sse get podmetrics.metrics.k8s.io --ignore-not-found"*)
+    if grep -q "delete deployment persona-mock-sse" "$CALL_LOG"; then exit 0; fi
+    echo "podmetrics.metrics.k8s.io/persona-mock-sse-6665f6c5bf-r575j"; exit 0 ;;
   *"-n persona-mock-sse get configmaps --ignore-not-found"*)
     echo "configmap/kube-root-ca.crt"; exit 0 ;;
   *"-n persona-mock-sse get serviceaccounts --ignore-not-found"*)
@@ -108,24 +123,53 @@ case "$FAKE_ARGS" in
 esac
 
 # ---- 소유 사슬 ---------------------------------------------------------------
-# 소유 응답은 대상 이름에 따라 달라야 한다. 이름과 무관하게 같은 값을 주면
-# 소유 검사가 무력해지고 잘못된 구현도 통과한다.
+# ---- uid 와 소유 참조 -------------------------------------------------------
+# 실제 클러스터에서 읽은 값을 쓴다. 응답은 반드시 대상 이름에 따라 달라야 한다 —
+# 이름과 무관하게 같은 값을 주면 소유 검사가 무력해지고 잘못된 구현도 통과한다.
+DEPLOY_UID=d2e55dc8-b260-4597-b110-f2c9ea5aa846
+RS_UID=54d0cd1e-4a3e-4d45-a0ee-b6208056793e
+SVC_UID=6d365b08-43f8-4443-b045-16b7ab7a2609
+POD_UID=3611c546-5f37-44c4-98d0-160be914dd2e
+RS_NAME=persona-mock-sse-6665f6c5bf
+POD_NAME=persona-mock-sse-6665f6c5bf-r575j
+
+case "$FAKE_ARGS" in
+  *"get deployment persona-mock-sse "*metadata.uid*) echo "$DEPLOY_UID"; exit 0 ;;
+  *"get service persona-mock-sse "*metadata.uid*)    echo "$SVC_UID"; exit 0 ;;
+  *"get replicaset "*metadata.uid*)
+    t=$(printf '%s\n' "$FAKE_ARGS" | sed 's/.*get replicaset \([^ ]*\).*/\1/')
+    test "$t" = "$RS_NAME" && { echo "$RS_UID"; exit 0; }
+    echo "uid-of-$t"; exit 0 ;;
+  *"get pod "*metadata.uid*)
+    t=$(printf '%s\n' "$FAKE_ARGS" | sed 's/.*get pod \([^ ]*\).*/\1/')
+    test "$t" = "$POD_NAME" && { echo "$POD_UID"; exit 0; }
+    echo "uid-of-$t"; exit 0 ;;
+esac
+
 case "$FAKE_ARGS" in
   *"get pod "*ownerReferences*)
-    owner_target=$(printf '%s\n' "$FAKE_ARGS" | sed 's/.*get pod \([^ ]*\).*/\1/')
+    t=$(printf '%s\n' "$FAKE_ARGS" | sed 's/.*get pod \([^ ]*\).*/\1/')
     case "$SCENARIO" in
-      pod-wrong-owner) echo "ReplicaSet|other-app-1234"; exit 0 ;;
+      pod-wrong-owner)  echo "ReplicaSet|other-app-1234|uid-of-other-app-1234|true"; exit 0 ;;
+      pod-uid-mismatch) echo "ReplicaSet|$RS_NAME|WRONG-UID|true"; exit 0 ;;
+      pod-not-controller) echo "ReplicaSet|$RS_NAME|$RS_UID|false"; exit 0 ;;
     esac
-    case "$owner_target" in
-      persona-mock-sse-*) echo "ReplicaSet|persona-mock-sse-6665f6c5bf"; exit 0 ;;
-      *) echo "ReplicaSet|other-app-1234"; exit 0 ;;
-    esac ;;
+    test "$t" = "$POD_NAME" && { echo "ReplicaSet|$RS_NAME|$RS_UID|true"; exit 0; }
+    # 접두사만 같고 소유가 다른 Pod
+    echo "ReplicaSet|other-app-1234|uid-of-other-app-1234|true"; exit 0 ;;
   *"get replicaset "*ownerReferences*)
-    owner_target=$(printf '%s\n' "$FAKE_ARGS" | sed 's/.*get replicaset \([^ ]*\).*/\1/')
-    case "$owner_target" in
-      persona-mock-sse-*) echo "Deployment|persona-mock-sse"; exit 0 ;;
-      *) echo "Deployment|other-app"; exit 0 ;;
-    esac ;;
+    t=$(printf '%s\n' "$FAKE_ARGS" | sed 's/.*get replicaset \([^ ]*\).*/\1/')
+    test "$t" = "$RS_NAME" && { echo "Deployment|persona-mock-sse|$DEPLOY_UID|true"; exit 0; }
+    echo "Deployment|other-app|uid-of-other-app|true"; exit 0 ;;
+  *"get endpointslice "*ownerReferences*)
+    case "$SCENARIO" in
+      eps-wrong-owner) echo "Service|other-svc|uid-of-other-svc|true"; exit 0 ;;
+    esac
+    echo "Service|persona-mock-sse|$SVC_UID|true"; exit 0 ;;
+  *"get ciliumendpoint "*ownerReferences*)
+    t=$(printf '%s\n' "$FAKE_ARGS" | sed 's/.*get ciliumendpoint \([^ ]*\).*/\1/')
+    test "$t" = "$POD_NAME" && { echo "Pod|$POD_NAME|$POD_UID|"; exit 0; }
+    echo "Pod|$t|uid-of-$t|"; exit 0 ;;
 esac
 
 case "$SCENARIO" in
@@ -340,14 +384,14 @@ run_case Job-이미지불일치     job-image-mismatch migration yes nonzero 0 "
 run_case forbidden-소비자조회 forbidden-secret  mock-sse  yes nonzero 5 "소비자 조회가 실패했다"
 
 # 정리 대상 밖의 Pod 가 pull Secret 을 쓰면 삭제 전에 멈춘다.
-run_case 대상외-Secret소비자  outsider-secret-ref mock-sse yes nonzero 0 "승인 목록 밖의 자원"
+run_case 대상외-Secret소비자  outsider-secret-ref mock-sse yes nonzero 0 "승인 조건을 만족하지 않는"
 
 # namespace 삭제는 그 안의 모든 것을 가져간다. pull Secret 을 참조하지 않는 자원도
 # 승인 목록 밖이면 멈춘다. "소비자 없음" 과 "보존할 자원 없음" 은 다른 조건이다.
-run_case 무관한-Pod          unrelated-pod      mock-sse  yes nonzero 0 "승인 목록 밖의 자원"
+run_case 무관한-Pod          unrelated-pod      mock-sse  yes nonzero 0 "승인 조건을 만족하지 않는"
 run_case 무관한-PVC          unrelated-pvc      mock-sse  yes nonzero 0 "PVC 가 있다"
-run_case replicas0-Deployment unrelated-deploy  mock-sse  yes nonzero 0 "승인 목록 밖의 자원"
-run_case Pod-소유자다름       pod-wrong-owner    mock-sse  yes nonzero 0 "소유가 아니다"
+run_case replicas0-Deployment unrelated-deploy  mock-sse  yes nonzero 0 "승인 조건을 만족하지 않는"
+run_case Pod-소유자다름       pod-wrong-owner    mock-sse  yes nonzero 0 "승인 조건을 만족하지 않는"
 
 # 인벤토리 조회가 실패하면 빈 목록으로 읽지 않는다.
 run_case api-resources-실패   api-resources-fail mock-sse  yes nonzero 0 "api-resources 조회가 실패"
@@ -355,7 +399,20 @@ run_case kind-조회실패        kind-list-fail     mock-sse  yes nonzero 0 "�
 
 # 삭제 도중에 새 자원이 생기면 namespace 삭제 직전 재검사가 잡는다.
 # Application·httproute·gateway·deployment·service·secret 6건까지만 나간다.
-run_case 삭제중-자원출현      late-resource      mock-sse  yes nonzero 6 "승인 목록 밖의 자원"
+run_case 삭제중-자원출현      late-resource      mock-sse  yes nonzero 6 "기본 자원 외의 것이 남아"
+
+# 리뷰가 재현한 세 가지. 이름 접두사만 보던 판정은 셋 다 승인하고 namespace 까지 지웠다.
+run_case 기존-백업Secret      backup-secret      mock-sse  yes nonzero 0 "승인 조건을 만족하지 않는"
+run_case 무관한-접두사Pod     prefix-pod         mock-sse  yes nonzero 0 "승인 조건을 만족하지 않는"
+run_case 삭제중-백업Secret    late-backup-secret mock-sse  yes nonzero 6 "기본 자원 외의 것이 남아"
+
+# 소유 참조는 이름만이 아니라 uid 와 controller 까지 본다.
+run_case Pod-소유UID불일치    pod-uid-mismatch   mock-sse  yes nonzero 0 "승인 조건을 만족하지 않는"
+run_case Pod-controller아님   pod-not-controller mock-sse  yes nonzero 0 "승인 조건을 만족하지 않는"
+run_case endpointslice-소유다름 eps-wrong-owner  mock-sse  yes nonzero 0 "승인 조건을 만족하지 않는"
+
+# 삭제가 정착되지 않았거나 잔여물이 있으면 namespace 를 지우지 않는다.
+run_case 잔여물-Pod남음       residue-pod        mock-sse  yes nonzero 6 "기본 자원 외의 것이 남아"
 
 # 이름이 아니라 참조 필드를 봐야 잡힌다. 이름 검색 방식은 이 사례를 통과시켰다.
 run_case VA-PV참조           va-references-pv   nfs       yes nonzero 0 "참조하는 VolumeAttachment 가 있다"

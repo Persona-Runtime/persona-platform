@@ -227,96 +227,185 @@ pull_secret_consumers() {
     -o jsonpath='{range .items[*]}{.metadata.name}{" "}{range .spec.imagePullSecrets[*]}{.name}{","}{end}{"\n"}{end}'
 }
 
-# Pod 가 정말 mock SSE 것인지 소유 사슬로 본다. 이름 접두사는 증거가 약하다 —
-# 누가 persona-mock-sse-foo 라고 이름 붙이면 그대로 통과한다.
-# 사슬: Pod -> ReplicaSet -> Deployment persona-mock-sse
-assert_pod_owned_by_mock_deploy() {
-  pod=$1
-  if ! rs=$($K -n "$MOCK_NS" get pod "$pod" -o jsonpath='{.metadata.ownerReferences[0].kind}|{.metadata.ownerReferences[0].name}' 2>&1); then
-    echo "중단: Pod $pod 소유 조회가 실패했다 — $rs" >&2; return 1
-  fi
-  rs_kind=$(printf '%s' "$rs" | cut -d'|' -f1)
-  rs_name=$(printf '%s' "$rs" | cut -d'|' -f2)
-  test "$rs_kind" = ReplicaSet || {
-    echo "중단: Pod $pod 의 소유자가 ReplicaSet 이 아니다 [$rs]" >&2; return 1; }
-  if ! dp=$($K -n "$MOCK_NS" get replicaset "$rs_name" -o jsonpath='{.metadata.ownerReferences[0].kind}|{.metadata.ownerReferences[0].name}' 2>&1); then
-    echo "중단: ReplicaSet $rs_name 소유 조회가 실패했다 — $dp" >&2; return 1
-  fi
-  test "$dp" = "Deployment|$MOCK_APP" || {
-    echo "중단: Pod $pod 가 $MOCK_APP Deployment 소유가 아니다 [$dp]" >&2; return 1; }
-  echo "확인: Pod $pod 는 $MOCK_APP Deployment 소유"
+# ownerReferences[0] 를 kind|name|uid|controller 네 값으로 읽는다.
+# 이름만 맞춰서는 안 된다. 같은 이름의 다른 객체를 가리키는 참조를 uid 로 걸러낸다.
+owner_ref_of() {          # owner_ref_of <kind> <name>
+  $K -n "$MOCK_NS" get "$1" "$2" -o jsonpath='{.metadata.ownerReferences[0].kind}|{.metadata.ownerReferences[0].name}|{.metadata.ownerReferences[0].uid}|{.metadata.ownerReferences[0].controller}' 2>&1
 }
 
-# 삭제 전 검사 — 참조가 전부 정리 대상(mock SSE Deployment 의 Pod)인지 본다.
-assert_pull_secret_refs_are_targets() {
-  if ! pods=$(pull_secret_consumers 2>&1); then
-    echo "중단: pull Secret 소비자 조회가 실패했다 — $pods" >&2; return 1
-  fi
-  # ServiceAccount 에 붙어 있으면 우리가 모르는 배선이 있다는 신호다. namespace 를 지우면
-  # 사라지지만, 그 전에 사람이 확인해야 한다.
+uid_of() {                # uid_of <kind> <name> — 없으면 빈 문자열
+  $K -n "$MOCK_NS" get "$1" "$2" --ignore-not-found -o jsonpath='{.metadata.uid}' 2>&1
+}
+
+# owner 참조가 기대한 대상인지 본다. want_ctrl=yes 면 controller=true 까지 요구한다.
+# Cilium 은 ciliumendpoint 의 controller 를 세우지 않으므로 그 kind 에는 요구하지 않는다.
+owner_matches() {         # owner_matches <ref> <want_kind> <want_name> <want_uid> <want_ctrl>
+  ref=$1; wk=$2; wn=$3; wu=$4; wc=$5
+  k=$(printf '%s' "$ref" | cut -d'|' -f1)
+  n=$(printf '%s' "$ref" | cut -d'|' -f2)
+  u=$(printf '%s' "$ref" | cut -d'|' -f3)
+  c=$(printf '%s' "$ref" | cut -d'|' -f4)
+  test "$k" = "$wk" || return 1
+  test "$n" = "$wn" || return 1
+  test -n "$wu" && test "$u" = "$wu" || return 1
+  test "$wc" != yes || test "$c" = true || return 1
+  return 0
+}
+
+# ServiceAccount 에 pull Secret 이 붙어 있으면 우리가 모르는 배선이 있다는 신호다.
+# namespace 를 지우면 사라지지만 그 전에 사람이 확인해야 한다.
+# Pod 소유 확인은 여기가 아니라 인벤토리 게이트가 namespace 의 모든 Pod 에 대해 수행한다 —
+# pull Secret 을 쓰지 않는 Pod 도 namespace 삭제에 함께 휩쓸리기 때문이다.
+assert_sa_has_no_pull_secret() {
   if ! sas=$($K -n "$MOCK_NS" get sa -o jsonpath='{range .items[*]}{.metadata.name}{" "}{range .imagePullSecrets[*]}{.name}{","}{end}{"\n"}{end}' 2>&1); then
     echo "중단: ServiceAccount 조회가 실패했다 — $sas" >&2; return 1
   fi
   if printf '%s\n' "$sas" | grep -q "$MOCK_APP-ghcr"; then
     echo "중단: ServiceAccount 가 pull Secret 을 참조한다 — $sas" >&2; return 1
   fi
-
-  # 참조하는 Pod 마다 소유 사슬을 확인한다.
-  consumers=$(printf '%s\n' "$pods" | grep "$MOCK_APP-ghcr" | awk '{print $1}' || true)
-  for pod in $consumers; do
-    assert_pod_owned_by_mock_deploy "$pod"
-  done
-  echo "확인: pull Secret 참조가 모두 정리 대상이다"
+  echo "확인: ServiceAccount 에 pull Secret 참조 없음"
 }
 
-# namespace 전체 자원을 열거해 승인 목록과 대조한다.
-#
-# "pull Secret 소비자 없음" 은 namespace 삭제의 근거가 되지 못한다. 공개 이미지를 쓰는 Pod,
-# replicas 0 인 다른 Deployment, 다른 PVC 는 pull Secret 을 참조하지 않으므로 그 검사를
-# 통과하지만 delete namespace 는 그것까지 가져간다. 두 조건은 다르다.
-#
-# api-resources 전수 스윕이라 모르는 CRD 도 잡힌다. 약 25초 걸린다.
-assert_ns_inventory_approved() {
+# 삭제 후 검사 — Deployment 를 실제로 지운 뒤에만 부른다.
+assert_no_pull_secret_ref() {
+  if ! pods=$(pull_secret_consumers 2>&1); then
+    echo "중단: pull Secret 소비자 조회가 실패했다 — $pods" >&2; return 1
+  fi
+  if printf '%s\n' "$pods" | grep -q "$MOCK_APP-ghcr"; then
+    echo "중단: pull Secret 참조가 남아 있다 — $pods" >&2; return 1
+  fi
+  echo "확인: pull Secret 참조 없음"
+}
+
+# namespace 자원을 전수 열거한다. 조회 실패를 빈 목록으로 읽지 않는다.
+ns_inventory() {          # ns_inventory <ns> — 성공 시 "kind/name" 목록을 출력
   ns=$1
   if ! kinds=$($K api-resources --verbs=list --namespaced -o name 2>&1); then
     echo "중단: api-resources 조회가 실패했다 — $kinds" >&2; return 1
   fi
   test -n "$kinds" || { echo "중단: api-resources 결과가 비어 있다" >&2; return 1; }
-
-  found=""
   for kind in $kinds; do
-    # 조회 실패를 빈 목록으로 읽지 않는다. aggregated API 가 내려가도 kind 이름과 함께 멈춘다.
     if ! got=$($K -n "$ns" get "$kind" --ignore-not-found -o name 2>&1); then
       echo "중단: $ns 의 $kind 조회가 실패했다 — $got" >&2; return 1
     fi
-    test -z "$got" || found="$found$got
-"
+    test -z "$got" || printf '%s\n' "$got"
   done
+}
 
+# namespace 전체 자원을 승인 조건과 대조한다.
+#
+# "pull Secret 소비자 없음" 은 namespace 삭제의 근거가 되지 못한다. delete namespace 는 그 안의
+# 모든 것을 가져간다. 그리고 이름 접두사도 근거가 되지 못한다 — secret/persona-mock-sse-backup
+# 처럼 같은 접두사를 쓴 무관한 자원이 승인돼 버린다. 그래서 kind 를 무시하지 않고,
+# 파생 자원은 ownerReferences 를 실제로 확인한다.
+assert_ns_inventory_approved() {
+  ns=$1
+  found=$(ns_inventory "$ns") || return 1
+
+  # 소유 대조에 쓸 살아 있는 uid 를 먼저 읽는다. 없으면 빈 값이고, 그때는 그 kind 의
+  # 파생 자원이 승인되지 않는다(소유를 증명할 대상이 없다).
+  deploy_uid=$(uid_of deployment "$MOCK_APP") || { echo "중단: Deployment uid 조회 실패 — $deploy_uid" >&2; return 1; }
+  svc_uid=$(uid_of service "$MOCK_APP")       || { echo "중단: Service uid 조회 실패 — $svc_uid" >&2; return 1; }
+
+  approved_pods=""
   unexpected=""
-  for item in $(printf '%s' "$found" | sort -u); do
+  for item in $(printf '%s\n' "$found" | sort -u); do
+    kind=${item%%/*}
     name=${item#*/}
     case "$item" in
-      # 쿠버네티스가 모든 namespace 에 자동으로 만든다.
-      configmap/kube-root-ca.crt|serviceaccount/default) continue ;;
+      # (a) kind 와 이름의 정확한 조합. 접두사 허용은 쓰지 않는다.
+      configmap/kube-root-ca.crt) continue ;;
+      serviceaccount/default) continue ;;
+      "secret/$MOCK_APP-ghcr") continue ;;
+      "deployment.apps/$MOCK_APP") continue ;;
+      "service/$MOCK_APP") continue ;;
+      "endpoints/$MOCK_APP") continue ;;   # (c) 같은 이름의 Service 가 위에서 승인됐다
+      "gateway.gateway.networking.k8s.io/$MOCK_APP") continue ;;
+      "httproute.gateway.networking.k8s.io/$MOCK_APP") continue ;;
     esac
-    case "$name" in
-      # 정리 대상: Argo 가 관리하던 4개, 수동 생성 pull Secret, 그리고 파생 자원.
-      # 파생 자원의 접두사 판정은 소유 증명이 아니다. 인벤토리 대조가 1차 방어이고
-      # Pod·ReplicaSet 의 실제 소유는 assert_pod_owned_by_mock_deploy 가 따로 확인한다.
-      "$MOCK_APP"|"$MOCK_APP-ghcr"|"$MOCK_APP"-*) continue ;;
+
+    # (b) 소유를 실제로 확인하는 파생 kind. 허용 kind 를 제한한다.
+    case "$kind" in
+      replicaset.apps)
+        ref=$(owner_ref_of replicaset "$name") || { echo "중단: $item 소유 조회 실패 — $ref" >&2; return 1; }
+        if owner_matches "$ref" Deployment "$MOCK_APP" "$deploy_uid" yes; then continue; fi
+        ;;
+      pod)
+        ref=$(owner_ref_of pod "$name") || { echo "중단: $item 소유 조회 실패 — $ref" >&2; return 1; }
+        rs=$(printf '%s' "$ref" | cut -d'|' -f2)
+        rs_uid=$(uid_of replicaset "$rs") || { echo "중단: ReplicaSet uid 조회 실패 — $rs_uid" >&2; return 1; }
+        if owner_matches "$ref" ReplicaSet "$rs" "$rs_uid" yes; then
+          rsref=$(owner_ref_of replicaset "$rs") || { echo "중단: $rs 소유 조회 실패 — $rsref" >&2; return 1; }
+          if owner_matches "$rsref" Deployment "$MOCK_APP" "$deploy_uid" yes; then
+            approved_pods="$approved_pods $name"
+            continue
+          fi
+        fi
+        ;;
+      endpointslice.discovery.k8s.io)
+        ref=$(owner_ref_of endpointslice "$name") || { echo "중단: $item 소유 조회 실패 — $ref" >&2; return 1; }
+        if owner_matches "$ref" Service "$MOCK_APP" "$svc_uid" yes; then continue; fi
+        ;;
+      ciliumendpoint.cilium.io)
+        # Cilium 은 controller 를 세우지 않으므로 요구하지 않는다. uid 는 대조한다.
+        ref=$(owner_ref_of ciliumendpoint "$name") || { echo "중단: $item 소유 조회 실패 — $ref" >&2; return 1; }
+        pod_uid=$(uid_of pod "$name") || { echo "중단: Pod uid 조회 실패 — $pod_uid" >&2; return 1; }
+        if owner_matches "$ref" Pod "$name" "$pod_uid" no; then continue; fi
+        ;;
     esac
     unexpected="$unexpected  $item
 "
   done
 
-  test -z "$unexpected" || {
-    echo "중단: $ns 에 승인 목록 밖의 자원이 있다. namespace 를 지우면 함께 사라진다" >&2
-    printf '%s' "$unexpected" >&2
-    echo "  보존해야 할 자원이면 먼저 옮기고, 지워도 되면 승인 목록을 갱신한다" >&2
+  # (c) 소유를 증명할 수 없는 kind 는 이름 연결로 승인한다. 소유 증명이 아니다 —
+  # podmetrics 는 ownerReferences 가 없는 가상 객체이고 Pod 와 이름만 같다.
+  # 위에서 소유가 확인된 Pod 이름과 정확히 같을 때만 통과시킨다.
+  remaining=""
+  for item in $unexpected; do
+    case "$item" in
+      podmetrics.metrics.k8s.io/*)
+        pmname=${item#*/}
+        for ap in $approved_pods; do
+          test "$ap" = "$pmname" && { pmname=""; break; }
+        done
+        test -z "$pmname" && continue
+        ;;
+    esac
+    remaining="$remaining  $item
+"
+  done
+
+  test -z "$remaining" || {
+    echo "중단: $ns 에 승인 조건을 만족하지 않는 자원이 있다. namespace 를 지우면 함께 사라진다" >&2
+    printf '%s' "$remaining" >&2
+    echo "  보존해야 할 자원이면 먼저 옮기고, 지워도 되면 승인 조건을 갱신한다" >&2
     return 1
   }
-  echo "확인: $ns 자원이 모두 승인 목록 안에 있다"
+  echo "확인: $ns 자원이 모두 승인 조건을 만족한다"
+}
+
+# namespace 삭제 직전 검사. 인벤토리 게이트와 다른, 더 좁은 목록을 쓴다.
+# 이 시점에는 앞 단계가 모두 지워졌으므로 쿠버네티스가 자동으로 만드는 두 개만 남아야 한다.
+# 삭제 후 조건이므로 dry-run 에서는 부르지 않는다.
+assert_ns_residue_only_defaults() {
+  ns=$1
+  found=$(ns_inventory "$ns") || return 1
+  leftovers=""
+  for item in $(printf '%s\n' "$found" | sort -u); do
+    case "$item" in
+      configmap/kube-root-ca.crt|serviceaccount/default) continue ;;
+    esac
+    leftovers="$leftovers  $item
+"
+  done
+  test -z "$leftovers" || {
+    echo "중단: $ns 에 기본 자원 외의 것이 남아 있어 namespace 를 지우지 않는다" >&2
+    printf '%s' "$leftovers" >&2
+    echo "  앞 삭제가 아직 정착되지 않았으면 잠시 뒤 이 단계를 다시 실행한다" >&2
+    echo "  그 사이 새로 생긴 자원이면 사람이 먼저 확인한다" >&2
+    return 1
+  }
+  echo "확인: $ns 에 기본 자원만 남았다"
 }
 
 # 데이터를 가진 자원은 따로 못 박는다. 인벤토리 대조가 이미 잡지만 손실이 가장 크므로
@@ -350,7 +439,7 @@ stage_mock_sse() {
   # 삭제 전 1회 — dry-run 에서도 돌아 예상 밖 자원을 미리 보여준다.
   assert_no_pvc "$MOCK_NS"
   assert_ns_inventory_approved "$MOCK_NS"
-  assert_pull_secret_refs_are_targets
+  assert_sa_has_no_pull_secret
   assert_no_finalizer "$MOCK_APP"
 
   run_delete -n argocd delete application "$MOCK_APP" --wait=true --timeout=60s
@@ -378,10 +467,12 @@ stage_mock_sse() {
   fi
   run_delete -n "$MOCK_NS" delete secret "$MOCK_APP-ghcr"
 
-  # namespace 삭제 직전 1회 — 여기가 실제 방어선이다. 앞 단계에서 Deployment·Pod 가
-  # 사라졌으므로 목록에는 자동 생성 자원만 남아야 한다. 그 사이에 무언가 생겼다면 멈춘다.
-  assert_no_pvc "$MOCK_NS"
-  assert_ns_inventory_approved "$MOCK_NS"
+  # namespace 삭제 직전 — 여기가 실제 방어선이다. 인벤토리 게이트가 아니라 더 좁은
+  # 잔여물 검사를 쓴다. 삭제 후 조건이므로 dry-run 에서는 부르지 않는다.
+  if test "$CONFIRM" = yes; then
+    assert_no_pvc "$MOCK_NS"
+    assert_ns_residue_only_defaults "$MOCK_NS"
+  fi
   run_delete delete namespace "$MOCK_NS" --wait=true --timeout=180s
   if test "$CONFIRM" = yes; then
     assert_absent "namespace $MOCK_NS" get namespace "$MOCK_NS"
