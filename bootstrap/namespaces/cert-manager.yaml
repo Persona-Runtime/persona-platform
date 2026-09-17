@@ -1,0 +1,10 @@
+# cert-manager 컨트롤러·webhook·cainjector가 사는 namespace. metallb-system과 달리
+# hostNetwork·NET_ADMIN 같은 특권이 필요 없지만, PSA restricted 호환 여부를 클러스터 없이
+# 검증할 수 없어 persona-app·persona-data와 같은 미지정 상태로 둔다(Gate 4 범위).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cert-manager
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: certificate-authority

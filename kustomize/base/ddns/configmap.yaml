@@ -46,10 +46,25 @@ data:
       *) echo "DNS 레코드 조회 응답이 실패다" >&2; exit 1 ;;
     esac
 
+    # id·content를 응답 안의 첫 매치로 뽑는다(jq가 없어 grep+cut). 이건 오늘 Cloudflare가
+    # id를 다른 "*_id" 필드보다 먼저 두는 응답 순서에 기댄다 — 순서가 바뀌면 조용히 엉뚱한
+    # id를 PATCH할 수 있으므로, 뽑은 값이 실제로 이 레코드의 것인지 아래 두 검사로 확인한다.
     record_id=$(printf '%s\n' "$record_json" | grep -o '"id":"[^"]*"' | head -n1 | cut -d'"' -f4)
     record_ip=$(printf '%s\n' "$record_json" | grep -o '"content":"[^"]*"' | head -n1 | cut -d'"' -f4)
     if [ -z "$record_id" ] || [ -z "$record_ip" ]; then
       echo "대상 A 레코드를 찾지 못했다 — 레코드를 먼저 만들어야 한다(Gate 3-3a)" >&2
+      exit 1
+    fi
+
+    # 검사 1: 응답에 대상 레코드 이름이 실제로 있는지(엉뚱한 레코드의 id를 뽑았다면 여기서 걸린다).
+    case "$record_json" in
+      *"\"name\":\"${RECORD_NAME}\""*) : ;;
+      *) echo "DNS 레코드 응답에 대상 이름이 없다" >&2; exit 1 ;;
+    esac
+
+    # 검사 2: Cloudflare 리소스 id는 32자리 hex다. 형식이 다르면 파싱이 엉뚱한 값을 잡은 것이다.
+    if [ "$(expr "$record_id" : '[0-9a-f]\{32\}$')" != 32 ]; then
+      echo "record_id 형식이 올바르지 않다" >&2
       exit 1
     fi
 

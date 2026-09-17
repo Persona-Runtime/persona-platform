@@ -27,6 +27,7 @@ kubectl kustomize "$repo_dir/kustomize/overlays/prod/persona-edge"           > "
 ruby -ryaml - \
   "$metallb_file" "$issuers_file" "$edge_file" \
   "$repo_dir/bootstrap/namespaces/metallb-system.yaml" \
+  "$repo_dir/bootstrap/namespaces/cert-manager.yaml" \
   "$repo_dir/bootstrap/namespaces/persona-edge.yaml" \
   "$repo_dir/argocd/metallb.yaml" \
   "$repo_dir/argocd/metallb-config.yaml" \
@@ -36,7 +37,7 @@ ruby -ryaml - \
 Encoding.default_external = Encoding::UTF_8
 
 metallb_path, issuers_path, edge_path,
-  ns_metallb_path, ns_edge_path,
+  ns_metallb_path, ns_cert_manager_path, ns_edge_path,
   app_metallb_path, app_metallb_config_path, app_cert_manager_path, app_cert_manager_issuers_path, app_edge_path = ARGV
 
 def load(path)
@@ -113,28 +114,30 @@ script = configmap.dig("data", "update-dns.sh") || raise("[안전] update-dns.sh
 raise "[안전] DDNS 스크립트에 토큰을 로그로 출력하는 것으로 보이는 echo가 있다 — 응답 전체를 출력하면 안 된다" if script =~ /echo\s+"\$(record_json|update_json)"/
 
 # --- bootstrap namespace -----------------------------------------------------
+# 이 저장소는 Argo overlay/Application이 Namespace를 소유하지 않는다 — 전부 bootstrap 파일이
+# 소유하고, CP 적용 순서(3-7)에서 Argo Sync보다 먼저 적용한다. metallb·cert-manager Argo
+# Application에 CreateNamespace=true를 쓰지 않는 이유이기도 하다(아래 Argo 검사).
 ns_metallb = YAML.load_file(ns_metallb_path)
 raise "[안전] metallb-system: Namespace kind가 아니다" unless ns_metallb["kind"] == "Namespace"
 raise "[안전] metallb-system: PSA privileged 예외 라벨이 없다 — speaker가 hostNetwork·NET_ADMIN을 쓴다" unless ns_metallb.dig("metadata", "labels", "pod-security.kubernetes.io/enforce") == "privileged"
+
+ns_cert_manager = YAML.load_file(ns_cert_manager_path)
+raise "[안전] cert-manager: Namespace kind가 아니다" unless ns_cert_manager["kind"] == "Namespace"
+raise "[안전] cert-manager: 이름이 다르다" unless ns_cert_manager.dig("metadata", "name") == "cert-manager"
 
 ns_edge = YAML.load_file(ns_edge_path)
 raise "[안전] persona-edge: Namespace kind가 아니다" unless ns_edge["kind"] == "Namespace"
 raise "[안전] persona-edge: PSA restricted가 아니다 — 이 namespace는 privileged 권한이 필요 없다" unless ns_edge.dig("metadata", "labels", "pod-security.kubernetes.io/enforce") == "restricted"
 
 # --- Argo Application ---------------------------------------------------------
-# metallb·cert-manager는 CRD 설치용 multi-source Application이라 CreateNamespace만 허용한다.
-{ app_metallb_path => "metallb", app_cert_manager_path => "cert-manager" }.each do |path, name|
-  application = YAML.load_file(path)
-  raise "[안전] #{name}: Application kind가 아니다" unless application["kind"] == "Application"
-  spec = application.fetch("spec")
-  raise "[안전] #{name}: CreateNamespace syncOption이 없다" unless spec.dig("syncPolicy", "syncOptions") == ["CreateNamespace=true"]
-  raise "[안전] #{name}: 자동 Sync를 켜면 안 된다" if spec.dig("syncPolicy", "automated")
-end
-
-# metallb-config·cert-manager-issuers·persona-edge는 이 저장소 path를 가리키는 단일 source이고
-# 수동 Sync만 한다(기존 persona-app·persona-db와 같은 원칙) — syncPolicy 자체가 없어야 한다.
+# 5개 전부 이 저장소 path를 가리키는 단일 source이거나(metallb-config·cert-manager-issuers·
+# persona-edge) CRD 설치용 multi-source(metallb·cert-manager)지만, 어느 쪽도 CreateNamespace를
+# 쓰지 않는다 — Namespace는 bootstrap 파일이 소유하고 Argo Sync보다 먼저 적용된다(3-7 2번).
+# syncPolicy 자체가 없어야 한다(기존 persona-app·persona-db와 같은 원칙, 자동 Sync 금지 포함).
 {
+  app_metallb_path               => ["metallb", nil, "metallb-system"],
   app_metallb_config_path        => ["metallb-config", "kustomize/overlays/prod/metallb-config", "metallb-system"],
+  app_cert_manager_path          => ["cert-manager", nil, "cert-manager"],
   app_cert_manager_issuers_path  => ["cert-manager-issuers", "kustomize/overlays/prod/cert-manager-issuers", "cert-manager"],
   app_edge_path                  => ["persona-edge", "kustomize/overlays/prod/persona-edge", "persona-edge"],
 }.each do |path, (name, source_path, namespace)|
@@ -142,10 +145,20 @@ end
   raise "[안전] #{name}: Application kind가 아니다" unless application["kind"] == "Application"
   raise "[안전] #{name}: 이름이 다르다" unless application.dig("metadata", "name") == name
   spec = application.fetch("spec")
+  raise "[안전] #{name}: 대상 namespace가 다르다" unless spec.dig("destination", "namespace") == namespace
+  raise "[안전] #{name}: 자동 Sync를 켜면 안 된다(CreateNamespace 포함, Namespace는 bootstrap이 소유)" if spec.key?("syncPolicy")
+  next if source_path.nil? # metallb·cert-manager는 multi-source라 source.path가 없다 — 아래에서 별도 확인
+
   raise "[안전] #{name}: develop 브랜치를 봐야 한다" unless spec.dig("source", "targetRevision") == "develop"
   raise "[안전] #{name}: source path가 다르다" unless spec.dig("source", "path") == source_path
-  raise "[안전] #{name}: 대상 namespace가 다르다" unless spec.dig("destination", "namespace") == namespace
-  raise "[안전] #{name}: 자동 Sync를 켜면 안 된다" if spec.key?("syncPolicy")
+end
+
+# metallb·cert-manager는 multi-source(차트 + 이 저장소의 values 참조)다. 두 번째 source가
+# develop을 보는지만 확인한다(차트 버전은 render 성공으로 helm template 검증이 대신한다).
+{ app_metallb_path => "metallb", app_cert_manager_path => "cert-manager" }.each do |path, name|
+  application = YAML.load_file(path)
+  values_source = application.dig("spec", "sources", 1)
+  raise "[안전] #{name}: values source가 이 저장소 develop을 봐야 한다" unless values_source && values_source["targetRevision"] == "develop" && values_source["ref"] == "values"
 end
 
 puts "edge(MetalLB 설정·cert-manager ClusterIssuer·DDNS) 렌더와 매니페스트 정책 검사 통과"

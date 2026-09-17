@@ -1,7 +1,9 @@
 # cert-manager 컨트롤러·CRD 설치. 이 Application을 먼저 Sync해야 cert-manager-issuers.yaml의
 # ClusterIssuer가 적용된다(CRD 선행 필요) — README 배치 순서 참고.
 #
-# 수동 Sync. CreateNamespace만 syncOptions로 허용하고 자동 Sync는 켜지 않는다.
+# 수동 Sync. CreateNamespace=true를 쓰지 않는다 — 이 저장소는 Argo overlay/Application이
+# Namespace를 소유하지 않는다(bootstrap/namespaces/가 소유). bootstrap/namespaces/
+# cert-manager.yaml을 이 Application보다 먼저 적용한다(Gate 3-7 2번).
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -23,6 +25,3 @@ spec:
   destination:
     server: https://kubernetes.default.svc
     namespace: cert-manager
-  syncPolicy:
-    syncOptions:
-      - CreateNamespace=true

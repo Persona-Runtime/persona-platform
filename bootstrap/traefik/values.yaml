@@ -47,6 +47,11 @@ service:
     # L2는 어차피 노드 한 대가 받는다. Local이어야 클라이언트 IP가 보존돼 Gate 4의 rate limit이
     # 의미 있다. MetalLB는 Ready 엔드포인트가 있는 노드에서만 announce하므로 failover가
     # Pod를 따라간다(externalTrafficPolicy: Cluster였다면 클라이언트 IP가 SNAT으로 사라진다).
+    #
+    # 주의: Local은 allocateLoadBalancerNodePorts: false와 별개로 kube-proxy가 모든 노드에
+    # healthCheckNodePort를 하나 연다(spec.healthCheckNodePort, 3xxxx대 — MetalLB가 "이 노드에
+    # Ready 엔드포인트가 있는가"를 확인하는 용도). LAN 안에서만 닿고 Gate 2가 LAN 외부 접근을
+    # 막으므로 위험은 아니지만, "자동 NodePort 0"이라고만 쓰면 이 포트를 빠뜨리게 된다.
     externalTrafficPolicy: Local
   annotations:
     # loadBalancerIP 필드는 deprecated라 쓰지 않는다.

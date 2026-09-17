@@ -47,7 +47,7 @@ false`로 막는다. 자세한 값은 [공개 진입 런북](../../runbooks/publ
 | 설정 | 값 | 이유 |
 | --- | --- | --- |
 | `service.spec.type` | **LoadBalancer** | MetalLB VIP(192.168.50.240)로 공유기 443 포워딩을 받는다. NodePort/ClusterIP였던 이전 값은 뒤집혔다 |
-| `service.spec.allocateLoadBalancerNodePorts` | **false** | LoadBalancer 타입이 자동으로 여는 NodePort를 막는다 |
+| `service.spec.allocateLoadBalancerNodePorts` | **false** | LoadBalancer 타입이 자동으로 여는 서비스 포트별 NodePort를 막는다. 자동 NodePort는 0이지만, `externalTrafficPolicy: Local`이 별도로 여는 healthCheckNodePort 1개(LAN 전용, kube-proxy가 여는 정상 동작)는 이 설정으로 막히지 않는다 |
 | `providers.kubernetesGateway` | true | Gateway API만 사용 |
 | `providers.kubernetesIngress` / `kubernetesCRD` | false | 진입 경로를 하나로 고정 |
 | `gateway.enabled` | false | Gateway 리소스는 우리가 선언·버전관리 |
