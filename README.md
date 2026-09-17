@@ -94,6 +94,9 @@ flowchart TB
 - 독립 PodMonitor는 Argo로 배포했고 CNPG 메트릭 수집을 확인했다.
 - 작업 트리에는 DB 2인스턴스·필수 워커 분산 선언을 준비 중이다. **마지막 운영 확인은 DB 1개다.**
 - 복제본 초기 추격·승격·쓰기 유실 검증은 아직 완료하지 않았다.
+- `kustomize/base/persona-embedding/`은 선언만 돼 있고 `overlays/prod/persona-app`에서는
+  빠져 있다 — 이미지를 아직 GHCR에 push하지 않아 digest가 자리표시자다. push·digest 확정
+  뒤 overlay의 `kustomization.yaml`에 그 리소스 줄을 되돌려야 한다.
 
 복구 실험에서 확인한 기존 캐릭터 ID 보존을 전체 데이터 무결성이나 RPO 0 보장으로 확대하지 않는다.
 Operator의 CP 배치는 일반 앱 CP 배치 금지 원칙의 제한적 예외다.

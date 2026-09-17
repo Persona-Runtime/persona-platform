@@ -108,5 +108,8 @@ spec:
       volumes:
         # read-only rootfs에서 필요한 유일한 쓰기 경로다. 모델 자체는 이미지에 구워
         # 넣었으므로(HF_HOME=/app/hf-cache) 여기엔 캐시 lock 파일 등만 남을 수 있다.
+        # Dockerfile이 XDG_CACHE_HOME·TORCH_HOME·TMPDIR을 전부 여기로 몰아뒀으니
+        # 무제한 emptyDir 대신 상한을 둔다.
         - name: tmp
-          emptyDir: {}
+          emptyDir:
+            sizeLimit: 256Mi

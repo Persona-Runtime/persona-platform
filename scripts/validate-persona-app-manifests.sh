@@ -45,6 +45,10 @@ kubectl kustomize "$repo_dir/kustomize/overlays/prod/persona-db"      > "$db_fil
 kubectl kustomize "$repo_dir/kustomize/overlays/prod/persona-migrate" > "$migrate_file"
 kubectl kustomize "$repo_dir/kustomize/overlays/prod/persona-app"     > "$app_file"
 
+# persona-embedding은 이미지 push 전이라 overlay에서 빠져 있다(위 app_file 렌더에는
+# 안 나온다) — base 자체가 여전히 유효하게 렌더되는지는 이 단독 빌드로만 확인한다.
+kubectl kustomize "$repo_dir/kustomize/base/persona-embedding" > /dev/null
+
 ruby -ryaml - \
   "$db_file" "$migrate_file" "$app_file" \
   "$repo_dir/argocd/persona-db.yaml" \
