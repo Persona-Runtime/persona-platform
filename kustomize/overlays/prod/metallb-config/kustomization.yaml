@@ -1,0 +1,7 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# namespace는 bootstrap/namespaces/metallb-system.yaml이 소유한다.
+# 이 overlay에 Namespace를 넣지 않아, MetalLB 설정 정리가 namespace 삭제로 번지지 않게 한다.
+namespace: metallb-system
+resources:
+  - ../../../base/metallb

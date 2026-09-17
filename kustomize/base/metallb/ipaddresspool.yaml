@@ -1,0 +1,15 @@
+# MetalLB CRD(argocd/metallb.yaml)가 먼저 설치돼 있어야 이 리소스가 적용된다.
+# 순서는 argocd/metallb-config.yaml의 주석과 README에도 남긴다.
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: traefik-pool
+  namespace: metallb-system
+spec:
+  # Traefik LoadBalancer Service 하나에만 쓴다. 공유기 DHCP 풀 범위 밖인지
+  # 3-0(IP 고정)에서 미리 확인한다 — 겹치면 다른 기기와 충돌한다.
+  addresses:
+    - 192.168.50.240/32
+  # autoAssign을 켜면 의도치 않은 Service가 이 IP를 가져갈 수 있다. annotation으로
+  # 명시한 Service(Traefik)만 이 pool을 쓰게 한다.
+  autoAssign: false

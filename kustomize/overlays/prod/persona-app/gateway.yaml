@@ -5,6 +5,11 @@ metadata:
   labels:
     app.kubernetes.io/part-of: persona-platform
     app.kubernetes.io/component: application
+  annotations:
+    # cert-manager gateway-shim이 이 issuer로 https listener의 hostname·certificateRefs를 보고
+    # Certificate를 자동 생성한다(→ Secret persona-app-tls). staging으로 발급 성공을 먼저 확인한
+    # 뒤 prod로 바꾸는 것은 별도 커밋(runbooks/public-ingress.md Gate 3 CP 적용 순서 참고).
+    cert-manager.io/cluster-issuer: letsencrypt-staging
 spec:
   gatewayClassName: traefik
   listeners:
@@ -13,8 +18,21 @@ spec:
       # Gateway listener는 Traefik의 entryPoint에 붙는다. Traefik Service의 HTTP 포트 80과
       # 다른 값이며, 이 저장소의 Traefik HTTP entryPoint는 8000이다.
       port: 8000
-      # hostname을 지정하지 않는다. Tailnet 진입 주소가 아직 확정되지 않았고,
-      # 임의 주소를 지어내면 붙지 않는 라우팅이 선언으로 남는다.
+      # http listener는 Tailnet/LAN 내부 경로로 hostname을 고정하지 않는다. 인터넷 진입은
+      # 아래 https listener가 맡는다(2026-09-17 공개 진입 결정).
+      allowedRoutes:
+        namespaces:
+          from: Same
+    - name: https
+      protocol: HTTPS
+      # Traefik websecure entryPoint. bootstrap/traefik/values.yaml의 ports.websecure.port와 같은 값.
+      port: 8443
+      hostname: app.personaruntime.xyz
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            name: persona-app-tls
       allowedRoutes:
         namespaces:
           from: Same

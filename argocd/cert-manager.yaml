@@ -1,0 +1,28 @@
+# cert-manager 컨트롤러·CRD 설치. 이 Application을 먼저 Sync해야 cert-manager-issuers.yaml의
+# ClusterIssuer가 적용된다(CRD 선행 필요) — README 배치 순서 참고.
+#
+# 수동 Sync. CreateNamespace만 syncOptions로 허용하고 자동 Sync는 켜지 않는다.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: cert-manager
+  namespace: argocd
+spec:
+  project: default
+  sources:
+    - repoURL: https://charts.jetstack.io
+      chart: cert-manager
+      targetRevision: 1.21.2
+      helm:
+        releaseName: cert-manager
+        valueFiles:
+          - $values/helm/values/cert-manager.yaml
+    - repoURL: https://github.com/Persona-Runtime/persona-platform.git
+      targetRevision: develop
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: cert-manager
+  syncPolicy:
+    syncOptions:
+      - CreateNamespace=true

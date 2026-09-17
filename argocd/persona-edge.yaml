@@ -1,0 +1,17 @@
+# DDNS CronJob(그리고 이후 Gate 4의 oauth2-proxy)이 사는 namespace의 Application.
+# 수동 Sync. Secret cloudflare-dns-token은 CP에서 사용자가 이 namespace에 별도로 만든다
+# (cert-manager namespace의 것과는 다른 Secret 인스턴스 — 네임스페이스별 Secret 원칙).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: persona-edge
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/Persona-Runtime/persona-platform.git
+    targetRevision: develop
+    path: kustomize/overlays/prod/persona-edge
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: persona-edge
