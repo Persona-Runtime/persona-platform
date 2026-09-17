@@ -6,5 +6,6 @@ namespace: persona-app
 resources:
   - ../../../base/persona-gateway
   - ../../../base/persona-web
+  - ../../../base/persona-embedding
   - gateway.yaml
   - httproute.yaml
