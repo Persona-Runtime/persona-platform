@@ -1,0 +1,31 @@
+# CNPG의 Cluster.spec.monitoring.enablePodMonitor는 CNPG 1.30 문서에서 deprecated로
+# 정정됐다(runbooks/postgres-replication-plan.md §1). 그 필드에 의존하지 않고 이 파일로
+# 독립적으로 선언한다 — cluster.yaml에서 자동 생성을 켜면 이 선언과 중복될 수 있으므로
+# 켜지 않는다.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: persona-db
+  namespace: persona-data
+  labels:
+    # Prometheus(monitoring-stack)의 podMonitorSelector가 Helm releaseName 기준 기본
+    # 선택자(release: monitoring-stack)를 쓴다. 이 라벨이 없으면 대상에서 빠진다.
+    release: monitoring-stack
+    app.kubernetes.io/part-of: persona-platform
+spec:
+  namespaceSelector:
+    matchNames:
+      - persona-data
+  selector:
+    # primary 역할 라벨로 좁히지 않는다. 지금은 instances: 1이지만, 복제본이 추가돼도
+    # 같은 Cluster의 모든 Pod(primary·replica)가 이 선택자 하나로 계속 수집되게 한다.
+    matchLabels:
+      cnpg.io/cluster: persona-db
+  podMetricsEndpoints:
+    - port: metrics
+      # 숫자(9187) 대신 Pod가 선언한 포트 이름을 쓴다. 포트 번호가 바뀌어도 Pod 쪽 이름만
+      # 맞으면 이 선언은 깨지지 않는다.
+      path: /metrics
+      scheme: http
+      interval: 30s
+      scrapeTimeout: 10s
