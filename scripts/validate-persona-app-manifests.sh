@@ -120,13 +120,28 @@ raise "[안전] DB는 prune 대상이 되면 안 된다" unless sync_options.inc
 raise "[안전] DB는 Argo 삭제 대상이 되면 안 된다" unless sync_options.include?("Delete=false")
 
 cspec = cluster.fetch("spec")
-raise "[기준선] Postgres 인스턴스 수가 기준선(1)과 다르다" unless cspec["instances"] == 1
+raise "[기준선] Postgres 인스턴스 수가 기준선(2)과 다르다" unless cspec["instances"] == 2
 raise "[안전] superuser 접근을 켜면 안 된다" unless cspec["enableSuperuserAccess"] == false
 raise "[안전] Postgres 이미지는 16 계열 digest로 고정해야 한다" unless cspec["imageName"].to_s.start_with?("ghcr.io/cloudnative-pg/postgresql:16.") &&
   cspec["imageName"].to_s.include?("@sha256:")
 raise "[기준선] PVC 크기가 기준선(20Gi)과 다르다 — local-path는 나중에 확장할 수 없으니 근거를 남기고 바꾼다" unless cspec.dig("storage", "size") == "20Gi"
 raise "[안전] StorageClass는 local-path다" unless cspec.dig("storage", "storageClass") == "local-path"
-raise "[안전] DB는 worker1에 고정한다" unless cspec.dig("affinity", "nodeSelector", "kubernetes.io/hostname") == "k8s-worker1"
+raise "[안전] DB affinity에 옛 worker1 전용 nodeSelector가 남아 있다 — Gate 4 이후로는 nodeAffinity로만 배치를 제한한다" if cspec.dig("affinity", "nodeSelector")
+raise "[안전] 필수 anti-affinity를 켜야 한다" unless cspec.dig("affinity", "enablePodAntiAffinity") == true
+raise "[안전] anti-affinity가 preferred로 약화됐다 — required가 아니면 두 인스턴스가 같은 노드에 몰릴 수 있다" unless cspec.dig("affinity", "podAntiAffinityType") == "required"
+raise "[안전] anti-affinity topologyKey가 다르다" unless cspec.dig("affinity", "topologyKey") == "kubernetes.io/hostname"
+# nodeSelectorTerms 중 일부 필드만 비교하면(예: values만) matchExpressions를 추가하거나
+# operator를 바꿔도 통과한다. 전체 구조를 통째로 비교해 CP/GPU 노드 추가나 worker1 단독
+# 축소를 한 번에 차단한다.
+raise "[안전] DB는 두 홈 워커(k8s-worker1, k8s-worker2)만 노드 후보여야 한다 — CP/GPU 노드 추가나 worker1 단독 축소를 허용하면 안 된다" unless cspec.dig("affinity", "nodeAffinity") == {
+  "requiredDuringSchedulingIgnoredDuringExecution" => {
+    "nodeSelectorTerms" => [
+      { "matchExpressions" => [
+        { "key" => "kubernetes.io/hostname", "operator" => "In", "values" => ["k8s-worker1", "k8s-worker2"] }
+      ] }
+    ]
+  }
+}
 raise "[기준선] DB 자원 requests/limits를 선언한다" if (cspec.dig("resources", "requests") || {}).empty? || (cspec.dig("resources", "limits") || {}).empty?
 # CPU limit을 일부러 두지 않는다. DB에 CPU 상한을 걸면 throttling이 질의 지연으로 나타난다.
 # 그래서 이 파드는 Guaranteed가 아니라 Burstable이다. "등급을 맞추자"며 limit을 붙이면 여기서 잡는다.

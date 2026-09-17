@@ -29,17 +29,29 @@ REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 GRANT CONNECT ON DATABASE persona_app TO persona_runtime;
 GRANT USAGE ON SCHEMA persona_minimal TO persona_runtime;
 
--- 3. 앱 테이블. DELETE는 주지 않는다 — 현재 코드는 행을 지우지 않는다.
+-- 3. 앱 테이블. DELETE를 주지 않는다 — 이 코드는 행을 지우지 않고
+--    캐릭터 삭제도 deleted_at을 세우는 논리 삭제다.
 --    users는 ON CONFLICT DO UPDATE 때문에 UPDATE가 필요하고,
 --    SELECT ... FOR UPDATE(사용자별 생성 직렬화)도 UPDATE 권한을 요구한다.
 GRANT SELECT, INSERT, UPDATE ON persona_minimal.users            TO persona_runtime;
 GRANT SELECT, INSERT, UPDATE ON persona_minimal.personas         TO persona_runtime;
 GRANT SELECT, INSERT, UPDATE ON persona_minimal.idempotency_records TO persona_runtime;
 
+-- 3-1. 초안과 그 자료(0002_persona_draft). **여기에만 DELETE를 준다.**
+--      초안 폐기와 자료 제거는 행을 지운다. 참조만 끊으면 본문이 그대로 남아 원문 quota가
+--      회수되지 않는다. DELETE 범위를 이 두 테이블로 한정해 위 세 테이블의 원칙은 그대로 둔다.
+GRANT SELECT, INSERT, UPDATE, DELETE ON persona_minimal.material_versions TO persona_runtime;
+GRANT SELECT, INSERT, UPDATE, DELETE ON persona_minimal.material_sources  TO persona_runtime;
+
+-- 3-2. 색인 조각(0003_material_chunks). UPDATE는 주지 않는다 — 재색인은 값을 고치는 게
+--      아니라 DELETE 후 INSERT로 통째로 다시 만든다(같은 version_id 조각을 지우고 새로
+--      넣음). UPDATE 권한이 없으면 그 경로를 우회해 행 하나만 몰래 고치는 코드를 못 짠다.
+GRANT SELECT, INSERT, DELETE ON persona_minimal.material_chunks TO persona_runtime;
+
 -- 4. migration 상태는 읽기만. readiness가 required revision을 확인할 때 필요하다.
 GRANT SELECT ON persona_minimal.alembic_version TO persona_runtime;
 -- 앞선 운영이나 복원으로 쓰기 권한이 붙어 있을 수 있으므로 명시적으로 회수한다.
 REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON persona_minimal.alembic_version FROM persona_runtime;
 
--- 5. 시퀀스 권한은 주지 않는다. 0001_persona_minimal에는 시퀀스가 없다.
+-- 5. 시퀀스 권한은 주지 않는다. 0001·0002에는 시퀀스가 없다.
 --    id는 앱이 만든 uuid이고 시각은 now() 기본값이다. 시퀀스가 생기면 이 주석도 고친다.
