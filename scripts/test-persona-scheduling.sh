@@ -25,7 +25,6 @@ cases = [
   ["kustomize/base/persona-db/cluster.yaml", ["spec", "affinity", "podAntiAffinityType"], "preferred", "preferred로 약화"],
   ["kustomize/base/persona-db/cluster.yaml", ["spec", "affinity", "topologyKey"], "topology.kubernetes.io/zone", "anti-affinity topologyKey가 다르다"],
   ["kustomize/base/persona-db/cluster.yaml", ["spec", "affinity", "enablePodAntiAffinity"], false, "필수 anti-affinity를 켜야 한다"],
-  ["kustomize/base/persona-migrate/job.yaml", ["spec", "template", "spec", "priorityClassName"], "persona-low", "migration Job: 커스텀 PriorityClass"],
   ["kustomize/base/persona-gateway/deployment.yaml", ["spec", "template", "spec", "priorityClassName"], "persona-low", "Gateway: 커스텀 PriorityClass"],
   ["kustomize/base/persona-web/deployment.yaml", ["spec", "template", "spec", "priorityClassName"], "persona-low", "Web: 커스텀 PriorityClass"],
   ["bootstrap/traefik/values.yaml", ["priorityClassName"], "persona-low", "Traefik: 커스텀 PriorityClass"],
@@ -33,6 +32,23 @@ cases = [
   ["kustomize/base/persona-gateway/deployment.yaml", ["spec", "strategy", "rollingUpdate", "maxSurge"], 0, "Gateway maxSurge는 1"],
   ["kustomize/base/persona-gateway/deployment.yaml", ["spec", "strategy", "rollingUpdate", "maxUnavailable"], 1, "Gateway maxUnavailable은 0"],
 ]
+# migration Job 사례는 **활성 렌더에 연결된 파일**에서 뽑는다. 경로를 고정하면 다음 배포에서
+# 다른 Job이 활성화됐을 때 이 검사가 렌더되지 않는 파일을 건드리며 조용히 통과한다.
+#
+# 기대 문구에 Job 이름이 들어간다. 검증 스크립트가 Job마다 라벨을 따로 붙이기 때문이며,
+# 이름 없는 문구로 두면 어느 Job이 걸렸는지 구분하지 못한다.
+migrate_base = YAML.load_file(File.join(root, "kustomize/base/persona-migrate/kustomization.yaml"))
+(migrate_base["resources"] || []).each do |entry|
+  relative_path = File.join("kustomize/base/persona-migrate", entry.to_s)
+  job_name = YAML.load_file(File.join(root, relative_path)).dig("metadata", "name")
+  cases << [relative_path, ["spec", "template", "spec", "priorityClassName"], "persona-low",
+            "migration Job #{job_name}: 커스텀 PriorityClass"]
+end
+if (migrate_base["resources"] || []).empty?
+  # 통과로 세지 않는다. 적용할 migration이 없는 평시 상태이며, Job을 연결하면 사례가 다시 생긴다.
+  puts "건너뜀: migration Job PriorityClass — 활성 렌더에 migration Job이 없다"
+end
+
 cases.each do |relative_path, keys, value, message|
   path = File.join(root, relative_path)
   original = File.read(path)

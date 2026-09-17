@@ -1,167 +1,134 @@
 # persona-platform
 
-Persona Runtime의 Kubernetes·AWS 인프라와 배포 구성을 관리하는 저장소다.
-홈 Kubernetes에 AWS GPU 워커를 연결해, LLM 서빙 환경을 구축하고 관측·성능 개선 실험을 지원한다.
+Persona Runtime의 Kubernetes·네트워크·스토리지·배포 선언과 운영 절차를 관리한다.
+애플리케이션 코드와 DB 테이블 migration은 각 서비스 저장소가 담당한다.
 
-## 주요 구성
+## 운영 구성
 
-| 영역 | 구성 |
-| --- | --- |
-| 클러스터 | 홈 Control Plane 1개 + 공유 Worker 2개, AWS GPU Worker 1개 추가 예정 |
-| 네트워크 | Tailscale + Cilium VXLAN, kube-proxy 유지 |
-| 라우팅 | Traefik + Gateway API, Tailnet 전용 접근 목표 |
-| 배포 관리 | Terraform · Helm · Argo CD |
-| 최소 모니터링 | Prometheus · Grafana · kube-state-metrics · node-exporter |
-| LLM 서빙 | 단일 GPU·단일 모델의 vLLM 서빙 예정 |
+2026-09-17 사용자 제공 조회·검증 결과 기준이다. 현재 작업 트리의 선언이 모두 적용된 상태는 아니다.
 
-일반 워크로드는 두 홈 워커를 공유하고, GPU 워크로드는 GPU 노드에 배치한다.
-local-path 저장소는 노드에 종속되며, 고가용성은 현재 목표가 아니다.
+| 구성          | 확인된 운영 상태                                 |
+| ------------- | ------------------------------------------------ |
+| 홈 환경       | Proxmox 한 대, Kubernetes CP 1대·워커 2대        |
+| 네트워크      | Tailscale, Cilium VXLAN + kube-proxy             |
+| 진입·웹       | Traefik 2개, Web 2개, Gateway 1개                |
+| PostgreSQL    | CNPG 관리, worker1에 DB 1개·local-path 20Gi      |
+| CNPG Operator | CP 배치·리더 인계·초기 안정성 확인               |
+| 관측          | Prometheus·Grafana, DB PodMonitor Target UP 확인 |
+| 공유 저장소   | 별도 NFS VM과 nfs-shared. DB 이전 용도가 아님    |
+| AWS GPU       | 연결·서빙은 후속 작업                            |
 
-2026-09-15: **같은 Proxmox의 NFS 전용 VM + NFS CSI**를 공유 저장소 실험 방향으로 채택했다.
-2026-09-16 기준 csi-driver-nfs와 비기본 StorageClass `nfs-shared`는 Argo로 적용해 Synced/Healthy이고,
-합성 파일용 테스트 PVC가 동적 프로비저닝으로 Bound되는 것까지 확인했다.
-검증이 끝난 테스트 PVC·PV와 서버 전용 하위 디렉터리는 **회수 예정**이며 절차와 가드는
-[정리 기록](runbooks/test-resource-cleanup.md)에 있다. StorageClass와 CSI는 계속 유지한다.
-기존 DB·Prometheus의 local-path는 변경하지 않는다.
-[준비·검증 절차](runbooks/nfs-shared-storage.md).
+단일 물리 호스트와 CP는 장애 지점이다. 워커 분산을 물리 장애까지 견디는 HA로 표현하지 않는다.
+Prometheus local-path는 worker2에 종속되며 DB 복제로 해결되지 않는다.
 
-## 스케줄링 전략
+## 인프라 구성도
 
-**Kubernetes 기본 스케줄러를 사용하되, 아래 배치 규칙을 직접 추가했다.** 커스텀 스케줄러나
-스케줄러 플러그인을 도입한 것은 아니다. `kubernetes.io/hostname`은 기본 노드 라벨이지만,
-그 라벨로 특정 노드를 허용·제외하는 조건은 프로젝트의 설계다. namespace 분리는 관리 경계이며
-노드 배치를 나누는 규칙은 아니다.
-
-아래 규칙은 저장소 선언 기준이다. 2026-09-16 기준 Postgres 1개·Gateway 1개·Web 2개가 실제로
-실행 중이고 migration은 1회 적용을 마쳤다. 완료된 Job은 **회수 예정**이다.
-다만 **각 Pod가 실제로 어느 노드에 배치됐는지와 자원 실측치는 별도로 확인해야 한다.**
-선언이 적용됐다는 것과 의도한 배치가 재현된다는 것은 다른 이야기다.
-
-### 어디에 배치하는가
-
-| 대상 | 직접 추가한 규칙 | 의미 |
-| --- | --- | --- |
-| Postgres 1개 | `nodeSelector`: `k8s-worker1` | worker1에서만 실행. local-path PV도 해당 노드에 종속 |
-| Gateway 1개·migration Job | 필수 `nodeAffinity`: worker1 또는 worker2 | 두 홈 워커 중 선택. CP·향후 GPU 노드는 제외 |
-| Web 2개 | 홈 워커 제한 + 선호 `podAntiAffinity`, weight 100 | 가능하면 서로 다른 워커에 배치하되, 같은 노드에 함께 배치될 수도 있음 |
-| Traefik 2개 | 홈 워커 제한 + 선호 `podAntiAffinity`, weight 100 | Web과 같은 분산 원칙. Web과 Traefik 사이의 분산을 요구하는 것은 아님 |
-| Prometheus 1개 | `nodeSelector`: `k8s-worker2` | worker2에서 실행하며 메트릭 PVC도 해당 노드에 종속 |
-| Grafana·kube-state-metrics·Prometheus operator | 홈 워커 제한 | worker1·2를 공유 |
-| node-exporter | CP·worker1·worker2를 허용하는 affinity | 노드 관측용 DaemonSet. 일반 앱의 CP 제외 원칙과 구분 |
-
-필수 조건을 만족하는 노드에 자원이 없으면 Pod는 Pending으로 남는다. 분산 선호는 강제가 아니며,
-weight 100은 배치 확률 100%라는 뜻이 아니다. 노드 여유가 생겼다고 이미 실행 중인 Pod를
-자동으로 다른 노드로 재분산하지도 않는다. DB 볼륨은 Pod 재생성만으로 다른 노드에 이동하지 않는다.
-
-### 자원과 우선순위
-
-- CPU·메모리 `requests`는 스케줄러가 노드에 자리를 배정할 때 사용하는 기준이다.
-  `limits`는 실행 중 사용량을 제한한다. CPU 제한은 throttling, 메모리 제한은 OOM에 영향을 줄 수 있다.
-  현재 수치는 초기 예산이며 부하 실측으로 확정한 값이 아니다.
-- **2026-09-11 승인: 커스텀 PriorityClass 적용을 보류한다.** DB·Gateway·Web·migration과
-  Traefik values는 커스텀 클래스를 참조하지 않는다. 기본 구성의 자원 부족을 관찰한 뒤
-  우선순위를 실험 변수로 추가한다. 특정 앱을 먼저 살린다는 보장은 두지 않는다.
-- [기존 클래스 정의](bootstrap/priorityclasses/priorityclasses.yaml)는 미적용 참고용으로 남긴다.
-  Kubernetes 시스템 우선순위와 local-path helper의 `system-node-critical`은 유지한다.
-  이는 클러스터 전체 선점 기능을 끄는 설정이 아니다. 이미 배포된 Traefik의 우선순위 변경도
-  별도 CP 적용·검증이 필요하며, 기존 PriorityClass 리소스를 삭제하지 않는다.
-- 현재 Postgres 선언은 메모리 request와 limit만 같고 CPU limit이 없어, 이 설정만으로
-  Guaranteed QoS가 되지 않는다. PriorityClass와 QoS는 서로 다른 개념이다.
-
-### 업데이트 정책 — 스케줄링과 구분
-
-- **Gateway: replica 1, `RollingUpdate`, `maxSurge: 1`, `maxUnavailable: 0`.**
-  새 Pod가 준비된 뒤 기존 Pod를 내린다. 새 Pod를 배치할 자원이 없으면 기존 Pod를 유지하고
-  업데이트를 기다린다. 현재 추가 Pod의 requests는 CPU 50m·메모리 128Mi이며,
-  실제 사용량·종료 중 Pod·DB 연결의 일시 증가까지 여유를 확인한다.
-- Web: replica 2, `maxSurge: 0`, `maxUnavailable: 1` 유지. 모의 SSE의 교체 방식도 변경하지 않는다.
-- 요청 종료 처리·라우팅 반영 지연·노드 및 DB 장애까지 포함한 **무중단 보장은 아니다.**
-  실제 롤아웃에서 readiness와 연속 요청 성공을 확인해야 한다.
-
-위 정책은 선언에 반영해 홈 클러스터에 적용했다. **롤아웃 중 readiness와 연속 요청 성공은
-여전히 미검증이다.** 적용 완료를 무중단 확인으로 읽지 않는다.
-
-선언 위치: [Postgres](kustomize/base/persona-db/cluster.yaml),
-[Gateway](kustomize/base/persona-gateway/deployment.yaml),
-[Web](kustomize/base/persona-web/deployment.yaml),
-[migration](kustomize/base/persona-migrate/job.yaml),
-[Traefik](bootstrap/traefik/values.yaml), [모니터링](helm/values/monitoring-stack.yaml).
-
-## 인프라 아키텍처
-
-실선은 현재 구성, 점선은 추가 예정인 연결이다. 워커 영역은 고정 Pod 위치가 아닌 배치 원칙을 나타낸다.
+실선은 확인된 구성·연결, 점선은 미배포 계획이다. 공유 워커 풀 안의 앱은 배치 후보를
+나타내며, 노드마다 정확히 하나씩 실행된다는 뜻은 아니다. 웹 검증은 worker2 Traefik으로
+고정한 터널 경로를 사용했다. 일반 서비스 진입 경로 전체의 장애 내성을 검증한 것은 아니다.
 
 ```mermaid
 flowchart TB
-    laptop["노트북 · kubectl / 브라우저"]
+    laptop["노트북 · 브라우저 / kubectl"]
     git["Git · 배포 선언"]
 
-    subgraph home["홈 Kubernetes · 단일 Proxmox 호스트"]
-        cp["Control Plane 1개<br/>API server · etcd · scheduler · controller-manager"]
-
-        subgraph workers["공유 워커 풀 · worker1 / worker2"]
-            argo["Argo CD<br/>모니터링 수동 Sync"]
-            traefik["Traefik 2개<br/>Gateway API 구현체"]
-            grafana["Grafana<br/>임시 DB · 코드 기반 설정"]
-            prom["Prometheus<br/>worker2 배치"]
-            disk[("worker2 local-path PVC<br/>20 GiB · 메트릭 저장")]
-            web["Web 2개"]
-            gw["Gateway 1개"]
-            db["Postgres 1개 · CNPG<br/>worker1 local-path PVC 20 GiB"]
+    subgraph home["홈 · 단일 Proxmox 물리 호스트"]
+        subgraph cpvm["k8s-cp VM"]
+            cp["Kubernetes Control Plane<br/>API server · etcd · scheduler · controller-manager"]
+            operator["CNPG Operator · 1개"]
         end
-
-        nfs[("NFS 전용 VM<br/>nfs-shared SC · 두 워커에만 export")]
-        metrics["수집 대상<br/>노드 · 파드 · API server · CoreDNS 등"]
+        subgraph workers["공유 워커 풀 · worker1 / worker2"]
+            argo["Argo CD · 수동 Sync"]
+            traefik["Traefik · 2개<br/>Gateway API / HTTPRoute"]
+            web["Web · 2개"]
+            gateway["Python Gateway · 1개"]
+            rw["persona-db-rw Service"]
+            db["worker1 · PostgreSQL primary 1개"]
+            dbdisk[("worker1 local-path<br/>DB PVC 20Gi")]
+            replica["worker2 · PostgreSQL replica<br/>Gate 4 · 미배포"]
+            replicadisk[("worker2 local-path<br/>신규 DB PVC · 미생성")]
+            prom["Prometheus · worker2"]
+            promdisk[("worker2 local-path<br/>메트릭 PVC")]
+            grafana["Grafana"]
+            metrics["노드 · Kubernetes 메트릭"]
+            csi["NFS CSI · nfs-shared"]
+        end
+        nfs[("NFS 전용 VM<br/>공유 저장소 · DB/PVC 이전 아님")]
     end
 
-    subgraph aws["AWS · 아직 생성 전"]
-        gpu["GPU Worker 1개 · g6.xlarge<br/>L4 · 단일 모델 vLLM 예정"]
+    subgraph aws["AWS · 후속 계획 / 미배포"]
+        gpu["GPU Worker · vLLM"]
     end
 
-    laptop -->|"Tailscale · API 접근 / port-forward"| cp
-    argo -->|"Git 읽기"| git
-    argo -->|"선언 적용"| cp
-    grafana -->|"메트릭 조회"| prom
+    laptop -->|"Tailscale · 관리 접근"| cp
+    laptop -->|"검증한 worker2 터널 경로"| traefik
+    traefik -->|"웹 경로"| web
+    traefik -->|"API 경로"| gateway
+    gateway -->|"SQL 읽기·쓰기"| rw
+    rw --> db
+    db --> dbdisk
+    db -.->|"WAL 비동기 복제 계획"| replica
+    replica -.-> replicadisk
+    argo -->|"선언 조회"| git
+    argo -->|"승인한 revision 적용"| cp
+    operator -->|"API로 DB Cluster 조정"| cp
+    grafana -->|"PromQL 조회"| prom
+    prom -->|"PodMonitor · 9187 /metrics · UP 확인"| db
+    prom -.->|"추가 후 수집 검증"| replica
     prom -->|"스크랩"| metrics
-    prom -->|"저장"| disk
-    traefik -->|"HTTPRoute"| gw
-    traefik -->|"HTTPRoute"| web
-    gw -->|"읽기·쓰기"| db
-    workers -->|"CSI 마운트 · 노드 간 공유 PVC"| nfs
-    laptop -.->|"Tailnet 서비스 진입 · 검증 예정"| traefik
-    gpu -.->|"Tailscale · 동일 클러스터 조인 예정"| cp
-    workers -.->|"홈-AWS Pod 통신 · 경로 검증 예정"| gpu
+    prom --> promdisk
+    csi -->|"두 홈 워커에서 NFS 마운트"| nfs
+    gpu -.->|"Tailscale · 동일 클러스터 조인 계획"| cp
 
     classDef planned stroke-dasharray: 5 5;
-    class gpu planned;
+    class replica,replicadisk,gpu planned;
 ```
 
-홈 Pod 통신은 Cilium VXLAN과 kube-proxy를 사용한다. 노드 InternalIP는 현재 LAN 주소이며,
-AWS 연결 전 양방향 경로·MTU 검증이 필요하다. 관리 UI는 현재 port-forward로 접근한다.
-controller-manager·scheduler·etcd·kube-proxy의 전용 메트릭 수집은 보류한다.
+홈 Pod 네트워크는 Cilium VXLAN과 kube-proxy를 사용한다. AWS 연결·vLLM 호출 경로는 아직
+검증하지 않았다. DB 복제본은 별도 로컬 볼륨을 사용하며, 기존 DB 디스크를 공유하거나 옮기는
+방식이 아니다. 두 DB가 생겨도 같은 Proxmox 호스트의 장애까지 견디지는 못한다.
 
-## 이 저장소의 역할
+## 진행 중인 변경
 
-- AWS 자원과 Kubernetes 배포 선언 관리
-- 네트워크·스토리지·접근 권한 구성
-- 인프라 설치·검증·운영 절차 관리
+- DB 백업·격리 복원과 단일 worker1 종료·재기동 기준선 검증을 마쳤다.
+- 독립 PodMonitor는 Argo로 배포했고 CNPG 메트릭 수집을 확인했다.
+- 작업 트리에는 DB 2인스턴스·필수 워커 분산 선언을 준비 중이다. **마지막 운영 확인은 DB 1개다.**
+- 복제본 초기 추격·승격·쓰기 유실 검증은 아직 완료하지 않았다.
 
-애플리케이션 로직은 각 서비스 저장소에서, 부하 테스트와 장애 분석은 `persona-ops-lab`에서 관리한다.
+복구 실험에서 확인한 기존 캐릭터 ID 보존을 전체 데이터 무결성이나 RPO 0 보장으로 확대하지 않는다.
+Operator의 CP 배치는 일반 앱 CP 배치 금지 원칙의 제한적 예외다.
 
-## 진행 방향
+## 배치·저장소 원칙
 
-홈 최소 모니터링 → CPU 모의 서빙·SSE 검증 → GPU 연결 → vLLM 성능 기준선 → 병목 개선.
+- 일반 앱은 두 홈 워커를 사용한다. Web·Traefik의 분산 선호는 노드당 정확히 하나를 보장하지 않는다.
+- DB 복제 변경안은 두 홈 워커만 허용하고 필수 anti-affinity로 DB를 분산한다.
+- local-path 데이터는 다른 노드로 자동 이동하지 않는다.
+- PVC 요청 크기를 디렉터리의 실제 quota로 간주하지 않는다.
+- Retain은 데이터 보존 정책이지 백업이 아니다.
+- requests·limits 합계와 실사용량은 다르다. 롤아웃 중 추가 Pod와 장애 시 경합도 따로 확인한다.
 
-홈 모니터링과 CPU 모의 SSE 검증을 마쳤다. 모의 SSE는 Application **선언 제거 완료**,
-**클러스터 등록 해제 대기**, 실행 자원 **회수 예정** 상태다. Kustomize 선언은 후속 부하 실험을 위해
-남겨 두었다. 다음 단계는 AWS GPU 연결이며 실제 LLM 서빙은 진행 전이다.
+## 로컬 검증
 
-## 관련 문서
+이 저장소 루트에서 실행한다. kubectl의 로컬 Kustomize 렌더, Ruby, 셸 등
+각 스크립트가 요구하는 도구가 필요하다. 아래 명령은 운영 Sync를 수행하지 않는다.
 
-아래 세 개는 **다섯 레포가 나란히 있는 작업 폴더의 공통 문서**다. 이 레포만 단독으로
-checkout하면 없다. 배포에 필요한 계약은 레포 안의 선언과 런북에서 확인할 수 있다.
+```sh
+kubectl kustomize kustomize/overlays/prod/persona-db
+sh scripts/validate-persona-app-manifests.sh
+bash scripts/test-persona-scheduling.sh
+```
 
-- [전체 기획](../docs/current-plan.md) *(외부 작업공간)*
-- [실행 계획](../docs/execution-roadmap.md) *(외부 작업공간)*
-- [설계 트레이드오프](../tradeoff/README.md) *(외부 작업공간)*
-- [AWS GPU 준비](terraform/envs/prod/README.md)
+렌더·정책 검사 성공은 실제 스케줄링, 무중단 배포, 메트릭 수집 성공의 증거가 아니다.
+Secret 값이나 실제 사용자 자료를 렌더 결과·로그·Git에 넣지 않는다.
+
+## 운영 변경 절차
+
+1. 실제 context·대상·현재 상태와 백업·복구 수단을 확인한다.
+2. 선언 diff와 로컬 검사 결과를 검토한다.
+3. 사용자가 CP에서 server dry-run을 수행한다.
+4. 승인한 변경만 커밋·게시하고 Argo diff를 확인한다.
+5. 지정한 revision을 수동 Sync하고 서비스·데이터·관측 상태를 검증한다.
+
+DB Application의 Sync에 앱 migration이나 무관한 변경을 섞지 않는다.
+Operator는 bootstrap 직접 설치 대상으로 DB Application과 관리 방식이 다르다.
+PVC/PV 삭제·노드 장애 주입·클라우드 자원 생성은 각각 별도 승인 대상이다.
