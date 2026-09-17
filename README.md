@@ -18,9 +18,12 @@ Persona Runtime의 Kubernetes·AWS 인프라와 배포 구성을 관리하는 �
 local-path 저장소는 노드에 종속되며, 고가용성은 현재 목표가 아니다.
 
 2026-09-15: **같은 Proxmox의 NFS 전용 VM + NFS CSI**를 공유 저장소 실험 방향으로 채택했다.
-NFS VM 설치와 두 워커의 수동 마운트·파일 조회는 사용자 출력으로 확인했다.
-CSI·비기본 StorageClass·합성 파일용 테스트 선언은 준비했으며 클러스터 적용은 아직이다.
-기존 DB·Prometheus의 local-path는 변경하지 않는다. [준비·검증 절차](runbooks/nfs-shared-storage.md).
+2026-09-16 기준 csi-driver-nfs와 비기본 StorageClass `nfs-shared`는 Argo로 적용해 Synced/Healthy이고,
+합성 파일용 테스트 PVC가 동적 프로비저닝으로 Bound되는 것까지 확인했다.
+검증이 끝난 테스트 PVC·PV와 서버 전용 하위 디렉터리는 **회수 예정**이며 절차와 가드는
+[정리 기록](runbooks/test-resource-cleanup.md)에 있다. StorageClass와 CSI는 계속 유지한다.
+기존 DB·Prometheus의 local-path는 변경하지 않는다.
+[준비·검증 절차](runbooks/nfs-shared-storage.md).
 
 ## 스케줄링 전략
 
@@ -29,8 +32,10 @@ CSI·비기본 StorageClass·합성 파일용 테스트 선언은 준비했으�
 그 라벨로 특정 노드를 허용·제외하는 조건은 프로젝트의 설계다. namespace 분리는 관리 경계이며
 노드 배치를 나누는 규칙은 아니다.
 
-아래는 **2026-09-11 저장소 선언 기준**이다. Postgres·migration·Gateway·Web은 홈 배포 전이며,
-기존 구성도 실제 적용된 값과의 일치 여부는 별도로 확인해야 한다.
+아래 규칙은 저장소 선언 기준이다. 2026-09-16 기준 Postgres 1개·Gateway 1개·Web 2개가 실제로
+실행 중이고 migration은 1회 적용을 마쳤다. 완료된 Job은 **회수 예정**이다.
+다만 **각 Pod가 실제로 어느 노드에 배치됐는지와 자원 실측치는 별도로 확인해야 한다.**
+선언이 적용됐다는 것과 의도한 배치가 재현된다는 것은 다른 이야기다.
 
 ### 어디에 배치하는가
 
@@ -73,7 +78,8 @@ weight 100은 배치 확률 100%라는 뜻이 아니다. 노드 여유가 생겼
 - 요청 종료 처리·라우팅 반영 지연·노드 및 DB 장애까지 포함한 **무중단 보장은 아니다.**
   실제 롤아웃에서 readiness와 연속 요청 성공을 확인해야 한다.
 
-위 정책은 사용자 승인으로 선언에 반영했으며, 홈 클러스터 적용·실측은 아직 수행하지 않았다.
+위 정책은 선언에 반영해 홈 클러스터에 적용했다. **롤아웃 중 readiness와 연속 요청 성공은
+여전히 미검증이다.** 적용 완료를 무중단 확인으로 읽지 않는다.
 
 선언 위치: [Postgres](kustomize/base/persona-db/cluster.yaml),
 [Gateway](kustomize/base/persona-gateway/deployment.yaml),
@@ -99,9 +105,12 @@ flowchart TB
             grafana["Grafana<br/>임시 DB · 코드 기반 설정"]
             prom["Prometheus<br/>worker2 배치"]
             disk[("worker2 local-path PVC<br/>20 GiB · 메트릭 저장")]
-            mock["CPU 모의 SSE 서버 · 예정"]
+            web["Web 2개"]
+            gw["Gateway 1개"]
+            db["Postgres 1개 · CNPG<br/>worker1 local-path PVC 20 GiB"]
         end
 
+        nfs[("NFS 전용 VM<br/>nfs-shared SC · 두 워커에만 export")]
         metrics["수집 대상<br/>노드 · 파드 · API server · CoreDNS 등"]
     end
 
@@ -115,13 +124,16 @@ flowchart TB
     grafana -->|"메트릭 조회"| prom
     prom -->|"스크랩"| metrics
     prom -->|"저장"| disk
+    traefik -->|"HTTPRoute"| gw
+    traefik -->|"HTTPRoute"| web
+    gw -->|"읽기·쓰기"| db
+    workers -->|"CSI 마운트 · 노드 간 공유 PVC"| nfs
     laptop -.->|"Tailnet 서비스 진입 · 검증 예정"| traefik
-    traefik -.->|"HTTPRoute · SSE 검증 예정"| mock
     gpu -.->|"Tailscale · 동일 클러스터 조인 예정"| cp
     workers -.->|"홈-AWS Pod 통신 · 경로 검증 예정"| gpu
 
     classDef planned stroke-dasharray: 5 5;
-    class mock,gpu planned;
+    class gpu planned;
 ```
 
 홈 Pod 통신은 Cilium VXLAN과 kube-proxy를 사용한다. 노드 InternalIP는 현재 LAN 주소이며,
@@ -140,8 +152,9 @@ controller-manager·scheduler·etcd·kube-proxy의 전용 메트릭 수집은 �
 
 홈 최소 모니터링 → CPU 모의 서빙·SSE 검증 → GPU 연결 → vLLM 성능 기준선 → 병목 개선.
 
-현재 홈 모니터링을 구성했으며, 다음 단계는 CPU 모의 서빙이다.
-AWS GPU 연결과 실제 LLM 서빙은 아직 진행 전이다.
+홈 모니터링과 CPU 모의 SSE 검증을 마쳤다. 모의 SSE는 Application **선언 제거 완료**,
+**클러스터 등록 해제 대기**, 실행 자원 **회수 예정** 상태다. Kustomize 선언은 후속 부하 실험을 위해
+남겨 두었다. 다음 단계는 AWS GPU 연결이며 실제 LLM 서빙은 진행 전이다.
 
 ## 관련 문서
 

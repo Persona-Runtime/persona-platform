@@ -48,14 +48,21 @@ kubectl kustomize "$repo_dir/kustomize/overlays/prod/persona-app"     > "$app_fi
 ruby -ryaml - \
   "$db_file" "$migrate_file" "$app_file" \
   "$repo_dir/argocd/persona-db.yaml" \
-  "$repo_dir/argocd/persona-migrate.yaml" \
   "$repo_dir/argocd/persona-app.yaml" \
   "$repo_dir/bootstrap/namespaces/persona-data.yaml" \
   "$repo_dir/bootstrap/namespaces/persona-app.yaml" \
   "$repo_dir/db/grants/persona_minimal.sql" \
   "$repo_dir/bootstrap/traefik/values.yaml" <<'RUBY'
+# encoding: utf-8
+#
+# 로케일이 UTF-8이 아닌 환경(cron, 다른 셸 설정 등)에서 실행하면 Ruby가 이 heredoc 소스를
+# 기본 US-ASCII로 읽어 한글 주석에서 "invalid multibyte char"로 즉시 실패한다. 매직 코멘트는
+# 이 스크립트 자체의 소스 인코딩만 고정할 뿐, File.read가 여는 grants_path 같은 외부 파일의
+# 기본 인코딩(Encoding.default_external)에는 영향을 주지 않으므로 별도로 UTF-8로 고정한다.
+Encoding.default_external = Encoding::UTF_8
+
 db_path, migrate_path, app_path,
-  app_db, app_migrate, app_apps,
+  app_db, app_apps,
   ns_data_path, ns_app_path, grants_path, traefik_values_path = ARGV
 
 GATEWAY_IMAGE = "ghcr.io/persona-runtime/persona-minimal-api@sha256:922ae043feaa1a893336816c38ac17f448aa96c44ba06983652181784f52c2f6"
@@ -130,6 +137,28 @@ initdb = cspec.dig("bootstrap", "initdb") || raise("bootstrap.initdb가 필요�
 raise "[안전] DB 이름은 persona_app이다" unless initdb["database"] == "persona_app"
 raise "[안전] DB 소유자는 persona_migrator다" unless initdb["owner"] == "persona_migrator"
 raise "[안전] initdb Secret 이름 계약이 다르다" unless initdb.dig("secret", "name") == "persona-db-migrator"
+
+# CNPG의 enablePodMonitor(deprecated)로 자동 생성되는 PodMonitor와 이 파일이 검사하는
+# 독립 선언이 겹치면 어느 쪽이 유효한지 불명확해진다. Cluster가 그 필드를 켜지 않았는지와
+# PodMonitor가 정확히 하나인지를 함께 봐야 중복을 놓치지 않는다.
+raise "[안전] CNPG 자동 PodMonitor 생성을 켜면 안 된다 — 독립 PodMonitor 선언과 중복된다" if cspec.dig("monitoring", "enablePodMonitor")
+pod_monitors = db.select { |item| item["kind"] == "PodMonitor" }
+raise "[안전] persona-db PodMonitor가 정확히 1개여야 한다: #{pod_monitors.length}개" unless pod_monitors.length == 1
+pod_monitor = pod_monitors.fetch(0)
+raise "[안전] PodMonitor는 persona-data namespace여야 한다" unless pod_monitor.dig("metadata", "namespace") == "persona-data"
+raise "[안전] PodMonitor에 release=monitoring-stack 라벨이 있어야 Prometheus가 대상으로 인식한다" unless pod_monitor.dig("metadata", "labels", "release") == "monitoring-stack"
+raise "[안전] PodMonitor namespaceSelector가 persona-data만 가리켜야 한다" unless pod_monitor.dig("spec", "namespaceSelector", "matchNames") == ["persona-data"]
+# matchLabels만 비교하면 matchExpressions를 몰래 추가해 role을 좁혀도(예: cnpg.io/instanceRole
+# In [primary]) 통과한다. selector 전체를 비교해 그런 추가 조건 자체를 거부한다.
+raise "[안전] PodMonitor selector는 cnpg.io/cluster=persona-db만 써야 한다 — matchExpressions로 role을 제한하면 안 된다(향후 replica가 수집에서 빠진다)" unless pod_monitor.dig("spec", "selector") == { "matchLabels" => { "cnpg.io/cluster" => "persona-db" } }
+endpoints = pod_monitor.dig("spec", "podMetricsEndpoints") || raise("[안전] PodMonitor에 podMetricsEndpoints가 없다")
+raise "[안전] PodMonitor podMetricsEndpoints가 정확히 1개여야 한다: #{endpoints.length}개 — 의도하지 않은 추가 수집 대상을 막는다" unless endpoints.length == 1
+endpoint = endpoints.fetch(0)
+raise "[안전] PodMonitor 포트는 숫자가 아니라 이름(metrics)이어야 한다" unless endpoint["port"] == "metrics"
+raise "[안전] PodMonitor 경로는 /metrics여야 한다" unless endpoint["path"] == "/metrics"
+raise "[안전] PodMonitor scheme은 http여야 한다 — 홈 클러스터 내부 통신은 TLS를 전제하지 않는다" unless endpoint["scheme"] == "http"
+raise "[기준선] PodMonitor scrape interval이 기준선(30s)과 다르다" unless endpoint["interval"] == "30s"
+raise "[기준선] PodMonitor scrapeTimeout이 기준선(10s)과 다르다" unless endpoint["scrapeTimeout"] == "10s"
 
 # --- migration Job --------------------------------------------------------
 migrate = load(migrate_path)
@@ -253,9 +282,13 @@ rules.each do |rule|
 end
 
 # --- Argo Application -----------------------------------------------------
+# persona-migrate Application 선언은 2026-09-16에 저장소에서 뺐다. 완료된 Job은 같은 선언을
+# 다시 Sync해도 재실행되지 않지만, Job을 지운 뒤 Sync하면 재생성되고 끝난 일회성 작업이
+# 목록에 남으면 무엇이 상시 운영 대상인지 흐려진다. 아래 Job 계약 검사와 overlay 렌더 검사는
+# 그대로 두어 다음 revision 선언을 계속 검증한다.
+# 재등록 절차와 선언 원문은 runbooks/test-resource-cleanup.md에 있다.
 {
   app_db      => ["persona-db", "kustomize/overlays/prod/persona-db", "persona-data"],
-  app_migrate => ["persona-migrate", "kustomize/overlays/prod/persona-migrate", "persona-app"],
   app_apps    => ["persona-app", "kustomize/overlays/prod/persona-app", "persona-app"],
 }.each do |path, (name, source_path, namespace)|
   application = YAML.load_file(path)

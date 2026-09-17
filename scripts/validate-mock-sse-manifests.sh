@@ -8,8 +8,11 @@ trap 'rm -f "$rendered_file"' EXIT HUP INT TERM
 
 kubectl kustomize "$repo_dir/kustomize/overlays/prod/mock-sse" > "$rendered_file"
 
-ruby -ryaml - "$rendered_file" "$repo_dir/argocd/persona-mock-sse.yaml" "$repo_dir/bootstrap/namespaces/persona-mock-sse.yaml" <<'RUBY'
-rendered_path, application_path, namespace_path = ARGV
+# Argo Application 선언은 2026-09-16 등록 해제로 저장소에서 빠졌다. 검사 대상이 없으므로
+# 인자에서도 뺀다. 다시 등록할 때는 선언 파일과 함께 아래 Application 검사도 되살린다.
+# 선언 원문과 재등록 순서는 runbooks/test-resource-cleanup.md에 있다.
+ruby -ryaml - "$rendered_file" "$repo_dir/bootstrap/namespaces/persona-mock-sse.yaml" <<'RUBY'
+rendered_path, namespace_path = ARGV
 resources = YAML.load_stream(File.read(rendered_path)).compact
 
 def resource(resources, kind, name)
@@ -62,16 +65,9 @@ raise "Route must expose POST only" unless match["method"] == "POST"
 raise "Route must preserve the exact mock chat path" unless match.dig("path", "type") == "Exact" && match.dig("path", "value") == "/mock/chat"
 raise "Route must target the mock Service" unless route.dig("spec", "rules", 0, "backendRefs", 0, "name") == "persona-mock-sse" && route.dig("spec", "rules", 0, "backendRefs", 0, "port") == 8080
 
-application = YAML.load_file(application_path)
-raise "Argo Application kind is invalid" unless application["kind"] == "Application"
-app_spec = application.fetch("spec")
-raise "Argo Application must target the develop branch" unless app_spec.dig("source", "targetRevision") == "develop"
-raise "Argo Application must point to the mock SSE overlay" unless app_spec.dig("source", "path") == "kustomize/overlays/prod/mock-sse"
-raise "Argo Application must not enable sync automation" if app_spec.key?("syncPolicy")
-
 namespace = YAML.load_file(namespace_path)
 raise "bootstrap Namespace kind is invalid" unless namespace["kind"] == "Namespace"
 raise "bootstrap Namespace name is invalid" unless namespace.dig("metadata", "name") == "persona-mock-sse"
 
-puts "mock SSE Kustomize render and manifest policy checks passed"
+puts "mock SSE Kustomize render and manifest policy checks passed (Argo Application is de-registered)"
 RUBY
