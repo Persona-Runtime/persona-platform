@@ -14,9 +14,11 @@ metadata:
     # 다시 세우는 절차가 필요하므로 Argo가 이 오브젝트를 지우지 못하게 막는다.
     argocd.argoproj.io/sync-options: Prune=false,Delete=false
 spec:
-  # replica·HA는 이번 범위가 아니다. 노드가 한 대 빠지면 DB도 함께 멈춘다는 뜻이고,
-  # 그 사실을 숨기지 않는다.
-  instances: 1
+  # Gate 4: worker1 primary + worker2 replica 비동기 복제로 확장한다(첫 확장은 비동기,
+  # 동기 정책은 별도 승인 없이 함께 도입하지 않는다). 필수 anti-affinity와 짝지어져 있어,
+  # 워커가 한 대만 남으면 남은 인스턴스 하나만 뜨고 나머지는 스케줄되지 않는다 — 그 대가를
+  # 숨기지 않는다.
+  instances: 2
 
   # 태그를 남겨 CNPG가 major 버전을 읽을 수 있게 하고, digest로 실제 객체를 고정한다.
   # 태그만 쓰면 같은 태그가 다른 객체를 가리키게 될 수 있다.
@@ -44,11 +46,23 @@ spec:
     # 20Gi는 docs/cluster-inventory.md의 A안에서 확정한 값이다.
     storageClass: local-path
 
-  # local-path 볼륨은 파드가 처음 스케줄된 노드에 고정된다. worker1을 데이터 노드로
-  # 정해 두었으므로 여기에 묶는다. CP에는 워크로드를 올리지 않는다.
+  # local-path 볼륨은 파드가 처음 스케줄된 노드에 고정된다. 두 홈 워커(worker1·worker2)만
+  # 후보로 두고 CP·GPU 노드는 배치 후보에서 제외한다. enablePodAntiAffinity +
+  # podAntiAffinityType: required로 두 인스턴스가 반드시 서로 다른 노드에 뜨게 강제한다 —
+  # preferred로 두면 자원이 빠듯할 때 같은 노드에 몰려 anti-affinity 의미가 사라진다.
   affinity:
-    nodeSelector:
-      kubernetes.io/hostname: k8s-worker1
+    enablePodAntiAffinity: true
+    podAntiAffinityType: required
+    topologyKey: kubernetes.io/hostname
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: In
+                values:
+                  - k8s-worker1
+                  - k8s-worker2
 
   # 커스텀 우선순위는 두지 않는다. 기본 구성에서 자원 압박을 먼저 관찰한다.
   # 초기 제안값이다. 실측으로 확정한 수치가 아니다.

@@ -18,6 +18,13 @@ root = ARGV.fetch(0)
 # 각 사례는 원래 파일로 되돌린 뒤 다음 사례를 실행한다. 검증 실패뿐 아니라 의도한 오류도 확인한다.
 cases = [
   ["kustomize/base/persona-db/cluster.yaml", ["spec", "priorityClassName"], "persona-critical", "DB: 커스텀 PriorityClass"],
+  ["kustomize/base/persona-db/cluster.yaml", ["spec", "instances"], 1, "기준선(2)"],
+  ["kustomize/base/persona-db/cluster.yaml", ["spec", "affinity", "nodeSelector"], { "kubernetes.io/hostname" => "k8s-worker1" }, "옛 worker1 전용 nodeSelector"],
+  ["kustomize/base/persona-db/cluster.yaml", ["spec", "affinity", "nodeAffinity", "requiredDuringSchedulingIgnoredDuringExecution", "nodeSelectorTerms", 0, "matchExpressions", 0, "values"], ["k8s-worker1"], "두 홈 워커(k8s-worker1, k8s-worker2)만 노드 후보"],
+  ["kustomize/base/persona-db/cluster.yaml", ["spec", "affinity", "nodeAffinity", "requiredDuringSchedulingIgnoredDuringExecution", "nodeSelectorTerms", 0, "matchExpressions", 0, "values"], ["k8s-worker1", "k8s-worker2", "k8s-cp"], "두 홈 워커(k8s-worker1, k8s-worker2)만 노드 후보"],
+  ["kustomize/base/persona-db/cluster.yaml", ["spec", "affinity", "podAntiAffinityType"], "preferred", "preferred로 약화"],
+  ["kustomize/base/persona-db/cluster.yaml", ["spec", "affinity", "topologyKey"], "topology.kubernetes.io/zone", "anti-affinity topologyKey가 다르다"],
+  ["kustomize/base/persona-db/cluster.yaml", ["spec", "affinity", "enablePodAntiAffinity"], false, "필수 anti-affinity를 켜야 한다"],
   ["kustomize/base/persona-migrate/job.yaml", ["spec", "template", "spec", "priorityClassName"], "persona-low", "migration Job: 커스텀 PriorityClass"],
   ["kustomize/base/persona-gateway/deployment.yaml", ["spec", "template", "spec", "priorityClassName"], "persona-low", "Gateway: 커스텀 PriorityClass"],
   ["kustomize/base/persona-web/deployment.yaml", ["spec", "template", "spec", "priorityClassName"], "persona-low", "Web: 커스텀 PriorityClass"],
