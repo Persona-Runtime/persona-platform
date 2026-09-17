@@ -52,7 +52,8 @@ ruby -ryaml - \
   "$repo_dir/bootstrap/namespaces/persona-data.yaml" \
   "$repo_dir/bootstrap/namespaces/persona-app.yaml" \
   "$repo_dir/db/grants/persona_minimal.sql" \
-  "$repo_dir/bootstrap/traefik/values.yaml" <<'RUBY'
+  "$repo_dir/bootstrap/traefik/values.yaml" \
+  "$repo_dir/kustomize/base/persona-migrate/kustomization.yaml" <<'RUBY'
 # encoding: utf-8
 #
 # 로케일이 UTF-8이 아닌 환경(cron, 다른 셸 설정 등)에서 실행하면 Ruby가 이 heredoc 소스를
@@ -63,9 +64,23 @@ Encoding.default_external = Encoding::UTF_8
 
 db_path, migrate_path, app_path,
   app_db, app_apps,
-  ns_data_path, ns_app_path, grants_path, traefik_values_path = ARGV
+  ns_data_path, ns_app_path, grants_path, traefik_values_path,
+  migrate_base_path = ARGV
 
 GATEWAY_IMAGE = "ghcr.io/persona-runtime/persona-minimal-api@sha256:922ae043feaa1a893336816c38ac17f448aa96c44ba06983652181784f52c2f6"
+
+# migration Job의 승인 이미지는 revision별로 따로 적는다.
+#
+# Gateway digest와 항상 같아야 한다는 조건은 틀렸다. 이미 만들어진 Job의 pod 템플릿은
+# 바꿀 수 없어서 과거 Job은 과거 digest를 그대로 유지해야 하는데, Gateway 하나에 묶으면
+# 다음 이미지를 올리는 순간 보존 중인 과거 Job이 검증에서 걸려 배포가 막힌다.
+#
+# 기준은 각 이미지가 담고 있는 DB revision이다. Gateway 이미지는 자신이 허용하는
+# revision을, migration Job 이미지는 그 Job이 적용하려는 revision을 담는다.
+# 새 revision Job을 연결할 때 여기에 항목을 추가한다. 맵에 없으면 검증이 거부한다.
+MIGRATION_IMAGES = {
+  "0001-persona-minimal" => "ghcr.io/persona-runtime/persona-minimal-api@sha256:922ae043feaa1a893336816c38ac17f448aa96c44ba06983652181784f52c2f6",
+}
 WEB_IMAGE     = "ghcr.io/persona-runtime/persona-web@sha256:26e6f0ed439ee02374be3b726bb34ee1a8fccbbeace60219084d9acbd3caf968"
 HOME_WORKERS  = ["k8s-worker1", "k8s-worker2"]
 
@@ -179,27 +194,59 @@ raise "[기준선] PodMonitor scrapeTimeout이 기준선(10s)과 다르다" unle
 migrate = load(migrate_path)
 raise "[안전] migration overlay가 Namespace를 관리하면 안 된다" if migrate.any? { |i| i["kind"] == "Namespace" }
 
-job = resource(migrate, "Job", "persona-migrate-0001-persona-minimal")
-raise "[안전] migration Job은 persona-app namespace다" unless job.dig("metadata", "namespace") == "persona-app"
-jspec = job.fetch("spec")
-raise "[기준선] migration Job backoffLimit이 0이 아니다 — 실패를 재시도로 덮지 않는 것이 현재 기준선이다" unless jspec["backoffLimit"] == 0
-raise "[기준선] migration Job에 유한한 실행 제한이 없다" unless jspec["activeDeadlineSeconds"].is_a?(Integer) && jspec["activeDeadlineSeconds"] > 0
-raise "[안전] 완료된 Job과 로그를 자동 삭제하면 안 된다" if jspec.key?("ttlSecondsAfterFinished")
+# Job을 이름으로 하나만 찾으면, 새 revision Job을 추가했을 때 그 Job은 아무 검사도
+# 받지 않는다. 이미지 digest·hardening·Secret 경계가 전부 비게 되므로 전부 순회한다.
+jobs = migrate.select { |item| item["kind"] == "Job" }
 
-jpod = jspec.dig("template", "spec")
-raise "[안전] migration Job은 재시작하지 않는다" unless jpod["restartPolicy"] == "Never"
-check_hardened_pod(jpod, "migration Job", "persona-app-ghcr")
+# 활성 렌더에는 **이번에 적용할 Job 하나만** 둔다.
+#
+# 여럿을 함께 Sync하면 적용 순서가 보장되지 않고, 이미 클러스터에서 지운 과거 Job이
+# 구형 이미지로 다시 만들어진다. 구형 이미지가 upgrade head를 돌면 새 revision을 몰라
+# 실패한다. "완료된 Job은 다시 Sync해도 재실행되지 않는다"는 그 Job이 클러스터에 남아
+# 있을 때만 참이고, 0001 Job은 이미 삭제했다(runbooks/test-resource-cleanup.md).
+#
+# 0개는 오류가 아니다 — 적용할 migration이 없는 평시 상태다. 과거 선언은
+# kustomize/base/persona-migrate/history/에 이력으로 남기고 렌더하지 않는다.
+raise "[안전] 활성 렌더에 migration Job이 둘 이상이다 — 이번 배포 대상만 남기고 나머지는 history/로 옮겨라: #{jobs.map { |j| j.dig("metadata", "name") }.join(", ")}" if jobs.length > 1
 
-jcontainer = jpod.fetch("containers").fetch(0)
-raise "[안전] migration은 Gateway와 같은 이미지여야 한다" unless jcontainer["image"] == GATEWAY_IMAGE
-raise "[안전] migration command가 alembic이 아니다" unless jcontainer["command"] == ["/app/.venv/bin/alembic"]
-raise "[안전] migration args가 upgrade head가 아니다" unless jcontainer["args"] == ["upgrade", "head"]
-check_hardened_container(jcontainer, "migration Job", 10_001)
+# 이력 파일을 다시 연결하면 Job 수가 1이라 위 검사를 통과해 버린다. 경로로 한 번 더 막는다.
+migrate_base = YAML.load_file(migrate_base_path)
+(migrate_base["resources"] || []).each do |entry|
+  raise "[안전] history/의 과거 선언을 활성 렌더에 연결했다: #{entry}" if entry.to_s.include?("history/")
+end
 
-job_secrets = (jcontainer["env"] || []).map { |e| e.dig("valueFrom", "secretKeyRef", "name") }.compact
-job_secrets += (jcontainer["envFrom"] || []).map { |e| e.dig("secretRef", "name") }.compact
-raise "[안전] migration Job은 migrator Secret만 참조해야 한다" unless job_secrets.uniq == ["persona-gateway-migrator"]
-raise "[안전] migration Job에 probe를 붙이지 않는다" if jcontainer.key?("readinessProbe") || jcontainer.key?("livenessProbe")
+# 뒤의 PriorityClass 검사도 Job 전부를 봐야 하므로 pod spec을 모아 둔다.
+job_pods = {}
+
+jobs.each do |job|
+  jname = job.dig("metadata", "name").to_s
+  raise "[안전] migration Job 이름에 revision이 없다: #{jname}" unless jname.match?(/\Apersona-migrate-\d{4}-[a-z0-9-]+\z/)
+  raise "[안전] migration Job은 persona-app namespace다: #{jname}" unless job.dig("metadata", "namespace") == "persona-app"
+  jspec = job.fetch("spec")
+  raise "[기준선] migration Job backoffLimit이 0이 아니다 — 실패를 재시도로 덮지 않는 것이 현재 기준선이다: #{jname}" unless jspec["backoffLimit"] == 0
+  raise "[기준선] migration Job에 유한한 실행 제한이 없다: #{jname}" unless jspec["activeDeadlineSeconds"].is_a?(Integer) && jspec["activeDeadlineSeconds"] > 0
+  raise "[안전] 완료된 Job과 로그를 자동 삭제하면 안 된다: #{jname}" if jspec.key?("ttlSecondsAfterFinished")
+
+  jpod = jspec.dig("template", "spec")
+  raise "[안전] migration Job은 재시작하지 않는다: #{jname}" unless jpod["restartPolicy"] == "Never"
+  check_hardened_pod(jpod, "migration Job #{jname}", "persona-app-ghcr")
+
+  jcontainer = jpod.fetch("containers").fetch(0)
+  revision = jname.sub(/\Apersona-migrate-/, "")
+  approved = MIGRATION_IMAGES[revision]
+  raise "[안전] 승인 이미지가 등록되지 않은 migration Job이다 — MIGRATION_IMAGES에 추가하라: #{jname}" if approved.nil?
+  raise "[안전] migration Job 이미지가 그 revision의 승인 이미지가 아니다: #{jname}" unless jcontainer["image"] == approved
+  raise "[안전] migration command가 alembic이 아니다: #{jname}" unless jcontainer["command"] == ["/app/.venv/bin/alembic"]
+  raise "[안전] migration args가 upgrade head가 아니다: #{jname}" unless jcontainer["args"] == ["upgrade", "head"]
+  check_hardened_container(jcontainer, "migration Job #{jname}", 10_001)
+
+  job_secrets = (jcontainer["env"] || []).map { |e| e.dig("valueFrom", "secretKeyRef", "name") }.compact
+  job_secrets += (jcontainer["envFrom"] || []).map { |e| e.dig("secretRef", "name") }.compact
+  raise "[안전] migration Job은 migrator Secret만 참조해야 한다: #{jname}" unless job_secrets.uniq == ["persona-gateway-migrator"]
+  raise "[안전] migration Job에 probe를 붙이지 않는다: #{jname}" if jcontainer.key?("readinessProbe") || jcontainer.key?("livenessProbe")
+
+  job_pods["migration Job #{jname}"] = jpod
+end
 
 # --- Gateway / Web --------------------------------------------------------
 app = load(app_path)
@@ -321,8 +368,8 @@ end
 # 기본 구성에서 병목을 관찰한 뒤 우선순위 실험을 추가한다. 시스템 클래스나 기존 클러스터는
 # 변경하지 않으며, 여기서는 이번 서비스 선언과 Traefik values에 참조가 다시 들어오는지만 막는다.
 traefik_values = YAML.load_file(traefik_values_path)
-{ "DB" => cspec, "migration Job" => jpod, "Gateway" => gpod,
-  "Web" => wpod, "Traefik" => traefik_values }.each do |label, spec|
+({ "DB" => cspec, "Gateway" => gpod,
+   "Web" => wpod, "Traefik" => traefik_values }.merge(job_pods)).each do |label, spec|
   raise "[기준선] #{label}: 커스텀 PriorityClass 적용은 보류한다" unless spec["priorityClassName"].to_s.empty?
 end
 
