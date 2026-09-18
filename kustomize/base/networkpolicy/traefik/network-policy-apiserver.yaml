@@ -1,0 +1,30 @@
+# Gate 4 §3 — Traefik이 Gateway API 리소스(Gateway·HTTPRoute·Middleware)를 watch하려면
+# kube-apiserver에 닿아야 한다. 표준 NetworkPolicy로는 이걸 안전하게 못 적는다 —
+# kubernetes.default.svc의 ClusterIP는 알지만 실제 엔드포인트는 컨트롤플레인 노드
+# IP이고(Pod가 아니라서 podSelector로 못 고른다), 그 IP를 ipBlock에 하드코딩하면 노드
+# 교체·재설치 때 조용히 끊긴다. Cilium은 이런 경우를 위한 예약 엔티티
+# kube-apiserver를 제공한다 — 근거:
+# https://docs.cilium.io/en/latest/security/policy/kubernetes/ (toEntities/fromEntities로
+# kube-apiserver 등 예약 엔티티를 직접 선택할 수 있다고 명시).
+#
+# 알려진 함정(cilium/cilium#37298 등): identity restore 유예 기간이 끝난 뒤 연결이
+# 끊기는 사례가 보고돼 있다 — 적용 후 Traefik이 실제로 Gateway API 변경을 반영하는지
+# 관찰해서 확인한다(클러스터 없이는 여기서 검증 못 함, 런북에 명시).
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-egress-kube-apiserver
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: networkpolicy
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: traefik
+  egress:
+    - toEntities:
+        - kube-apiserver
+      toPorts:
+        - ports:
+            - port: "6443"
+              protocol: TCP

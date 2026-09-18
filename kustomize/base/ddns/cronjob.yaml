@@ -5,6 +5,7 @@ kind: CronJob
 metadata:
   name: ddns-update
   labels:
+    app.kubernetes.io/name: ddns-update
     app.kubernetes.io/part-of: persona-platform
     app.kubernetes.io/component: edge
 spec:
@@ -18,6 +19,10 @@ spec:
       template:
         metadata:
           labels:
+            # Gate 4: NetworkPolicy가 oauth2-proxy(app.kubernetes.io/name: oauth2-proxy)와
+            # 구분해 이 Pod만 선택할 수 있도록 name 라벨을 추가한다(기존엔 component: edge가
+            # 같은 네임스페이스의 두 워크로드에 겹쳐 podSelector로 구분이 안 됐다).
+            app.kubernetes.io/name: ddns-update
             app.kubernetes.io/part-of: persona-platform
             app.kubernetes.io/component: edge
         spec:

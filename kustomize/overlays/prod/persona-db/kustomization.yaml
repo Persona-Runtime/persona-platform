@@ -4,3 +4,4 @@ kind: Kustomization
 namespace: persona-data
 resources:
   - ../../../base/persona-db
+  - ../../../base/networkpolicy/persona-data

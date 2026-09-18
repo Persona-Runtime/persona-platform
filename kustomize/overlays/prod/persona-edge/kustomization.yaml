@@ -6,3 +6,4 @@ namespace: persona-edge
 resources:
   - ../../../base/ddns
   - ../../../base/oauth2-proxy
+  - ../../../base/networkpolicy/persona-edge
