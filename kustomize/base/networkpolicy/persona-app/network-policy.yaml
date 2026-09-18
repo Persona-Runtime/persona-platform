@@ -1,0 +1,138 @@
+# Gate 4 §3 — persona-app 네임스페이스 default-deny + 최소 허용.
+#
+# Cilium(1.20.1, routingMode: tunnel/VXLAN)은 표준 NetworkPolicy를 그대로 구현한다.
+# kubeProxyReplacement가 false라도 무관하다 — NetworkPolicy 시행은 kube-proxy 대체
+# 여부와 별개다.
+#
+# podSelector: {}(네임스페이스 전체)에 policyTypes 둘 다 넣고 rules를 안 적으면
+# "이 네임스페이스의 모든 Pod는 아래 다른 NetworkPolicy가 별도로 허용하지 않는 한
+# 인바운드·아웃바운드 전부 차단"이 된다. 여러 NetworkPolicy가 같은 Pod를 선택하면
+# 허용 목록은 합집합으로 합쳐진다(하나라도 허용하면 허용) — default-deny와 개별 허용을
+# 분리해서 적을 수 있는 이유다.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: networkpolicy
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# persona-web: traefik에서만 인입. egress 규칙을 아예 안 둬서(Egress policyType 자체를
+# 안 씀) default-deny의 전면 egress 차단을 그대로 유지한다 — 이 컴포넌트는 서버 쪽에서
+# 아무 곳으로도 나가지 않는다(브라우저가 직접 /v1을 호출하지, persona-web이 대신 호출하지
+# 않는다).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-web
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: networkpolicy
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: persona-web
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: traefik
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+# persona-gateway: traefik에서 인입, DB·같은 네임스페이스의 persona-embedding·DNS로만
+# 나간다. persona-embedding은 이 브랜치(Gate 3 기준)엔 아직 없지만, 라벨 셀렉터라
+# feat/persona-embedding-kustomize가 나중에 합쳐져도 이 규칙이 그대로 맞는다.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-gateway
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: networkpolicy
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: persona-gateway
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: traefik
+      ports:
+        - protocol: TCP
+          port: 8080
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: persona-data
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: persona-embedding
+      ports:
+        - protocol: TCP
+          port: 8081
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+# persona-migrate: Job이라 인바운드를 받을 이유가 없다(Ingress policyType 자체를 안 써서
+# default-deny의 전면 ingress 차단을 유지). DB로 DDL을 실행하고 DNS만 쓴다.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-migrate
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: networkpolicy
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: persona-migrate
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: persona-data
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

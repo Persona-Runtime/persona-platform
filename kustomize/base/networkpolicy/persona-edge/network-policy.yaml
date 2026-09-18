@@ -1,0 +1,95 @@
+# Gate 4 §3 — persona-edge 네임스페이스 default-deny + 최소 허용(표준 NetworkPolicy 부분).
+# FQDN(github.com·api.cloudflare.com 등) egress는 표준 NetworkPolicy가 호스트네임을 못
+# 봐서 network-policy-fqdn.yaml(CiliumNetworkPolicy toFQDNs)로 따로 둔다.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: networkpolicy
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# oauth2-proxy: traefik의 oauth-forward Middleware에서만 인입.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-oauth2-proxy-ingress
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: networkpolicy
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: oauth2-proxy
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: traefik
+      ports:
+        - protocol: TCP
+          port: 4180
+---
+# oauth2-proxy·ddns 공통 DNS 아웃바운드. FQDN egress(github.com 등)는 CiliumNetworkPolicy가
+# 먼저 도메인을 IP로 풀어야 하므로 DNS 허용이 없으면 toFQDNs 자체가 동작하지 않는다.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-edge-egress-dns
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: networkpolicy
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: In
+        values:
+          - oauth2-proxy
+          - ddns-update
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+# ddns: 1.1.1.1은 도메인이 아니라 고정 IP라 표준 NetworkPolicy의 ipBlock으로 충분하다
+# (FQDN이 아닌 것까지 CiliumNetworkPolicy로 몰지 않는다). update-dns.sh가 Cloudflare API
+# 호출 전에 이 주소로 자신의 공인 IP를 확인한다.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ddns-egress-public-ip-check
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: networkpolicy
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: ddns-update
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 1.1.1.1/32
+      ports:
+        - protocol: TCP
+          port: 443

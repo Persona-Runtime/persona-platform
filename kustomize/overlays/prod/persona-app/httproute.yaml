@@ -5,6 +5,12 @@
 #
 # Gateway API는 더 긴 path prefix를 먼저 맞춘다. 따라서 /v1은 / 보다 우선한다.
 # 이 우선순위는 규칙 순서가 아니라 명세가 정하는 것이며, 별도 priority 필드는 없다.
+#
+# Gate 4: 이 경로(Tailnet/LAN, Serve)는 oauth-forward를 안 거친다 — 인증은
+# httproute-public.yaml(인터넷 진입)에서만 강제한다. 대신 클라이언트가
+# X-Auth-Request-User를 직접 채워 보내는 위조를 막기 위해 strip-auth-header로 그
+# 헤더를 항상 지운다(gateway 코드의 PERSONA_FORWARD_AUTH_ENABLED 플래그가 1차
+# 방어, 이 Middleware가 2차 방어).
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
@@ -21,6 +27,12 @@ spec:
         - path:
             type: PathPrefix
             value: /v1
+      filters:
+        - type: ExtensionRef
+          extensionRef:
+            group: traefik.io
+            kind: Middleware
+            name: strip-auth-header
       backendRefs:
         - name: persona-gateway
           port: 8080
@@ -28,6 +40,12 @@ spec:
         - path:
             type: PathPrefix
             value: /
+      filters:
+        - type: ExtensionRef
+          extensionRef:
+            group: traefik.io
+            kind: Middleware
+            name: strip-auth-header
       backendRefs:
         - name: persona-web
           port: 8080

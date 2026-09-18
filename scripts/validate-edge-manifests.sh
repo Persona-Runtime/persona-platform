@@ -2,8 +2,8 @@
 
 set -eu
 
-# 공개 진입 Gate 3의 새 kustomize 경로(MetalLB 설정·cert-manager ClusterIssuer·DDNS)가
-# 렌더되고 핵심 계약을 지키는지 로컬에서만 검사한다. 홈 API를 호출하지 않는다.
+# 공개 진입 Gate 3~4의 kustomize 경로(MetalLB 설정·cert-manager ClusterIssuer·DDNS·
+# oauth2-proxy)가 렌더되고 핵심 계약을 지키는지 로컬에서만 검사한다. 홈 API를 호출하지 않는다.
 # scripts/validate-persona-app-manifests.sh와 같은 패턴([안전] 태그, kubectl kustomize 렌더 +
 # ruby 검사)을 쓰되, 이 파일은 persona-app 렌더를 다루지 않는다(그건 위 스크립트의 범위다).
 
@@ -113,6 +113,60 @@ raise "[안전] RECORD_NAME이 공개 진입 도메인과 다르다" unless conf
 script = configmap.dig("data", "update-dns.sh") || raise("[안전] update-dns.sh 스크립트가 ConfigMap에 없다")
 raise "[안전] DDNS 스크립트에 토큰을 로그로 출력하는 것으로 보이는 echo가 있다 — 응답 전체를 출력하면 안 된다" if script =~ /echo\s+"\$(record_json|update_json)"/
 
+# --- oauth2-proxy (Gate 4) ---------------------------------------------------
+deployment = resource(edge, "Deployment", "oauth2-proxy")
+dspec = deployment.fetch("spec")
+raise "[기준선] oauth2-proxy replicas가 1이 아니다" unless dspec["replicas"] == 1
+pod_spec = dspec.dig("template", "spec")
+raise "[안전] oauth2-proxy RuntimeDefault seccomp이 필요하다" unless pod_spec.dig("securityContext", "seccompProfile", "type") == "RuntimeDefault"
+nodes = pod_spec.dig("affinity", "nodeAffinity", "requiredDuringSchedulingIgnoredDuringExecution", "nodeSelectorTerms", 0, "matchExpressions", 0, "values")
+raise "[안전] oauth2-proxy는 두 홈 워커에만 배치해야 한다" unless nodes == ["k8s-worker1", "k8s-worker2"]
+
+container = pod_spec.fetch("containers").find { |c| c["name"] == "oauth2-proxy" } || raise("oauth2-proxy 컨테이너가 없다")
+expected_image = "quay.io/oauth2-proxy/oauth2-proxy@sha256:97038fe4354e6ace6612f2f88dc7b332ae6916bddf89da9aea4f2064ea0c2071"
+raise "[안전] oauth2-proxy 이미지는 검증된 linux/amd64 child manifest digest여야 한다(tag 금지)" unless container["image"] == expected_image
+security = container.fetch("securityContext")
+raise "[안전] oauth2-proxy 컨테이너는 비루트(10001)로 실행해야 한다" unless security["runAsNonRoot"] == true && security["runAsUser"] == 10_001
+raise "[안전] oauth2-proxy privilege escalation을 막아야 한다" unless security["allowPrivilegeEscalation"] == false
+raise "[안전] oauth2-proxy 모든 capability를 제거해야 한다" unless security.dig("capabilities", "drop") == ["ALL"]
+raise "[안전] oauth2-proxy root filesystem이 read-only여야 한다" unless security["readOnlyRootFilesystem"] == true
+raise "[기준선] oauth2-proxy 리소스(requests 32Mi/limits 64Mi)가 다르다" unless container.dig("resources", "requests", "memory") == "32Mi" && container.dig("resources", "limits", "memory") == "64Mi"
+
+expected_args = %w[
+  --provider=github
+  --github-user=$(GITHUB_ALLOWED_USERS)
+  --upstream=static://202
+  --http-address=0.0.0.0:4180
+  --reverse-proxy=true
+  --set-xauthrequest=true
+  --cookie-secure=true
+  --cookie-samesite=lax
+  --cookie-expire=168h
+  --cookie-refresh=1h
+  --whitelist-domain=app.personaruntime.xyz
+  --redirect-url=https://app.personaruntime.xyz/oauth2/callback
+  --skip-provider-button=true
+  --email-domain=*
+]
+raise "[안전] oauth2-proxy args가 승인된 목록과 다르다" unless container["args"] == expected_args
+
+env_names = (container["env"] || []).map { |e| e["name"] }
+raise "[안전] oauth2-proxy env에 GITHUB_ALLOWED_USERS가 없다" unless env_names.include?("GITHUB_ALLOWED_USERS")
+raise "[안전] oauth2-proxy Secret(client-id·secret·cookie-secret)은 envFrom.secretRef로만 와야 한다 — Git에 값이 없다" unless (container["envFrom"] || []).any? { |e| e.dig("secretRef", "name") == "oauth2-proxy" }
+
+oauth_configmap = resource(edge, "ConfigMap", "oauth2-proxy-config")
+raise "[안전] GITHUB_ALLOWED_USERS는 실제 GitHub 계정명을 만들어내면 안 된다 — 자리표시자여야 한다" unless oauth_configmap.dig("data", "GITHUB_ALLOWED_USERS") == "GITHUB_USERS_PLACEHOLDER"
+
+service = resource(edge, "Service", "oauth2-proxy")
+raise "[안전] oauth2-proxy Service는 ClusterIP여야 한다 — 외부에 직접 노출하지 않는다" unless service.dig("spec", "type") == "ClusterIP" || service.dig("spec", "type").nil?
+raise "[안전] oauth2-proxy Service 포트가 4180이 아니다" unless service.dig("spec", "ports", 0, "port") == 4180
+
+# persona-app 네임스페이스의 HTTPRoute가 크로스 네임스페이스로 이 Service를 backendRef할 수 있게
+# 하는 허가다 — 없으면 HTTPRoute가 렌더는 되지만 Traefik이 참조를 거부한다.
+grant = resource(edge, "ReferenceGrant", "persona-app-httproute-to-oauth2-proxy")
+raise "[안전] ReferenceGrant from이 persona-app의 HTTPRoute가 아니다" unless grant.dig("spec", "from", 0) == { "group" => "gateway.networking.k8s.io", "kind" => "HTTPRoute", "namespace" => "persona-app" }
+raise "[안전] ReferenceGrant to가 oauth2-proxy Service가 아니다" unless grant.dig("spec", "to", 0) == { "group" => "", "kind" => "Service", "name" => "oauth2-proxy" }
+
 # --- bootstrap namespace -----------------------------------------------------
 # 이 저장소는 Argo overlay/Application이 Namespace를 소유하지 않는다 — 전부 bootstrap 파일이
 # 소유하고, CP 적용 순서(3-7)에서 Argo Sync보다 먼저 적용한다. metallb·cert-manager Argo
@@ -161,5 +215,5 @@ end
   raise "[안전] #{name}: values source가 이 저장소 develop을 봐야 한다" unless values_source && values_source["targetRevision"] == "develop" && values_source["ref"] == "values"
 end
 
-puts "edge(MetalLB 설정·cert-manager ClusterIssuer·DDNS) 렌더와 매니페스트 정책 검사 통과"
+puts "edge(MetalLB 설정·cert-manager ClusterIssuer·DDNS·oauth2-proxy) 렌더와 매니페스트 정책 검사 통과"
 RUBY

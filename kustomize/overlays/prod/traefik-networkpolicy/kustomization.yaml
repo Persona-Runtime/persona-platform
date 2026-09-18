@@ -1,0 +1,11 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# traefik 네임스페이스 자체가 Argo가 아니라 helm --create-namespace(bootstrap/traefik/
+# README.md)로 만들어진다 — 그래서 이 overlay도 Argo Application을 두지 않고 Traefik
+# 본체와 같은 방식(CP가 kubectl apply -k로 수동 적용)으로 다룬다. metallb-config·
+# cert-manager-issuers처럼 "Helm 본체 + 별도 kustomize overlay" 형태이지만, 그 둘은
+# 본체가 Argo Application(argocd/metallb.yaml 등)으로 관리돼 Application을 하나 더
+# 두는 게 일관적이고, Traefik은 본체부터 Argo 밖이라 그 전례를 따르지 않는다.
+namespace: traefik
+resources:
+  - ../../../base/networkpolicy/traefik

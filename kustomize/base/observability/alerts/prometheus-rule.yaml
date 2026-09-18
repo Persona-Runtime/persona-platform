@@ -1,0 +1,45 @@
+# Gate 4 §5 — 알림 규칙. Alertmanager는 이 클러스터에서 꺼져 있다(tradeoff/04-observability.md,
+# 해당 스택 미설치) — 이 PrometheusRule이 Sync돼도 아무 곳으로도 통지가 가지 않는다.
+# Prometheus UI의 Alerts 탭에서 firing 상태를 눈으로 확인하는 용도로만 쓴다. 실제 페이징이
+# 필요해지면 Alertmanager 도입을 먼저 하고 receiver를 연결한다 — 이 파일만으로는 안 된다.
+#
+# 이 리소스는 특정 컴포넌트 네임스페이스에 종속되지 않는다(ruleNamespaceSelector가
+# 전체 네임스페이스를 보고 release 라벨로만 고른다) — traefik PodMonitor 옆에 둔 건
+# 배치 편의이지 의미상 제약은 아니다.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: gate4-alerts
+  labels:
+    release: monitoring-stack
+    app.kubernetes.io/part-of: persona-platform
+spec:
+  groups:
+    - name: traefik-4xx-ratio
+      rules:
+        - alert: TraefikHigh4xxRatio
+          # traefik_service_requests_total은 Traefik이 내는 표준 메트릭(v2·v3 동일 이름).
+          # 5분 구간에서 4xx 비율이 30%를 넘으면 발화 — Alertmanager가 꺼져 있어 통지는
+          # 안 가지만 Prometheus UI에서 확인할 수 있다.
+          expr: |
+            sum(rate(traefik_service_requests_total{code=~"4.."}[5m]))
+              / sum(rate(traefik_service_requests_total[5m])) > 0.3
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Traefik 4xx 비율이 30%를 초과했다"
+            description: "최근 5분간 Traefik이 처리한 요청 중 4xx 응답 비율이 30%를 넘었다. Alertmanager가 꺼져 있어 통지는 가지 않는다 — Prometheus UI에서 확인한다."
+    - name: cert-manager-expiry
+      rules:
+        - alert: CertificateExpiringSoon
+          # certmanager_certificate_expiration_timestamp_seconds는 cert-manager 컨트롤러가
+          # 관리하는 각 Certificate의 만료 시각(unix epoch)을 낸다.
+          expr: |
+            (certmanager_certificate_expiration_timestamp_seconds - time()) < 14 * 24 * 60 * 60
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: "인증서 만료가 14일 이내로 다가왔다 ({{ $labels.name }})"
+            description: "{{ $labels.namespace }}/{{ $labels.name }} 인증서가 14일 안에 만료된다. cert-manager의 자동 갱신(기본 만료 30일 전 시도)이 실패했는지 확인한다. Alertmanager가 꺼져 있어 통지는 가지 않는다."

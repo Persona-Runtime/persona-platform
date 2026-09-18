@@ -1,0 +1,46 @@
+# Gate 4 §3 — FQDN 기반 egress. 표준 NetworkPolicy는 도메인 이름을 못 보고 IP/CIDR만
+# 다루므로, 호스트네임으로 허용해야 하는 외부 목적지는 Cilium의 toFQDNs로만 표현한다.
+# Cilium은 DNS 응답을 스누핑해 도메인→IP 매핑을 캐시하고 그 IP만 허용한다 — 이 Pod가
+# DNS(위 network-policy.yaml의 allow-edge-egress-dns)를 먼저 쓸 수 있어야 toFQDNs가
+# 동작한다.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-oauth2-proxy-fqdn
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: networkpolicy
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: oauth2-proxy
+  egress:
+    - toFQDNs:
+        # GitHub OAuth 인증 흐름(--provider=github)이 부르는 두 도메인.
+        - matchName: github.com
+        - matchName: api.github.com
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-ddns-fqdn
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: networkpolicy
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: ddns-update
+  egress:
+    - toFQDNs:
+        # DNS 레코드 조회·PATCH(update-dns.sh의 API_BASE). 공인 IP 조회(1.1.1.1)는
+        # 도메인이 아니라 IP라 network-policy.yaml의 표준 ipBlock 규칙으로 처리한다.
+        - matchName: api.cloudflare.com
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP

@@ -1,0 +1,135 @@
+# Gate 4 §3 — persona-data 네임스페이스 default-deny + 최소 허용.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: networkpolicy
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# persona-db(CNPG Cluster) 인바운드. 세 곳만 허용한다:
+#  - persona-app의 gateway·migrate(둘 다 DDL/쿼리를 던진다)
+#  - cnpg-system: operator가 인스턴스 매니저 상태 포트(8000, CNPG 기본값)를 폴링한다
+#  - monitoring: Prometheus가 postgres-exporter 포트(9187, CNPG 기본값)를 스크레이프한다
+#    (monitoring 네임스페이스 자체엔 이번에 손대지 않는다 — namespaceSelector만 건다)
+# 정확한 exporter/상태 포트는 CNPG 기본값을 근거로 적었다 — 클러스터 없이는 실측 못 한다.
+# 적용 후 Hubble/실제 스크레이프 성공 여부로 재확인한다(런북에 명시).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-db-ingress
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: networkpolicy
+spec:
+  podSelector:
+    matchLabels:
+      cnpg.io/cluster: persona-db
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: persona-app
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: persona-gateway
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: persona-app
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: persona-migrate
+      ports:
+        - protocol: TCP
+          port: 5432
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: cnpg-system
+      ports:
+        - protocol: TCP
+          port: 8000
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 9187
+---
+# persona-db 아웃바운드: DNS, cnpg-system(operator가 instance manager와 8000에서
+# 주고받는 상태·webhook 트래픽 — 방향이 operator→pod뿐인지 확실하지 않아 양쪽 다 열어
+# 둔다. 실제 방향은 적용 후 Hubble로 좁힌다).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-db-egress
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: networkpolicy
+spec:
+  podSelector:
+    matchLabels:
+      cnpg.io/cluster: persona-db
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: cnpg-system
+      ports:
+        - protocol: TCP
+          port: 8000
+---
+# 인스턴스 간 스트리밍 복제(instances: 2, primary↔replica). 같은 Cluster의 Pod끼리
+# 5432를 상호 허용한다 — podSelector to/from이 같아 self-referential 규칙이 된다.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-db-replication
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: networkpolicy
+spec:
+  podSelector:
+    matchLabels:
+      cnpg.io/cluster: persona-db
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              cnpg.io/cluster: persona-db
+      ports:
+        - protocol: TCP
+          port: 5432
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              cnpg.io/cluster: persona-db
+      ports:
+        - protocol: TCP
+          port: 5432

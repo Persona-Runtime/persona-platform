@@ -1,0 +1,27 @@
+# Gate 4 §5 — Traefik 메트릭 수집. ServiceMonitor가 아니라 PodMonitor를 쓴다: 차트
+# values.yaml이 ports.metrics.expose를 켜지 않아(기본값 false) Service엔 metrics 포트가
+# 없지만, Pod의 containerPort엔 항상 있다(helm template로 실제 렌더 확인 — name: metrics,
+# containerPort: 9100). persona-db도 같은 이유로 PodMonitor를 쓴다(kustomize/base/
+# persona-db/podmonitor.yaml 선례) — Service를 추가로 바꾸지 않고 이미 있는 Pod 포트를
+# 그대로 쓴다.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: traefik
+  labels:
+    # Prometheus(monitoring-stack)의 podMonitorSelector 기본 선택자.
+    release: monitoring-stack
+    app.kubernetes.io/part-of: persona-platform
+spec:
+  namespaceSelector:
+    matchNames:
+      - traefik
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: traefik
+  podMetricsEndpoints:
+    - port: metrics
+      path: /metrics
+      scheme: http
+      interval: 30s
+      scrapeTimeout: 10s

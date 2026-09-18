@@ -337,8 +337,12 @@ raise "[안전] https listener hostname이 공개 진입 도메인과 다르다"
 raise "[안전] https listener는 TLS를 종료해야 한다" unless https_listener.dig("tls", "mode") == "Terminate"
 raise "[안전] https listener certificateRef가 persona-app-tls가 아니다" unless https_listener.dig("tls", "certificateRefs", 0) == { "kind" => "Secret", "name" => "persona-app-tls" }
 
-def check_v1_and_root_rules(rules, context)
-  raise "[안전] #{context}: 규칙은 /v1과 / 두 개다" unless rules.length == 2
+# extension_filters(name => 순서대로 적용될 Middleware 이름 배열)를 넘기면 /v1·/ 규칙의
+# filters가 정확히 그 순서(= 적용 순서)의 ExtensionRef인지도 검사한다. Gate 4부터
+# 공개 HTTPRoute는 /oauth2 규칙이 하나 더 있어 길이를 2로 고정할 수 없다 — /v1과 /가
+# 있는지만 보고 정확한 개수는 호출부에서 규칙별로 따로 확인한다.
+def check_v1_and_root_rules(rules, context, extension_filters: {})
+  raise "[안전] #{context}: 규칙이 비어 있다" if rules.empty?
 
   api_rule = rules.find { |r| r.dig("matches", 0, "path", "value") == "/v1" } || raise("#{context}: /v1 규칙이 없다")
   raise "[안전] #{context}: /v1은 PathPrefix다" unless api_rule.dig("matches", 0, "path", "type") == "PathPrefix"
@@ -354,17 +358,74 @@ def check_v1_and_root_rules(rules, context)
       raise "[안전] #{context}: 경로를 다시 쓰면 안 된다 — Python API가 /v1/...을 그대로 받는다: #{filter["type"]}" if filter["type"] == "URLRewrite"
     end
   end
+
+  { "/v1" => api_rule, "/" => web_rule }.each do |path, rule|
+    expected = extension_filters[path]
+    next if expected.nil?
+    actual = (rule["filters"] || []).map do |filter|
+      raise "[안전] #{context} #{path}: filters는 ExtensionRef만 허용한다: #{filter["type"]}" unless filter["type"] == "ExtensionRef"
+      raise "[안전] #{context} #{path}: ExtensionRef group은 traefik.io다" unless filter.dig("extensionRef", "group") == "traefik.io"
+      raise "[안전] #{context} #{path}: ExtensionRef kind는 Middleware다" unless filter.dig("extensionRef", "kind") == "Middleware"
+      filter.dig("extensionRef", "name")
+    end
+    # 배열 순서 = Traefik 적용 순서(rate-limit이 oauth-forward보다 앞이어야 인증 전에 과호출을 끊는다).
+    raise "[안전] #{context} #{path}: Middleware 필터 순서가 다르다 (기대 #{expected}, 실제 #{actual})" unless actual == expected
+  end
 end
 
 route = resource(app, "HTTPRoute", "persona-app")
 raise "[안전] 기존 HTTPRoute는 http listener에 붙어야 한다(Serve/IP 접근 유지)" unless route.dig("spec", "parentRefs", 0, "sectionName") == "http"
 raise "[안전] 기존 HTTPRoute에 hostname을 넣으면 Serve가 끊긴다" if route.dig("spec", "hostnames")
-check_v1_and_root_rules(route.dig("spec", "rules"), "persona-app HTTPRoute")
+raise "[안전] 기존 HTTPRoute: 규칙은 /v1과 / 두 개다" unless route.dig("spec", "rules")&.length == 2
+check_v1_and_root_rules(
+  route.dig("spec", "rules"), "persona-app HTTPRoute",
+  # 이 경로는 oauth-forward를 안 거친다 — strip-auth-header만으로 위조 헤더를 지운다(2차 방어).
+  extension_filters: { "/v1" => ["strip-auth-header"], "/" => ["strip-auth-header"] },
+)
 
 public_route = resource(app, "HTTPRoute", "persona-app-public")
 raise "[안전] 공개 HTTPRoute는 https listener에 붙어야 한다" unless public_route.dig("spec", "parentRefs", 0, "sectionName") == "https"
 raise "[안전] 공개 HTTPRoute hostname이 공개 진입 도메인과 다르다" unless public_route.dig("spec", "hostnames") == ["app.personaruntime.xyz"]
-check_v1_and_root_rules(public_route.dig("spec", "rules"), "persona-app-public HTTPRoute")
+raise "[안전] 공개 HTTPRoute: 규칙은 /oauth2·/v1·/ 세 개다" unless public_route.dig("spec", "rules")&.length == 3
+check_v1_and_root_rules(
+  public_route.dig("spec", "rules"), "persona-app-public HTTPRoute",
+  # rate-limit이 oauth-forward보다 앞 — 초당 요청이 많으면 GitHub 로그인 여부를 묻기 전에 429.
+  extension_filters: {
+    "/v1" => ["rate-limit", "oauth-forward", "body-limit", "security-headers"],
+    "/" => ["rate-limit", "oauth-forward", "security-headers"],
+  },
+)
+
+oauth_rule = public_route.dig("spec", "rules").find { |r| r.dig("matches", 0, "path", "value") == "/oauth2" } ||
+  raise("[안전] 공개 HTTPRoute: /oauth2 규칙이 없다")
+raise "[안전] /oauth2는 PathPrefix다" unless oauth_rule.dig("matches", 0, "path", "type") == "PathPrefix"
+raise "[안전] /oauth2는 oauth2-proxy(persona-edge)로 간다" unless oauth_rule.dig("backendRefs", 0, "name") == "oauth2-proxy" &&
+  oauth_rule.dig("backendRefs", 0, "namespace") == "persona-edge" && oauth_rule.dig("backendRefs", 0, "port") == 4180
+# 콜백·정적 자산 경로 자체가 로그인 흐름이라 자기 자신을 인증할 수 없다 — oauth-forward를 안 붙인다.
+oauth_filters = (oauth_rule["filters"] || []).map { |f| f.dig("extensionRef", "name") }
+raise "[안전] /oauth2 필터는 security-headers만이어야 한다" unless oauth_filters == ["security-headers"]
+
+# --- Traefik Middleware (Gate 4) -------------------------------------------
+middleware = resource(app, "Middleware", "oauth-forward")
+raise "[안전] oauth-forward: forwardAuth 주소가 다르다" unless middleware.dig("spec", "forwardAuth", "address") == "http://oauth2-proxy.persona-edge.svc:4180/"
+raise "[안전] oauth-forward: trustForwardHeader가 꺼져 있으면 안 된다" unless middleware.dig("spec", "forwardAuth", "trustForwardHeader") == true
+raise "[안전] oauth-forward: authResponseHeaders가 다르다" unless middleware.dig("spec", "forwardAuth", "authResponseHeaders") == ["X-Auth-Request-User", "X-Auth-Request-Email"]
+
+middleware = resource(app, "Middleware", "rate-limit")
+raise "[기준선] rate-limit: average/burst가 다르다" unless middleware.dig("spec", "rateLimit", "average") == 20 && middleware.dig("spec", "rateLimit", "burst") == 50
+# depth 0 = X-Forwarded-For를 안 쓰고 연결 자체의 IP를 쓴다 — externalTrafficPolicy: Local 전제.
+raise "[안전] rate-limit: sourceCriterion depth가 0이 아니다" unless middleware.dig("spec", "rateLimit", "sourceCriterion", "ipStrategy", "depth") == 0
+
+middleware = resource(app, "Middleware", "security-headers")
+headers = middleware.dig("spec", "headers")
+raise "[기준선] security-headers: HSTS/nosniff/referrer 값이 다르다" unless headers["stsSeconds"] == 31_536_000 && headers["stsIncludeSubdomains"] == true &&
+  headers["contentTypeNosniff"] == true && headers["referrerPolicy"] == "same-origin"
+
+middleware = resource(app, "Middleware", "body-limit")
+raise "[기준선] body-limit: maxRequestBodyBytes가 다르다" unless middleware.dig("spec", "buffering", "maxRequestBodyBytes") == 2_097_152
+
+middleware = resource(app, "Middleware", "strip-auth-header")
+raise "[안전] strip-auth-header: 위조 방지 헤더 목록이 다르다" unless middleware.dig("spec", "headers", "customRequestHeaders") == { "X-Auth-Request-User" => "", "X-Auth-Request-Email" => "" }
 
 # NodePort/LoadBalancer 금지 검사(아래)는 db+migrate+app 렌더만 순회한다. Traefik Service는
 # Helm(bootstrap/traefik/values.yaml)로 렌더되는 별도 경로라 이 배열에 없다 — 2026-09-17

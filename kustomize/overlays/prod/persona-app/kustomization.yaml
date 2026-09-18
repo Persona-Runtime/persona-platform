@@ -12,3 +12,5 @@ resources:
   - gateway.yaml
   - httproute.yaml
   - httproute-public.yaml
+  - middlewares.yaml
+  - ../../../base/networkpolicy/persona-app
