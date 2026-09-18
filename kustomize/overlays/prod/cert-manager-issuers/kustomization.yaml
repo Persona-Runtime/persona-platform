@@ -1,0 +1,7 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# ClusterIssuer는 비-namespaced 리소스다. namespace 필드는 이 리소스에는 적용되지 않지만
+# Argo Application destination에는 namespace가 필요해 cert-manager로 맞춘다.
+namespace: cert-manager
+resources:
+  - ../../../base/cert-manager-issuers

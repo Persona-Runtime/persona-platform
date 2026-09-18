@@ -29,16 +29,40 @@ affinity:
               app.kubernetes.io/name: traefik
               app.kubernetes.io/instance: traefik-traefik
 
-# public inbound 0 원칙. NodePort/LoadBalancer 금지.
-# Tailnet 노출은 tailscale serve가 노드에서 ClusterIP로 전달하는 방식으로 붙인다.
+# 2026-09-17 공개 진입 결정: MetalLB가 있는 LoadBalancer만 허용, NodePort 할당은 off.
+# 이전의 "public inbound 0 원칙, NodePort/LoadBalancer 금지"는 여기서 뒤집힌다 — 공유기가
+# 443 하나만 192.168.50.240으로 포워딩하고, 나머지 인바운드는 계속 0이다(tradeoff 05 참고).
+# Tailnet 노출은 그대로 tailscale serve가 노드에서 ClusterIP/LoadBalancer로 전달하는 방식이다.
 #
 # 주의: 41.x에서 타입은 service.spec.type 이다. service.type 은 존재하지 않는 키인데,
 # service 섹션에 additionalProperties:false 가 없어 스키마를 통과한 뒤 무시된다.
-# LoadBalancer로 두면 컨트롤러가 없어 EXTERNAL-IP는 pending이지만 NodePort가 함께
-# 할당되어 모든 노드에 포트가 열린다. 이전 클러스터의 ingress-nginx 상태로 되돌아간다.
+#
+# MetalLB가 없는 상태에서 LoadBalancer로 두면 EXTERNAL-IP는 pending이지만 NodePort가 함께
+# 할당되어 모든 노드에 포트가 열린다. allocateLoadBalancerNodePorts: false로 그 자동 NodePort
+# 할당을 막는다 — MetalLB VIP 하나만 열리고 이전 ingress-nginx NodePort 상태로 돌아가지 않는다.
 service:
   spec:
-    type: ClusterIP
+    type: LoadBalancer
+    allocateLoadBalancerNodePorts: false
+    # L2는 어차피 노드 한 대가 받는다. Local이어야 클라이언트 IP가 보존돼 Gate 4의 rate limit이
+    # 의미 있다. MetalLB는 Ready 엔드포인트가 있는 노드에서만 announce하므로 failover가
+    # Pod를 따라간다(externalTrafficPolicy: Cluster였다면 클라이언트 IP가 SNAT으로 사라진다).
+    #
+    # 주의: Local은 allocateLoadBalancerNodePorts: false와 별개로 kube-proxy가 모든 노드에
+    # healthCheckNodePort를 하나 연다(spec.healthCheckNodePort, 3xxxx대 — MetalLB가 "이 노드에
+    # Ready 엔드포인트가 있는가"를 확인하는 용도). LAN 안에서만 닿고 Gate 2가 LAN 외부 접근을
+    # 막으므로 위험은 아니지만, "자동 NodePort 0"이라고만 쓰면 이 포트를 빠뜨리게 된다.
+    externalTrafficPolicy: Local
+  annotations:
+    # loadBalancerIP 필드는 deprecated라 쓰지 않는다.
+    metallb.io/loadBalancerIPs: "192.168.50.240"
+    metallb.io/address-pool: traefik-pool
+
+ports:
+  websecure:
+    port: 8443
+    exposedPort: 443
+  # web(80)은 유지한다 — VIP의 80은 LAN 전용이다. 공유기는 443만 포워딩한다.
 
 providers:
   kubernetesGateway:

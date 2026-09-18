@@ -1,0 +1,28 @@
+# MetalLB 컨트롤러·CRD 설치. 이 Application을 먼저 Sync해야 metallb-config.yaml의
+# IPAddressPool·L2Advertisement가 적용된다(CRD 선행 필요) — README 배치 순서 참고.
+#
+# 수동 Sync. CreateNamespace=true를 쓰지 않는다 — speaker가 hostNetwork·NET_ADMIN을 쓰므로
+# metallb-system은 PSA privileged 라벨이 있어야 하는데, Argo가 CreateNamespace로 만들면
+# 라벨 없이 생긴다. bootstrap/namespaces/metallb-system.yaml을 이 Application보다 먼저
+# 적용해 네임스페이스를 소유한다(runbooks/public-ingress.md Gate 3-7 2번).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: metallb
+  namespace: argocd
+spec:
+  project: default
+  sources:
+    - repoURL: https://metallb.github.io/metallb
+      chart: metallb
+      targetRevision: 0.16.1
+      helm:
+        releaseName: metallb
+        valueFiles:
+          - $values/helm/values/metallb.yaml
+    - repoURL: https://github.com/Persona-Runtime/persona-platform.git
+      targetRevision: develop
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: metallb-system

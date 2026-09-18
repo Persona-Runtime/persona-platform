@@ -1,0 +1,41 @@
+# cert-manager CRD(argocd/cert-manager.yaml)가 먼저 설치돼 있어야 ClusterIssuer가 적용된다.
+#
+# email은 만들어내지 않는다 — ACME_EMAIL_PLACEHOLDER를 사용자가 실제 메일로 채운다.
+# Secret cloudflare-dns-token은 Git에 없다. CP에서 사용자가 직접 생성한다
+# (runbooks/public-ingress.md Gate 3 CP 적용 순서 참고).
+#
+# staging을 먼저 발급 성공까지 확인한 뒤 persona-app Gateway의 issuer annotation을
+# prod로 바꾸는 별도 커밋을 만든다(Let's Encrypt rate limit 회피, 주 5회/도메인).
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-staging
+spec:
+  acme:
+    server: https://acme-staging-v02.api.letsencrypt.org/directory
+    email: ACME_EMAIL_PLACEHOLDER
+    privateKeySecretRef:
+      name: letsencrypt-staging-key
+    solvers:
+      - dns01:
+          cloudflare:
+            apiTokenSecretRef:
+              name: cloudflare-dns-token
+              key: api-token
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: ACME_EMAIL_PLACEHOLDER
+    privateKeySecretRef:
+      name: letsencrypt-prod-key
+    solvers:
+      - dns01:
+          cloudflare:
+            apiTokenSecretRef:
+              name: cloudflare-dns-token
+              key: api-token

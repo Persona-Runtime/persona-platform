@@ -1,0 +1,15 @@
+# worker1·worker2에서만 ARP를 응답한다. speaker는 모든 노드에서 뜨지만(DaemonSet),
+# 이 advertisement가 광고 노드를 두 홈 워커로 좁힌다 — CP·향후 GPU 노드는 대상이 아니다.
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: traefik-l2
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+    - traefik-pool
+  nodeSelectors:
+    - matchLabels:
+        kubernetes.io/hostname: k8s-worker1
+    - matchLabels:
+        kubernetes.io/hostname: k8s-worker2

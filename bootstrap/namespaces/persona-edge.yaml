@@ -1,0 +1,12 @@
+# 공개 진입 경계 컴포넌트(DDNS, 이후 Gate 4의 oauth2-proxy)가 사는 namespace.
+# 앱 namespace(persona-app)와 분리해 두는 이유는 공개 인터넷과 맞닿는 컴포넌트의 삭제·prune
+# 범위를 가른다는 점에서 persona-data와 같은 원칙이다. restricted — privileged 권한이 필요 없다
+# (metallb-system과 다름).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: persona-edge
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: edge
+    pod-security.kubernetes.io/enforce: restricted

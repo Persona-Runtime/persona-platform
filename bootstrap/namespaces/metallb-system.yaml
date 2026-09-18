@@ -1,0 +1,12 @@
+# MetalLB speaker(DaemonSet)가 hostNetwork·NET_ADMIN을 쓴다. 이 두 권한은 PSA restricted가
+# 막는 항목이라, 이 네임스페이스만 privileged로 둔다. 앱 네임스페이스(persona-app 등)는
+# restricted를 유지한다 — 이 예외를 앱 쪽으로 번지게 하지 않는다.
+# 같은 예외 성격의 다른 사례: kube-system의 NFS CSI DaemonSet(기존, 이 파일 대상 아님).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: metallb-system
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: load-balancer
+    pod-security.kubernetes.io/enforce: privileged

@@ -1,0 +1,48 @@
+# cert-manager 1.21.2 — Let's Encrypt 인증서 자동 발급(DNS-01, Cloudflare).
+# 실제 배포는 argocd/cert-manager.yaml(CRD·컨트롤러)과 argocd/cert-manager-issuers.yaml
+# (ClusterIssuer) 순서로 사용자가 수동 Sync한다.
+
+crds:
+  enabled: true
+
+# gateway-shim이 Gateway listener의 hostname·certificateRefs를 보고 Certificate를
+# 자동 생성한다. 이게 꺼져 있으면 kustomize/overlays/prod/persona-app/gateway.yaml의
+# https listener가 인증서를 받지 못한다.
+config:
+  apiVersion: controller.config.cert-manager.io/v1alpha1
+  kind: ControllerConfiguration
+  enableGatewayAPI: true
+
+# 메인 컨트롤러는 webhook·cainjector와 달리 별도 섹션 없이 최상위 키를 쓴다
+# (차트 values 스키마 확인: helm show values jetstack/cert-manager --version 1.21.2).
+resources:
+  requests:
+    memory: 32Mi
+  limits:
+    memory: 64Mi
+affinity: &home_workers
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - k8s-worker1
+                - k8s-worker2
+
+webhook:
+  resources:
+    requests:
+      memory: 32Mi
+    limits:
+      memory: 64Mi
+  affinity: *home_workers
+
+cainjector:
+  resources:
+    requests:
+      memory: 32Mi
+    limits:
+      memory: 64Mi
+  affinity: *home_workers

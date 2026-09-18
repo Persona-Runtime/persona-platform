@@ -40,9 +40,14 @@ helm install traefik traefik/traefik --version <VER> \
 
 ## 현재 목표 정책
 
+2026-09-17 공개 진입 결정 이후: 이전엔 "public inbound 0 원칙, NodePort/LoadBalancer 금지"였다.
+이제 MetalLB가 있는 LoadBalancer 1개만 허용하고, NodePort 자동 할당은 `allocateLoadBalancerNodePorts:
+false`로 막는다. 자세한 값은 [공개 진입 런북](../../runbooks/public-ingress.md) Gate 3 참고.
+
 | 설정 | 값 | 이유 |
 | --- | --- | --- |
-| `service.spec.type` | **ClusterIP** | Tailnet Serve를 통해 접근 |
+| `service.spec.type` | **LoadBalancer** | MetalLB VIP(192.168.50.240)로 공유기 443 포워딩을 받는다. NodePort/ClusterIP였던 이전 값은 뒤집혔다 |
+| `service.spec.allocateLoadBalancerNodePorts` | **false** | LoadBalancer 타입이 자동으로 여는 서비스 포트별 NodePort를 막는다. 자동 NodePort는 0이지만, `externalTrafficPolicy: Local`이 별도로 여는 healthCheckNodePort 1개(LAN 전용, kube-proxy가 여는 정상 동작)는 이 설정으로 막히지 않는다 |
 | `providers.kubernetesGateway` | true | Gateway API만 사용 |
 | `providers.kubernetesIngress` / `kubernetesCRD` | false | 진입 경로를 하나로 고정 |
 | `gateway.enabled` | false | Gateway 리소스는 우리가 선언·버전관리 |

@@ -1,0 +1,16 @@
+# IPAddressPool·L2Advertisement 선언. metallb.yaml(CRD·컨트롤러)이 먼저 Sync돼 있어야 한다.
+# CRD가 없으면 이 Application의 Sync는 실패한다 — 순서를 사람이 지킨다(자동 Sync 없음).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: metallb-config
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/Persona-Runtime/persona-platform.git
+    targetRevision: develop
+    path: kustomize/overlays/prod/metallb-config
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: metallb-system

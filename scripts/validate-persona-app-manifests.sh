@@ -320,28 +320,52 @@ end
 # --- Traefik 라우팅 -------------------------------------------------------
 gw = resource(app, "Gateway", "persona-app")
 raise "[안전] Gateway는 Traefik이 처리한다" unless gw.dig("spec", "gatewayClassName") == "traefik"
-listener = gw.dig("spec", "listeners", 0)
-raise "[안전] listener는 Traefik HTTP entryPoint 8000이다" unless listener["name"] == "http" && listener["protocol"] == "HTTP" && listener["port"] == 8000
-raise "[안전] 확정되지 않은 접속 주소를 넣지 않는다" if listener.key?("hostname")
+listeners = gw.dig("spec", "listeners") || []
+raise "[안전] Gateway listener는 http·https 두 개여야 한다: #{listeners.length}개" unless listeners.length == 2
 
-route = resource(app, "HTTPRoute", "persona-app")
-rules = route.dig("spec", "rules")
-raise "[안전] 규칙은 /v1과 / 두 개다" unless rules.length == 2
+listener = listeners[0]
+raise "[안전] listener[0]은 Traefik HTTP entryPoint 8000이다" unless listener["name"] == "http" && listener["protocol"] == "HTTP" && listener["port"] == 8000
+raise "[안전] http listener에 확정되지 않은 접속 주소를 넣지 않는다" if listener.key?("hostname")
 
-api_rule = rules.find { |r| r.dig("matches", 0, "path", "value") == "/v1" } || raise("/v1 규칙이 없다")
-raise "[안전] /v1은 PathPrefix다" unless api_rule.dig("matches", 0, "path", "type") == "PathPrefix"
-raise "[안전] /v1은 Gateway로 간다" unless api_rule.dig("backendRefs", 0, "name") == "persona-gateway" && api_rule.dig("backendRefs", 0, "port") == 8080
+https_listener = listeners[1]
+raise "[안전] listener[1]은 https여야 한다" unless https_listener["name"] == "https" && https_listener["protocol"] == "HTTPS" && https_listener["port"] == 8443
+raise "[안전] https listener hostname이 공개 진입 도메인과 다르다" unless https_listener["hostname"] == "app.personaruntime.xyz"
+raise "[안전] https listener는 TLS를 종료해야 한다" unless https_listener.dig("tls", "mode") == "Terminate"
+raise "[안전] https listener certificateRef가 persona-app-tls가 아니다" unless https_listener.dig("tls", "certificateRefs", 0) == { "kind" => "Secret", "name" => "persona-app-tls" }
 
-web_rule = rules.find { |r| r.dig("matches", 0, "path", "value") == "/" } || raise("/ 규칙이 없다")
-raise "[안전] /는 PathPrefix다" unless web_rule.dig("matches", 0, "path", "type") == "PathPrefix"
-raise "[안전] /는 Web으로 간다" unless web_rule.dig("backendRefs", 0, "name") == "persona-web" && web_rule.dig("backendRefs", 0, "port") == 8080
+def check_v1_and_root_rules(rules, context)
+  raise "[안전] #{context}: 규칙은 /v1과 / 두 개다" unless rules.length == 2
 
-# Python API가 실제로 /v1/... 을 받는다. 접두사를 떼면 404가 된다.
-rules.each do |rule|
-  (rule["filters"] || []).each do |filter|
-    raise "[안전] 경로를 다시 쓰면 안 된다 — Python API가 /v1/...을 그대로 받는다: #{filter["type"]}" if filter["type"] == "URLRewrite"
+  api_rule = rules.find { |r| r.dig("matches", 0, "path", "value") == "/v1" } || raise("#{context}: /v1 규칙이 없다")
+  raise "[안전] #{context}: /v1은 PathPrefix다" unless api_rule.dig("matches", 0, "path", "type") == "PathPrefix"
+  raise "[안전] #{context}: /v1은 Gateway로 간다" unless api_rule.dig("backendRefs", 0, "name") == "persona-gateway" && api_rule.dig("backendRefs", 0, "port") == 8080
+
+  web_rule = rules.find { |r| r.dig("matches", 0, "path", "value") == "/" } || raise("#{context}: / 규칙이 없다")
+  raise "[안전] #{context}: /는 PathPrefix다" unless web_rule.dig("matches", 0, "path", "type") == "PathPrefix"
+  raise "[안전] #{context}: /는 Web으로 간다" unless web_rule.dig("backendRefs", 0, "name") == "persona-web" && web_rule.dig("backendRefs", 0, "port") == 8080
+
+  # Python API가 실제로 /v1/... 을 받는다. 접두사를 떼면 404가 된다.
+  rules.each do |rule|
+    (rule["filters"] || []).each do |filter|
+      raise "[안전] #{context}: 경로를 다시 쓰면 안 된다 — Python API가 /v1/...을 그대로 받는다: #{filter["type"]}" if filter["type"] == "URLRewrite"
+    end
   end
 end
+
+route = resource(app, "HTTPRoute", "persona-app")
+raise "[안전] 기존 HTTPRoute는 http listener에 붙어야 한다(Serve/IP 접근 유지)" unless route.dig("spec", "parentRefs", 0, "sectionName") == "http"
+raise "[안전] 기존 HTTPRoute에 hostname을 넣으면 Serve가 끊긴다" if route.dig("spec", "hostnames")
+check_v1_and_root_rules(route.dig("spec", "rules"), "persona-app HTTPRoute")
+
+public_route = resource(app, "HTTPRoute", "persona-app-public")
+raise "[안전] 공개 HTTPRoute는 https listener에 붙어야 한다" unless public_route.dig("spec", "parentRefs", 0, "sectionName") == "https"
+raise "[안전] 공개 HTTPRoute hostname이 공개 진입 도메인과 다르다" unless public_route.dig("spec", "hostnames") == ["app.personaruntime.xyz"]
+check_v1_and_root_rules(public_route.dig("spec", "rules"), "persona-app-public HTTPRoute")
+
+# NodePort/LoadBalancer 금지 검사(아래)는 db+migrate+app 렌더만 순회한다. Traefik Service는
+# Helm(bootstrap/traefik/values.yaml)로 렌더되는 별도 경로라 이 배열에 없다 — 2026-09-17
+# 결정으로 Traefik만 LoadBalancer가 됐지만, 그 값은 scripts/validate-edge-manifests.sh가 아니라
+# 이 스크립트가 다루는 범위 밖(helm template 검증)에서 확인한다.
 
 # --- Argo Application -----------------------------------------------------
 # persona-migrate Application 선언은 2026-09-16에 저장소에서 뺐다. 완료된 Job은 같은 선언을

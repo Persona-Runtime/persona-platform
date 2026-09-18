@@ -1,0 +1,47 @@
+# MetalLB 0.16.1 — L2 모드 LoadBalancer 구현체. Traefik Service 하나에만 VIP를 준다.
+# 실제 배포는 argocd/metallb.yaml(CRD)과 argocd/metallb-config.yaml(IPAddressPool·L2Advertisement)
+# 순서로 사용자가 수동 Sync한다. metallb.yaml 없이 metallb-config를 먼저 Sync하면 CRD가 없어 실패한다.
+
+# FRR(BGP) 모드는 쓰지 않는다. 집 공유기는 BGP를 못 하므로 L2(ARP)만 필요하다.
+frrk8s:
+  enabled: false
+speaker:
+  frr:
+    enabled: false
+  resources:
+    requests:
+      memory: 64Mi
+    limits:
+      memory: 128Mi
+  # speaker는 DaemonSet이라 기본적으로 전 노드에 뜬다. 지금은 CP·워커 2대뿐이지만,
+  # 향후 AWS GPU 노드가 Tailscale로 같은 클러스터에 조인하면 그 노드는 집 LAN 밖에 있어
+  # L2 ARP 광고 대상이 아니다. hostname 화이트리스트로 미리 제외해 둔다.
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: In
+                values:
+                  - k8s-cp
+                  - k8s-worker1
+                  - k8s-worker2
+
+controller:
+  resources:
+    requests:
+      memory: 64Mi
+    limits:
+      memory: 128Mi
+  # controller는 IP 할당만 하고 워커일 필요가 없지만, 일반 앱과 같은 배치 원칙(두 홈 워커)을 따른다.
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: In
+                values:
+                  - k8s-worker1
+                  - k8s-worker2
