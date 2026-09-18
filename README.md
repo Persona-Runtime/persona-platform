@@ -5,14 +5,14 @@ Persona Runtime의 Kubernetes·네트워크·스토리지·배포 선언과 운�
 
 ## 운영 구성
 
-2026-09-17 사용자 제공 조회·검증 결과 기준이다. 현재 작업 트리의 선언이 모두 적용된 상태는 아니다.
+2026-09-18 사용자 제공 조회·검증 결과 기준이다. 현재 작업 트리의 선언이 모두 적용된 상태는 아니다.
 
 | 구성          | 확인된 운영 상태                                 |
 | ------------- | ------------------------------------------------ |
 | 홈 환경       | Proxmox 한 대, Kubernetes CP 1대·워커 2대        |
 | 네트워크      | Tailscale, Cilium VXLAN + kube-proxy             |
 | 진입·웹       | Traefik 2개, Web 2개, Gateway 1개                |
-| PostgreSQL    | CNPG 관리, worker1에 DB 1개·local-path 20Gi      |
+| PostgreSQL    | CNPG 관리, worker1 primary·worker2 replica, local-path 20Gi씩 |
 | CNPG Operator | CP 배치·리더 인계·초기 안정성 확인               |
 | 관측          | Prometheus·Grafana, DB PodMonitor Target UP 확인 |
 | 공유 저장소   | 별도 NFS VM과 nfs-shared. DB 이전 용도가 아님    |
@@ -92,7 +92,13 @@ flowchart TB
 
 - DB 백업·격리 복원과 단일 worker1 종료·재기동 기준선 검증을 마쳤다.
 - 독립 PodMonitor는 Argo로 배포했고 CNPG 메트릭 수집을 확인했다.
-- 작업 트리에는 DB 2인스턴스·필수 워커 분산 선언을 준비 중이다. **마지막 운영 확인은 DB 1개다.**
+- worker1 primary·worker2 replica 2인스턴스 비동기 복제를 구성했다. primary·replica CONNECT,
+  스트리밍 복제 상태(전송·flush·replay LSN 일치), Prometheus 두 Target UP을 확인했다.
+- 복제 구성 중 `cnpg_metrics_exporter` 계정에 `persona_app` CONNECT 권한이 없어 지표 수집이
+  실패한 것을 발견·해결했다(운영 primary에 적용, 복제로 replica에도 반영). 재현 절차는
+  `db/grants/persona_cnpg_monitoring.sql` — 접속 방법·적용 순서·복원 revision 주의사항까지
+  그 파일 자체의 주석에 있다(추적 대상이라 이 checkout만으로도 확인 가능). **신규 구축·논리
+  복원 뒤에도 이 권한이 남는지는 실제로 다시 구축·복원해 보기 전까지 미검증이다.**
 - 복제본 초기 추격·승격·쓰기 유실 검증은 아직 완료하지 않았다.
 
 복구 실험에서 확인한 기존 캐릭터 ID 보존을 전체 데이터 무결성이나 RPO 0 보장으로 확대하지 않는다.
