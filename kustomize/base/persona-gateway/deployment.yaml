@@ -63,6 +63,10 @@ spec:
             # 비밀이 아니다. pool 대기와 readiness의 SQL 실행을 합친 예산이다.
             - name: PERSONA_DB_TIMEOUT_SECONDS
               value: "2"
+            # persona-embedding Service의 ClusterIP DNS 이름. config.py가 읽는 실제
+            # 환경 변수명은 PERSONA_EMBEDDING_URL이다(EMBEDDING_URL이 아니다).
+            - name: PERSONA_EMBEDDING_URL
+              value: http://persona-embedding.persona-app.svc.cluster.local:8081
           envFrom:
             # DATABASE_URL(runtime 계정)과 정적 토큰·서명 키가 들어 있다.
             # migrator 자격증명은 여기 없다 — migration Job만 그것을 본다.

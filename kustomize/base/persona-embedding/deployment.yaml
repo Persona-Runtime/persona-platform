@@ -1,0 +1,115 @@
+# 임베딩 서비스. sentence-transformers 모델을 프로세스에 한 번 올려 두고 gateway의
+# 색인 요청(§4-4)만 받는다 — 외부에 직접 열지 않는다.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: persona-embedding
+  labels:
+    app.kubernetes.io/name: persona-embedding
+    app.kubernetes.io/component: embedding
+    app.kubernetes.io/part-of: persona-platform
+spec:
+  # 모델이 프로세스 메모리에 있다 — 여러 대를 두면 그만큼 중복 로딩된다. 한 대로 시작한다.
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: persona-embedding
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: persona-embedding
+        app.kubernetes.io/component: embedding
+        app.kubernetes.io/part-of: persona-platform
+    spec:
+      # 이 앱은 Kubernetes API를 호출하지 않는다.
+      automountServiceAccountToken: false
+      # private GHCR package다. 이 Secret은 Git 밖에서 만들어 두어야 한다.
+      imagePullSecrets:
+        - name: persona-app-ghcr
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      # CP와 향후 GPU 노드에는 배치하지 않는다 — gateway와 같은 선언.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - k8s-worker1
+                      - k8s-worker2
+      containers:
+        - name: embedding
+          # 이번 라운드는 GHCR push를 하지 않는다(§5·§7) — 실제 push 이후 이 자리표시자
+          # 다이제스트를 검증된 값으로 교체해야 한다.
+          image: ghcr.io/persona-runtime/persona-embedding-service@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8081
+              protocol: TCP
+          env:
+            # 코드 기본값과 같은 값을 명시해 둔다 — gateway의 PERSONA_DB_TIMEOUT_SECONDS와
+            # 같은 이유(운영 값을 코드 기본값에만 의존하지 않고 여기서도 보이게).
+            - name: OMP_NUM_THREADS
+              value: "2"
+          resources:
+            # 잠정값 — 실측 후 조정. CPU 추론이라 요청보다 한도를 넉넉히 둔다.
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "1"
+              memory: 1536Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+          # 모델 로딩이 끝나기 전에도 프로세스는 응답한다 — liveness가 로딩 시간 동안
+          # 파드를 죽이면 복구 안 되는 재시작 루프에 빠진다. 로딩 대기는 startupProbe가
+          # 맡는다(잠정값 — 실측 후 조정, periodSeconds 3 * failureThreshold 40 = 최대 120초).
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 3
+            timeoutSeconds: 1
+            failureThreshold: 40
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 1
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 1
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        # read-only rootfs에서 필요한 유일한 쓰기 경로다. 모델 자체는 이미지에 구워
+        # 넣었으므로(HF_HOME=/app/hf-cache) 여기엔 캐시 lock 파일 등만 남을 수 있다.
+        # Dockerfile이 XDG_CACHE_HOME·TORCH_HOME·TMPDIR을 전부 여기로 몰아뒀으니
+        # 무제한 emptyDir 대신 상한을 둔다.
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi

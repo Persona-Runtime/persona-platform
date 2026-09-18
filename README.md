@@ -100,6 +100,9 @@ flowchart TB
   그 파일 자체의 주석에 있다(추적 대상이라 이 checkout만으로도 확인 가능). **신규 구축·논리
   복원 뒤에도 이 권한이 남는지는 실제로 다시 구축·복원해 보기 전까지 미검증이다.**
 - 복제본 초기 추격·승격·쓰기 유실 검증은 아직 완료하지 않았다.
+- `kustomize/base/persona-embedding/`은 선언만 돼 있고 `overlays/prod/persona-app`에서는
+  빠져 있다 — 이미지를 아직 GHCR에 push하지 않아 digest가 자리표시자다. push·digest 확정
+  뒤 overlay의 `kustomization.yaml`에 그 리소스 줄을 되돌려야 한다.
 
 복구 실험에서 확인한 기존 캐릭터 ID 보존을 전체 데이터 무결성이나 RPO 0 보장으로 확대하지 않는다.
 Operator의 CP 배치는 일반 앱 CP 배치 금지 원칙의 제한적 예외다.
