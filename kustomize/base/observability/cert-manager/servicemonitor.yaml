@@ -1,0 +1,26 @@
+# Gate 4 §5 — cert-manager 컨트롤러 메트릭 수집(인증서 만료 알림의 데이터 소스).
+# helm template로 확인: Service "cert-manager"(app.kubernetes.io/component: controller)가
+# 포트 이름 http-metrics(9402)를 이미 노출한다 — cainjector·webhook의 Service는 대상이
+# 아니다(인증서 만료 메트릭은 컨트롤러가 낸다).
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: cert-manager
+  labels:
+    release: monitoring-stack
+    app.kubernetes.io/part-of: persona-platform
+spec:
+  namespaceSelector:
+    matchNames:
+      - cert-manager
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cert-manager
+      app.kubernetes.io/instance: cert-manager
+      app.kubernetes.io/component: controller
+  endpoints:
+    - port: http-metrics
+      path: /metrics
+      scheme: http
+      interval: 30s
+      scrapeTimeout: 10s

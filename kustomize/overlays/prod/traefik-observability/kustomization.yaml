@@ -1,0 +1,9 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# traefik-networkpolicy와 같은 이유로 Argo Application을 두지 않는다 — Traefik 본체가
+# Argo 밖(helm --create-namespace)이라 이 namespace의 부가 리소스도 같은 방식(CP가
+# kubectl apply -k로 수동 적용)으로 다룬다.
+namespace: traefik
+resources:
+  - ../../../base/observability/traefik
+  - ../../../base/observability/alerts

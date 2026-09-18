@@ -5,3 +5,4 @@ kind: Kustomization
 namespace: cert-manager
 resources:
   - ../../../base/cert-manager-issuers
+  - ../../../base/observability/cert-manager
