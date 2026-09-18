@@ -1,0 +1,80 @@
+# Gate 4 — HTTPRoute의 ExtensionRef가 참조하는 Traefik Middleware들. ExtensionRef는
+# LocalObjectReference라 네임스페이스를 못 넘긴다 — 그래서 HTTPRoute와 같은
+# persona-app 네임스페이스에 둔다(oauth2-proxy Service 자체는 persona-edge에 있고,
+# forwardAuth.address는 URL 문자열이라 네임스페이스 제약과 무관하다).
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: oauth-forward
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: application
+spec:
+  forwardAuth:
+    # 루트 경로다 — 인증되면 --upstream=static://202가 그대로 202를 응답하고, 아니면
+    # GitHub 로그인으로 302. /oauth2/auth가 아니다(그건 콜백 경로 전용).
+    address: http://oauth2-proxy.persona-edge.svc:4180/
+    trustForwardHeader: true
+    authResponseHeaders:
+      - X-Auth-Request-User
+      - X-Auth-Request-Email
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: rate-limit
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: application
+spec:
+  rateLimit:
+    average: 20
+    burst: 50
+    sourceCriterion:
+      ipStrategy:
+        # externalTrafficPolicy: Local이라 SNAT 없이 실제 클라이언트 IP가 온다 —
+        # depth 0은 X-Forwarded-For를 안 쓰고 연결 자체의 IP를 그대로 쓴다는 뜻이다.
+        depth: 0
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: security-headers
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: application
+spec:
+  headers:
+    stsSeconds: 31536000
+    stsIncludeSubdomains: true
+    contentTypeNosniff: true
+    referrerPolicy: same-origin
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: body-limit
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: application
+spec:
+  buffering:
+    # §4-6 합계 상한 500,000자(≈ 1 MiB UTF-8)의 2배 여유.
+    maxRequestBodyBytes: 2097152
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: strip-auth-header
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: application
+spec:
+  headers:
+    # 내부/Serve 경로(httproute.yaml)는 oauth-forward를 안 거친다 — 클라이언트가 이
+    # 헤더를 직접 채워 보내도 gateway 코드가 신뢰하면 안 된다. gateway 쪽
+    # PERSONA_FORWARD_AUTH_ENABLED 플래그(기본 꺼짐)가 1차 방어, 이 Middleware가
+    # 그 경로에서 헤더 자체를 지우는 2차 방어다.
+    customRequestHeaders:
+      X-Auth-Request-User: ""
+      X-Auth-Request-Email: ""

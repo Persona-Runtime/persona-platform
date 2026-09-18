@@ -9,3 +9,4 @@ resources:
   - gateway.yaml
   - httproute.yaml
   - httproute-public.yaml
+  - middlewares.yaml
