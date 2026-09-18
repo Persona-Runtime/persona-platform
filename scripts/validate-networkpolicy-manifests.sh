@@ -106,6 +106,15 @@ raise "[안전] 복제 정책은 Ingress·Egress 둘 다 있어야 한다(양방
 raise "[안전] 복제 ingress가 같은 Cluster Pod(cnpg.io/cluster: persona-db)를 셀렉트하지 않는다" unless replication.dig("spec", "ingress", 0, "from", 0, "podSelector", "matchLabels") == { "cnpg.io/cluster" => "persona-db" }
 raise "[안전] 복제 포트가 5432가 아니다" unless rule_ports(replication.dig("spec", "ingress", 0)) == [["TCP", 5432]]
 
+# CNPG instance manager가 Cluster status·Secret/ConfigMap·승격 판단·readiness에
+# kube-apiserver를 직접 호출한다(cnpg-system:8000 — operator↔instance manager 상태
+# 포트 — 와는 별개 경로다). 이게 없으면 지금 운영 중인 CNPG 2 인스턴스의 failover가
+# 불가능해진다(리뷰 차단 사유).
+db_apiserver = resource(data, "CiliumNetworkPolicy", "allow-egress-kube-apiserver")
+raise "[안전] persona-db endpointSelector가 cnpg.io/cluster: persona-db가 아니다" unless db_apiserver.dig("spec", "endpointSelector", "matchLabels") == { "cnpg.io/cluster" => "persona-db" }
+raise "[안전] persona-db의 kube-apiserver egress가 예약 엔티티 kube-apiserver를 쓰지 않는다(하드코딩 IP는 노드 교체 때 끊긴다)" unless db_apiserver.dig("spec", "egress", 0, "toEntities") == ["kube-apiserver"]
+raise "[안전] persona-db의 kube-apiserver egress 포트가 6443이 아니다" unless db_apiserver.dig("spec", "egress", 0, "toPorts", 0, "ports", 0, "port") == "6443"
+
 # --- persona-edge ----------------------------------------------------------------
 edge = load(edge_path)
 check_default_deny(edge, "persona-edge")

@@ -1,0 +1,36 @@
+# Gate 4 §3 리뷰 차단 해소 — CNPG의 instance manager(Postgres 컨테이너 안에서 같이
+# 도는 프로세스)가 Cluster status 갱신·Secret/ConfigMap 읽기·primary 승격 판단·
+# readiness 보고를 위해 kube-apiserver를 **직접** 호출한다. allow-db-egress(DNS 53·
+# cnpg-system 8000)와는 별개 경로다 — 8000은 operator↔instance manager 상태 포트이고,
+# 이건 instance manager가 API 서버 자체에 붙는 경로다. 이게 없으면 지금 돌고 있는
+# CNPG 2 인스턴스의 readiness가 떨어지고 failover가 불가능해진다.
+#
+# traefik/network-policy-apiserver.yaml과 같은 이유로 표준 NetworkPolicy가 아니라
+# CiliumNetworkPolicy를 쓴다 — kubernetes.default.svc의 ClusterIP는 알지만 실제
+# 엔드포인트는 컨트롤플레인 노드 IP이고(Pod가 아니라서 podSelector로 못 고른다), 그
+# IP를 ipBlock에 하드코딩하면 노드 교체·재설치 때 조용히 끊긴다. Cilium 예약 엔티티
+# kube-apiserver를 쓴다 — 근거: https://docs.cilium.io/en/latest/security/policy/kubernetes/
+# (toEntities/fromEntities로 kube-apiserver 등 예약 엔티티를 직접 선택할 수 있다고 명시).
+#
+# 알려진 함정(cilium/cilium#37298 등): identity restore 유예 기간이 끝난 뒤 연결이
+# 끊기는 사례가 보고돼 있다 — 클러스터 없이는 여기서 검증 못 한다. persona-data는
+# 이미 운영 중인 DB에 영향을 주므로 다른 네임스페이스 정책을 먼저 확인한 뒤 맨
+# 마지막에 적용하고 5분간 관찰한다(런북 Gate 4-2·4-6 참고).
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-egress-kube-apiserver
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: networkpolicy
+spec:
+  endpointSelector:
+    matchLabels:
+      cnpg.io/cluster: persona-db
+  egress:
+    - toEntities:
+        - kube-apiserver
+      toPorts:
+        - ports:
+            - port: "6443"
+              protocol: TCP
