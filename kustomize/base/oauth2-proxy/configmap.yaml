@@ -5,4 +5,4 @@ kind: ConfigMap
 metadata:
   name: oauth2-proxy-config
 data:
-  GITHUB_ALLOWED_USERS: GITHUB_USERS_PLACEHOLDER
+  GITHUB_ALLOWED_USERS: iwannagotobed

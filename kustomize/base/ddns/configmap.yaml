@@ -5,7 +5,7 @@ kind: ConfigMap
 metadata:
   name: ddns-config
 data:
-  ZONE_ID: ZONE_ID_PLACEHOLDER
+  ZONE_ID: 677257922f143f77147c3d254e9c728b
   RECORD_NAME: app.personaruntime.xyz
   # curlimages/curl에는 jq가 없다(feedback.md가 이 이미지를 digest로 고정하라고 지시했고,
   # 이미지에 도구를 추가로 심지 않는다). Cloudflare 응답의 "id"·"content" 필드를 grep+cut으로
