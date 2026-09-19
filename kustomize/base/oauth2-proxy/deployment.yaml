@@ -63,6 +63,12 @@ spec:
             - --redirect-url=https://app.personaruntime.xyz/oauth2/callback
             - --skip-provider-button=true
             - --email-domain=*
+            # reverse-proxy=true라 X-Forwarded-* 헤더를 신뢰하는데, 이 헤더는 배후(Traefik)가
+            # 보낸 것만 믿어야 한다 — 이 값을 안 주면 Pod CIDR 전체가 아니라 어디서 와도 그
+            # 헤더를 신뢰해 클라이언트가 자신의 IP를 위조할 수 있다는 경고가 뜬다(실측
+            # WARNING). 이 클러스터의 실제 Pod CIDR(10.244.0.0/16, 실측 Pod IP 10.244.1.117
+            # 확인)만 배후로 신뢰한다.
+            - --trusted-proxy-ip=10.244.0.0/16
           ports:
             - name: http
               containerPort: 4180

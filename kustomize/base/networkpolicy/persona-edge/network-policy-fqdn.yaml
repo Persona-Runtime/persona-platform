@@ -23,6 +23,19 @@ spec:
         - ports:
             - port: "443"
               protocol: TCP
+    # toFQDNs가 동작하려면 DNS 질의를 Cilium DNS 프록시가 봐야 한다(L7 dns 규칙).
+    # 일반 NetworkPolicy의 DNS 허용(allow-edge-egress-dns)만으로는 FQDN→IP 매핑이 안 생긴다.
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: ANY
+          rules:
+            dns:
+              - matchPattern: "*"
 ---
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
@@ -44,3 +57,16 @@ spec:
         - ports:
             - port: "443"
               protocol: TCP
+    # toFQDNs가 동작하려면 DNS 질의를 Cilium DNS 프록시가 봐야 한다(L7 dns 규칙).
+    # 일반 NetworkPolicy의 DNS 허용(allow-edge-egress-dns)만으로는 FQDN→IP 매핑이 안 생긴다.
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: ANY
+          rules:
+            dns:
+              - matchPattern: "*"
