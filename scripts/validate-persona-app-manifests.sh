@@ -62,7 +62,8 @@ ruby -ryaml - \
   "$repo_dir/bootstrap/namespaces/persona-app.yaml" \
   "$repo_dir/db/grants/persona_minimal.sql" \
   "$repo_dir/bootstrap/traefik/values.yaml" \
-  "$repo_dir/kustomize/base/persona-migrate/kustomization.yaml" <<'RUBY'
+  "$repo_dir/kustomize/base/persona-migrate/kustomization.yaml" \
+  "$repo_dir/argocd" <<'RUBY'
 # encoding: utf-8
 #
 # 로케일이 UTF-8이 아닌 환경(cron, 다른 셸 설정 등)에서 실행하면 Ruby가 이 heredoc 소스를
@@ -74,7 +75,7 @@ Encoding.default_external = Encoding::UTF_8
 db_path, migrate_path, app_path, ingress_path,
   app_db, app_apps, app_ingress, app_app_netpol, app_db_netpol,
   ns_data_path, ns_app_path, grants_path, traefik_values_path,
-  migrate_base_path = ARGV
+  migrate_base_path, argocd_dir = ARGV
 
 GATEWAY_IMAGE = "ghcr.io/persona-runtime/persona-minimal-api@sha256:922ae043feaa1a893336816c38ac17f448aa96c44ba06983652181784f52c2f6"
 
@@ -472,6 +473,21 @@ raise "[안전] persona-app-ingress 렌더에 strip-auth-header가 있으면 안
   raise "[안전] #{name}: 대상 namespace가 다르다" unless spec.dig("destination", "namespace") == namespace
   # 순서는 사람이 단계별로 Sync해서 만든다. 자동 Sync를 켜면 그 순서가 사라진다.
   raise "[안전] #{name}: 자동 Sync를 켜면 안 된다" if spec.key?("syncPolicy")
+end
+
+# 위 루프는 이름을 아는 Application만 본다. 여기서는 argocd/ 아래 파일 전부를 훑어
+# syncPolicy.automated만 좁혀 확인한다 — csi-driver-nfs·monitoring-stack·
+# persona-nfs-storage처럼 이 스크립트가 이름으로 다루지 않는 Application도 걸리고,
+# 이름 목록에 새 Application을 추가하는 걸 잊어도 이 검사만은 계속 걸린다는 안전망이다.
+# syncPolicy 키 자체(syncOptions 등)는 여기서 막지 않는다 — automated(자동 Sync·prune)만
+# 금지 대상이다.
+Dir.glob(File.join(argocd_dir, "*.yaml")).sort.each do |path|
+  application = YAML.load_file(path)
+  next unless application.is_a?(Hash) && application["kind"] == "Application"
+
+  name = application.dig("metadata", "name") || File.basename(path, ".yaml")
+  automated = application.dig("spec", "syncPolicy", "automated")
+  raise "[안전] #{name}(#{path}): syncPolicy.automated를 켜면 안 된다(자동 Sync·prune 금지)" unless automated.nil?
 end
 
 # --- PriorityClass --------------------------------------------------------
