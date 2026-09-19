@@ -16,16 +16,20 @@ run "closed_ingress_baseline" {
     error_message = "No inbound access is permitted without explicit peer configuration."
   }
   assert {
-    condition     = aws_instance.gpu.instance_type == "g6.xlarge" && aws_instance.gpu.associate_public_ip_address
-    error_message = "Use one g6.xlarge with public IPv4."
+    condition     = aws_instance.gpu.instance_type == "g6.xlarge" && aws_instance.gpu.tags["Name"] == "persona-gpu-01" && aws_instance.gpu.associate_public_ip_address
+    error_message = "Use the reviewed persona-gpu-01 g6.xlarge baseline with public IPv4."
   }
   assert {
-    condition     = aws_instance.gpu.root_block_device[0].encrypted && aws_instance.gpu.root_block_device[0].volume_size == 100 && aws_instance.gpu.metadata_options[0].http_tokens == "required"
-    error_message = "Encrypted 100 GiB disk and IMDSv2 are required."
+    condition     = aws_instance.gpu.root_block_device[0].volume_type == "gp3" && aws_instance.gpu.root_block_device[0].volume_size == 100 && aws_instance.gpu.root_block_device[0].iops == 3000 && aws_instance.gpu.root_block_device[0].throughput == 125 && aws_instance.gpu.root_block_device[0].encrypted && aws_instance.gpu.metadata_options[0].http_tokens == "required"
+    error_message = "Encrypted gp3 100 GiB/3000 IOPS/125 MiBps and IMDSv2 are required."
   }
   assert {
     condition     = aws_route.internet.destination_cidr_block == "0.0.0.0/0" && aws_subnet.gpu.cidr_block == "10.80.0.0/24"
     error_message = "Public subnet and default route must be configured."
+  }
+  assert {
+    condition     = aws_instance.gpu.user_data == null
+    error_message = "Do not place bootstrap tokens in user data."
   }
 }
 

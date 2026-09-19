@@ -1,3 +1,11 @@
+locals {
+  # 첫 GPU 실험은 장비 차이까지 변수로 만들지 않는다. 이 세 값이 바뀌면 기존
+  # 성능 기준선과 비용 전제가 함께 달라지므로 별도 결정과 새 측정이 필요하다.
+  gpu_node_name       = "persona-gpu-01"
+  gpu_instance_type   = "g6.xlarge"
+  gpu_root_volume_gib = 100
+}
+
 data "aws_ami" "ubuntu" {
   owners = ["099720109477"] # Canonical, commercial AWS partition.
 
@@ -100,7 +108,7 @@ resource "aws_key_pair" "bootstrap" {
 
 resource "aws_instance" "gpu" {
   ami                                  = data.aws_ami.ubuntu.id
-  instance_type                        = "g6.xlarge"
+  instance_type                        = local.gpu_instance_type
   subnet_id                            = aws_subnet.gpu.id
   associate_public_ip_address          = true
   vpc_security_group_ids               = [aws_security_group.gpu.id]
@@ -116,7 +124,9 @@ resource "aws_instance" "gpu" {
 
   root_block_device {
     volume_type           = "gp3"
-    volume_size           = 100
+    volume_size           = local.gpu_root_volume_gib
+    iops                  = 3000
+    throughput            = 125
     encrypted             = true
     delete_on_termination = true
   }
@@ -130,5 +140,5 @@ resource "aws_instance" "gpu" {
   }
 
   depends_on = [aws_route.internet, aws_route_table_association.gpu]
-  tags       = { Name = "persona-gpu-01" }
+  tags       = { Name = local.gpu_node_name }
 }

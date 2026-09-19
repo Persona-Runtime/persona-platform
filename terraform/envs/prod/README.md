@@ -1,12 +1,12 @@
 # AWS GPU 랩 기반 — 생성 전 준비
 
-2026-09-09: Terraform 작성 단계. AWS 리소스 생성·실제 plan·K8s 조인 완료가 아니다.
+2026-09-19: Terraform·노드 Join 계획 작성 단계. AWS 리소스 생성·실제 plan·K8s 조인 완료가 아니다.
 기존 `envs/prod` 경로를 사용하지만 상용 HA 환경이 아닌 단일 GPU 실험 환경이다.
 
 ## 만드는 범위
 
 - 서울 전용 VPC, 퍼블릭 서브넷 하나(/16 VPC의 첫 /24), Internet Gateway, 기본 경로.
-- On-Demand `g6.xlarge` 한 대(L4 24GB), 암호화 gp3 루트 디스크 100 GiB.
+- On-Demand `g6.xlarge` 한 대(4 vCPU·16 GiB RAM·NVIDIA L4 1장, EC2 사양표 기준 가용 GPU 메모리 22 GiB), 암호화 gp3 루트 디스크 100 GiB·3000 IOPS·125 MiB/s.
 - EC2에만 자동 할당 퍼블릭 IPv4. NAT Gateway, EIP, Load Balancer는 만들지 않는다.
 - IMDSv2 필수, hop limit 1. AWS API가 필요 없는 호스트이므로 instance IAM role/profile은 만들지 않는다.
 - 초기 SSH용 공개 키만 등록. 개인 키·AWS 키·Tailscale 인증 키·kubeadm 토큰은 코드/state/user-data에 넣지 않는다.
@@ -20,6 +20,10 @@ GPU 드라이버, containerd, Tailscale, kubelet, Cilium 설치 및 노드 조�
 `bootstrap_ssh_cidr=null`이면 새 서버에 SSH 접속할 수 없다. 처음 생성할 때는 본인의 `/32`를 설정한다.
 Tailscale 설치·ACL·호스트 방화벽·실제 관리 접속을 확인한 뒤 null로 되돌려 공개 SSH만 제거한다.
 Tailscale 앱 접근 통제는 SG가 아닌 tailnet 정책·호스트/CNI 정책도 필요하다.
+
+확정 사양, 단계별 중단 조건, `kubeadm join`과 원복 경계는
+[vLLM 노드 사양·Join 계획](vllm-node-join-plan.md)에 둔다. 이 Terraform은 호스트까지만
+만들며 Join token·Tailscale auth key·모델 토큰을 `user_data`나 state에 넣지 않는다.
 
 ## 생성 전에 반드시 확인
 
@@ -48,7 +52,7 @@ terraform test
 `terraform.tfvars.example`을 참고해 로컬 입력을 작성하되 예시는 그대로 배포하지 않는다.
 실제 AMI/AZ/계정/경로와 SSH 접속은 mock 테스트로 검증되지 않는다.
 
-2026-09-09 검증: Terraform 1.14.5 / AWS provider 6.63.0, fmt·validate 통과, mock plan 6건 통과.
+2026-09-19 검증: Terraform 1.14.5 / AWS provider 6.63.0, fmt·validate 통과, mock plan 6건 통과.
 로컬 샌드박스의 provider 프로세스 통신 제한으로 첫 validate/test가 실패했고, 제한 밖에서 동일한 비변경 검사를 재실행해 통과했다.
 실제 AWS plan/apply·할당량 API 조회·접속·부팅·GPU 테스트는 실행하지 않았다.
 
@@ -71,6 +75,7 @@ Tailscale UDP 인바운드를 열지 않아도 연결될 수 있지만 direct는
 API 주소·인증서 SAN·노드/터널 주소·반환 경로·MTU를 확인한 뒤 조인한다. 홈 노드 재조인·IP 변경은 별도 계획/승인 대상이다.
 
 서빙 기준 모델은 `Qwen/Qwen3-4B-Instruct-2507`, BF16, 입력+출력 최대 4096 토큰, 단일 GPU/vLLM이다.
+8192는 이 기준선이 통과한 뒤 별도로 비교한다. 둘을 한 실행의 자동 가변 상한으로 섞지 않는다.
 모델 commit과 vLLM 이미지 digest는 실제 배포 전에 고정한다. 한국어 품질·처리량·VRAM은 미측정이다.
 
 ## 근거
@@ -81,3 +86,6 @@ API 주소·인증서 SAN·노드/터널 주소·반환 경로·MTU를 확인한
 - [Tailscale 방화벽 포트](https://tailscale.com/docs/reference/faq/firewall-ports)
 - [EC2 stop/terminate 수명주기](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-instance-lifecycle.html)
 - [Qwen 공식 모델](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507)
+- [AWS G6 사양](https://docs.aws.amazon.com/ec2/latest/instancetypes/ac.html)
+- [Kubernetes kubeadm join](https://kubernetes.io/docs/reference/setup-tools/kubeadm/kubeadm-join/)
+- [Cilium VXLAN 경로 요구사항](https://docs.cilium.io/en/stable/network/concepts/routing/)
