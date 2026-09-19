@@ -1,7 +1,7 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 # namespace는 bootstrap/namespaces/persona-data.yaml이 소유한다.
+# NetworkPolicy는 persona-db-netpol로 분리했다(Sync 통제, 2026-09-19) — argocd/README.md 참고.
 namespace: persona-data
 resources:
   - ../../../base/persona-db
-  - ../../../base/networkpolicy/persona-data

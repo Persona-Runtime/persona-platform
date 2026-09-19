@@ -1,0 +1,22 @@
+# persona-data 네임스페이스 NetworkPolicy 전용. Sync 통제(2026-09-19)로 persona-db
+# (DB Cluster)에서 분리했다 — argocd/README.md 참고. 다른 네임스페이스 정책을 먼저
+# 확인·적용한 뒤 맨 마지막에 Sync한다(런북 Gate 4-2·4-6 — 이미 운영 중인 DB에 영향).
+#
+# syncPolicy를 두지 않는다. 자동 Sync도, 자동 prune도 없다.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: persona-db-netpol
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: networkpolicy
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/Persona-Runtime/persona-platform.git
+    targetRevision: develop
+    path: kustomize/overlays/prod/persona-db-netpol
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: persona-data

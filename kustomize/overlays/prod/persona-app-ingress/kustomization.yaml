@@ -1,0 +1,11 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# 인터넷 진입 전용(httproute-public.yaml + 그 4개 Middleware). Gateway·Web 워크로드와
+# 내부 경로는 persona-app이, NetworkPolicy는 persona-app-netpol이 관리한다(Sync 통제,
+# 2026-09-19 — 한 Application이 여러 종류의 변경을 한꺼번에 반영하지 않게 하려는 것).
+# namespace는 bootstrap/namespaces/persona-app.yaml이 소유한다(persona-app과 같은
+# 네임스페이스, 다른 Application).
+namespace: persona-app
+resources:
+  - httproute-public.yaml
+  - middlewares.yaml
