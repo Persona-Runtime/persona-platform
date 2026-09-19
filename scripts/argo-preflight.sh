@@ -9,7 +9,9 @@ set -eu
 #
 # 사용법:
 #   scripts/argo-preflight.sh <app>     # persona-app, persona-app-ingress, persona-app-netpol,
-#                                        # persona-db, persona-db-netpol, persona-edge 중 하나
+#                                        # persona-db, persona-db-netpol, persona-edge,
+#                                        # metallb, metallb-config, cert-manager,
+#                                        # cert-manager-issuers 중 하나
 #   scripts/argo-preflight.sh --self-test
 
 repo_dir=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
@@ -48,6 +50,49 @@ app_namespace() {
   ' "$repo_dir/argocd/$1.yaml"
 }
 
+# metallb·cert-manager는 spec.source(단수)가 아니라 spec.sources(복수, Helm 차트 + 이
+# 저장소의 값 파일 source)를 쓴다 — kustomize path가 아예 없다. 아래 app_helm_* 함수들이
+# 그 차트 source에서 render_at_sha가 helm template에 필요한 값을 뽑는다.
+app_is_multi_source() {
+  ruby -ryaml -e '
+    app = YAML.load_file(ARGV[0])
+    puts app.dig("spec", "sources").nil? ? "false" : "true"
+  ' "$repo_dir/argocd/$1.yaml"
+}
+
+app_helm_chart_source() {
+  # 인자로 받은 필드(field) 하나만 출력한다 — sources 배열에서 "chart" 키를 가진
+  # 항목(Helm 차트 source, 값 파일만 가리키는 source와 구분)을 찾아 그 필드를 읽는다.
+  ruby -ryaml -e '
+    app = YAML.load_file(ARGV[0])
+    field = ARGV[1]
+    chart_source = app.fetch("spec").fetch("sources").find { |s| s.key?("chart") } ||
+      abort("Helm 차트 source를 못 찾았다")
+    value = case field
+            when "repoURL"        then chart_source["repoURL"]
+            when "chart"          then chart_source["chart"]
+            when "targetRevision" then chart_source["targetRevision"]
+            when "releaseName"    then chart_source.dig("helm", "releaseName")
+            else abort("알 수 없는 필드: #{field}")
+            end
+    abort "#{field}가 없다" if value.nil?
+    puts value
+  ' "$repo_dir/argocd/$1.yaml" "$2"
+}
+
+# $values/helm/values/<name>.yaml 형태의 valueFiles 경로에서 "$values/" 접두사를 뺀,
+# 이 저장소 루트 기준 상대 경로를 줄바꿈으로 하나씩 출력한다.
+app_helm_value_files() {
+  ruby -ryaml -e '
+    app = YAML.load_file(ARGV[0])
+    chart_source = app.fetch("spec").fetch("sources").find { |s| s.key?("chart") } ||
+      abort("Helm 차트 source를 못 찾았다")
+    files = chart_source.dig("helm", "valueFiles") || []
+    abort "helm.valueFiles가 없다" if files.empty?
+    files.each { |f| puts f.sub(%r{\A\$values/}, "") }
+  ' "$repo_dir/argocd/$1.yaml"
+}
+
 # --- 1. 승인 SHA -------------------------------------------------------------
 record_approved_sha() {
   app="$1"
@@ -74,11 +119,38 @@ previous_approved_sha() {
 render_at_sha() {
   app="$1"
   sha="$2"
-  source_path=$(app_source_path "$app")
   worktree_dir=$(mktemp -d "${TMPDIR:-/tmp}/argo-preflight-XXXXXX")
   trap 'git -C "'"$repo_dir"'" worktree remove --force "'"$worktree_dir"'" > /dev/null 2>&1 || true' EXIT HUP INT TERM
   git -C "$repo_dir" worktree add --detach --quiet "$worktree_dir" "$sha"
-  kubectl kustomize "$worktree_dir/$source_path"
+
+  if [ "$(app_is_multi_source "$app")" = "true" ]; then
+    # metallb·cert-manager — Helm 차트(네트워크에서 직접 받는다, Argo가 Sync 때 하는 것과
+    # 같다)를 이 저장소가 그 SHA 시점에 갖고 있던 값 파일로 렌더한다. kustomize path가
+    # 없어 위 단일 source 경로(kubectl kustomize)를 쓸 수 없다.
+    #
+    # helm은 다중 source Application에서만 필요하다 — kustomize app만 점검하는 CP에도
+    # 항상 요구하면 불필요하게 막힌다(require_tools가 아니라 여기서 확인하는 이유).
+    if ! command -v helm > /dev/null 2>&1; then
+      echo "필요한 도구가 없습니다: helm (다중 source Application인 ${app}에 필요)" >&2
+      exit 1
+    fi
+    repo_url=$(app_helm_chart_source "$app" repoURL)
+    chart=$(app_helm_chart_source "$app" chart)
+    target_revision=$(app_helm_chart_source "$app" targetRevision)
+    release_name=$(app_helm_chart_source "$app" releaseName)
+    namespace=$(app_namespace "$app")
+    set --
+    while IFS= read -r value_file; do
+      [ -n "$value_file" ] && set -- "$@" -f "$worktree_dir/$value_file"
+    done <<EOF
+$(app_helm_value_files "$app")
+EOF
+    helm template "$release_name" "$chart" --repo "$repo_url" --version "$target_revision" \
+      -n "$namespace" "$@"
+  else
+    source_path=$(app_source_path "$app")
+    kubectl kustomize "$worktree_dir/$source_path"
+  fi
 }
 
 # --- 3. kubectl diff + kind/name 요약 -------------------------------------------
@@ -129,7 +201,7 @@ check_preconditions() {
     persona-edge)
       for secret in oauth2-proxy cloudflare-dns-token; do
         if ! kubectl -n persona-edge get secret "$secret" > /dev/null 2>&1; then
-          echo "선행 조건 실패: persona-edge → Secret $secret이 없다" >&2
+          echo "선행 조건 실패: persona-edge → Secret ${secret}이 없다" >&2
           return 1
         fi
       done
@@ -164,6 +236,32 @@ check_preconditions() {
           ;;
       esac
       ;;
+    metallb)
+      label=$(kubectl get namespace metallb-system \
+        -o jsonpath='{.metadata.labels.pod-security\.kubernetes\.io/enforce}' 2> /dev/null || true)
+      if [ "$label" != "privileged" ]; then
+        echo "선행 조건 실패: metallb → Namespace metallb-system에 PSA privileged 라벨이 없다(bootstrap/namespaces/metallb-system.yaml 먼저 적용, 실제: ${label:-없음})" >&2
+        return 1
+      fi
+      ;;
+    cert-manager)
+      if ! kubectl get namespace cert-manager > /dev/null 2>&1; then
+        echo "선행 조건 실패: cert-manager → Namespace cert-manager가 없다(bootstrap/namespaces/cert-manager.yaml 먼저 적용)" >&2
+        return 1
+      fi
+      ;;
+    metallb-config)
+      if ! kubectl get crd ipaddresspools.metallb.io > /dev/null 2>&1; then
+        echo "선행 조건 실패: metallb-config → CRD ipaddresspools.metallb.io가 없다(metallb Sync 먼저)" >&2
+        return 1
+      fi
+      ;;
+    cert-manager-issuers)
+      if ! kubectl get crd clusterissuers.cert-manager.io > /dev/null 2>&1; then
+        echo "선행 조건 실패: cert-manager-issuers → CRD clusterissuers.cert-manager.io가 없다(cert-manager Sync 먼저)" >&2
+        return 1
+      fi
+      ;;
     *)
       echo "선행 조건 표에 없는 app이다: $app — scripts/argo-preflight.sh와 argocd/README.md에 함께 추가하라" >&2
       return 1
@@ -176,29 +274,53 @@ print_next_commands() {
   app="$1"
   sha="$2"
   previous_sha=$(previous_approved_sha "$app")
+  multi_source=$(app_is_multi_source "$app")
   echo
   echo "실행할 명령:"
   if command -v argocd > /dev/null 2>&1; then
-    echo "  argocd app sync $app --revision $sha"
+    if [ "$multi_source" = "true" ]; then
+      # 다중 source(metallb·cert-manager)는 --revision 단일 인자가 안 맞는다 — 값 파일을
+      # 담은 두 번째 source(위치 2, 1-indexed)에만 SHA를 지정한다. 첫 번째 source(Helm
+      # 차트)의 targetRevision(차트 버전)은 건드리지 않는다.
+      echo "  argocd app sync $app --revisions $sha --source-positions 2"
+    else
+      echo "  argocd app sync $app --revision $sha"
+    fi
   else
-    echo "  (argocd CLI 없음) Argo UI → Applications → $app → Sync → Revision에 $sha 입력"
+    if [ "$multi_source" = "true" ]; then
+      echo "  (argocd CLI 없음) Argo UI → Applications → $app → Sync → 두 번째 source(값 파일)의 Revision에 $sha 입력"
+    else
+      echo "  (argocd CLI 없음) Argo UI → Applications → $app → Sync → Revision에 $sha 입력"
+    fi
   fi
   echo
   echo "롤백 명령:"
   if [ -n "$previous_sha" ]; then
     if command -v argocd > /dev/null 2>&1; then
-      echo "  argocd app sync $app --revision $previous_sha"
+      if [ "$multi_source" = "true" ]; then
+        echo "  argocd app sync $app --revisions $previous_sha --source-positions 2"
+      else
+        echo "  argocd app sync $app --revision $previous_sha"
+      fi
     else
-      echo "  (argocd CLI 없음) Argo UI → Applications → $app → Sync → Revision에 $previous_sha 입력"
+      if [ "$multi_source" = "true" ]; then
+        echo "  (argocd CLI 없음) Argo UI → Applications → $app → Sync → 두 번째 source(값 파일)의 Revision에 $previous_sha 입력"
+      else
+        echo "  (argocd CLI 없음) Argo UI → Applications → $app → Sync → Revision에 $previous_sha 입력"
+      fi
     fi
   else
-    echo "  $app의 직전 성공 기록이 deploy/approved-sync.md에 없다 — 수동으로 확인 후 이전 revision을 지정한다"
+    echo "  ${app}의 직전 성공 기록이 deploy/approved-sync.md에 없다 — 수동으로 확인 후 이전 revision을 지정한다"
   fi
 }
 
 # --- self-test -----------------------------------------------------------------
 # 가짜 kubectl로 "선행 조건 실패 → exit 1"만 재현한다. 실제 클러스터·git 동작은
 # 손대지 않는다 — check_preconditions 함수 하나만 직접 부른다.
+#
+# metallb·cert-manager의 helm template 렌더 경로(render_at_sha의 다중 source 분기)는
+# 여기서 재현하지 않는다 — 실제 네트워크로 차트를 받아야 해서 가짜 kubectl 하나로
+# 대체할 수 없다. 이 한계는 완료 보고에 남긴다.
 self_test() {
   fake_bin=$(mktemp -d "${TMPDIR:-/tmp}/argo-preflight-selftest-XXXXXX")
   trap 'rm -rf "$fake_bin"' EXIT HUP INT TERM

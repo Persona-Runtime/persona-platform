@@ -70,7 +70,9 @@ issuers = load(issuers_path)
   issuer = resource(issuers, "ClusterIssuer", name)
   acme = issuer.dig("spec", "acme") || raise("[안전] #{name}: acme 설정이 없다")
   raise "[안전] #{name}: ACME 서버가 다르다" unless acme["server"] == server
-  raise "[안전] #{name}: email을 실제 값으로 만들어내면 안 된다 — 자리표시자여야 한다" unless acme["email"] == "ACME_EMAIL_PLACEHOLDER"
+  # CP가 자리표시자를 실제 이메일로 바꿔 커밋하는 것은 정상 흐름이다(a7eccee) — 특정
+  # 문자열과의 완전 일치가 아니라 이메일 형식(@ 포함)만 확인한다.
+  raise "[안전] #{name}: email이 비어 있거나 @를 포함하지 않는다" unless acme["email"].to_s.include?("@")
   solver = acme.dig("solvers", 0, "dns01", "cloudflare") || raise("[안전] #{name}: Cloudflare DNS-01 solver가 없다")
   raise "[안전] #{name}: Cloudflare 토큰 Secret 참조가 다르다" unless solver.dig("apiTokenSecretRef") == { "name" => "cloudflare-dns-token", "key" => "api-token" }
 end
@@ -108,7 +110,10 @@ token_env = (container["env"] || []).find { |e| e["name"] == "CF_API_TOKEN" }
 raise "[안전] CF_API_TOKEN은 cloudflare-dns-token Secret의 api-token 키를 참조해야 한다" unless token_env.dig("valueFrom", "secretKeyRef") == { "name" => "cloudflare-dns-token", "key" => "api-token" }
 
 configmap = resource(edge, "ConfigMap", "ddns-config")
-raise "[안전] ZONE_ID는 실제 값을 만들어내면 안 된다 — 자리표시자여야 한다" unless configmap.dig("data", "ZONE_ID") == "ZONE_ID_PLACEHOLDER"
+# CP가 자리표시자를 실제 Zone ID로 바꿔 커밋하는 것은 정상 흐름이다(a7eccee, ACME
+# email과 같은 커밋·같은 이유) — 특정 문자열과의 완전 일치가 아니라 Cloudflare Zone ID
+# 형식(32자리 소문자 16진수)만 확인한다.
+raise "[안전] ZONE_ID가 Cloudflare Zone ID 형식(32자리 소문자 16진수)이 아니다" unless configmap.dig("data", "ZONE_ID").to_s.match?(/\A[0-9a-f]{32}\z/)
 raise "[안전] RECORD_NAME이 공개 진입 도메인과 다르다" unless configmap.dig("data", "RECORD_NAME") == "app.personaruntime.xyz"
 script = configmap.dig("data", "update-dns.sh") || raise("[안전] update-dns.sh 스크립트가 ConfigMap에 없다")
 raise "[안전] DDNS 스크립트에 토큰을 로그로 출력하는 것으로 보이는 echo가 있다 — 응답 전체를 출력하면 안 된다" if script =~ /echo\s+"\$(record_json|update_json)"/
@@ -147,6 +152,7 @@ expected_args = %w[
   --redirect-url=https://app.personaruntime.xyz/oauth2/callback
   --skip-provider-button=true
   --email-domain=*
+  --trusted-proxy-ip=10.244.0.0/16
 ]
 raise "[안전] oauth2-proxy args가 승인된 목록과 다르다" unless container["args"] == expected_args
 
@@ -155,7 +161,10 @@ raise "[안전] oauth2-proxy env에 GITHUB_ALLOWED_USERS가 없다" unless env_n
 raise "[안전] oauth2-proxy Secret(client-id·secret·cookie-secret)은 envFrom.secretRef로만 와야 한다 — Git에 값이 없다" unless (container["envFrom"] || []).any? { |e| e.dig("secretRef", "name") == "oauth2-proxy" }
 
 oauth_configmap = resource(edge, "ConfigMap", "oauth2-proxy-config")
-raise "[안전] GITHUB_ALLOWED_USERS는 실제 GitHub 계정명을 만들어내면 안 된다 — 자리표시자여야 한다" unless oauth_configmap.dig("data", "GITHUB_ALLOWED_USERS") == "GITHUB_USERS_PLACEHOLDER"
+# 위 ZONE_ID와 같은 이유 — CP가 실제 GitHub 계정명으로 바꿔 커밋하는 것이 정상 흐름이다.
+# 비어 있지 않고 자리표시자 문자열 그대로도 아닌지만 확인한다.
+github_allowed_users = oauth_configmap.dig("data", "GITHUB_ALLOWED_USERS").to_s
+raise "[안전] GITHUB_ALLOWED_USERS가 비어 있거나 자리표시자 그대로다" if github_allowed_users.strip.empty? || github_allowed_users == "GITHUB_USERS_PLACEHOLDER"
 
 service = resource(edge, "Service", "oauth2-proxy")
 raise "[안전] oauth2-proxy Service는 ClusterIP여야 한다 — 외부에 직접 노출하지 않는다" unless service.dig("spec", "type") == "ClusterIP" || service.dig("spec", "type").nil?
