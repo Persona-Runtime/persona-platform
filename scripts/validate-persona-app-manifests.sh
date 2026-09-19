@@ -39,20 +39,25 @@ repo_dir=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 db_file=$(mktemp "${TMPDIR:-/tmp}/persona-db.XXXXXX.yaml")
 migrate_file=$(mktemp "${TMPDIR:-/tmp}/persona-migrate.XXXXXX.yaml")
 app_file=$(mktemp "${TMPDIR:-/tmp}/persona-app.XXXXXX.yaml")
-trap 'rm -f "$db_file" "$migrate_file" "$app_file"' EXIT HUP INT TERM
+ingress_file=$(mktemp "${TMPDIR:-/tmp}/persona-app-ingress.XXXXXX.yaml")
+trap 'rm -f "$db_file" "$migrate_file" "$app_file" "$ingress_file"' EXIT HUP INT TERM
 
-kubectl kustomize "$repo_dir/kustomize/overlays/prod/persona-db"      > "$db_file"
-kubectl kustomize "$repo_dir/kustomize/overlays/prod/persona-migrate" > "$migrate_file"
-kubectl kustomize "$repo_dir/kustomize/overlays/prod/persona-app"     > "$app_file"
+kubectl kustomize "$repo_dir/kustomize/overlays/prod/persona-db"            > "$db_file"
+kubectl kustomize "$repo_dir/kustomize/overlays/prod/persona-migrate"       > "$migrate_file"
+kubectl kustomize "$repo_dir/kustomize/overlays/prod/persona-app"           > "$app_file"
+kubectl kustomize "$repo_dir/kustomize/overlays/prod/persona-app-ingress"   > "$ingress_file"
 
 # persona-embedding은 이미지 push 전이라 overlay에서 빠져 있다(위 app_file 렌더에는
 # 안 나온다) — base 자체가 여전히 유효하게 렌더되는지는 이 단독 빌드로만 확인한다.
 kubectl kustomize "$repo_dir/kustomize/base/persona-embedding" > /dev/null
 
 ruby -ryaml - \
-  "$db_file" "$migrate_file" "$app_file" \
+  "$db_file" "$migrate_file" "$app_file" "$ingress_file" \
   "$repo_dir/argocd/persona-db.yaml" \
   "$repo_dir/argocd/persona-app.yaml" \
+  "$repo_dir/argocd/persona-app-ingress.yaml" \
+  "$repo_dir/argocd/persona-app-netpol.yaml" \
+  "$repo_dir/argocd/persona-db-netpol.yaml" \
   "$repo_dir/bootstrap/namespaces/persona-data.yaml" \
   "$repo_dir/bootstrap/namespaces/persona-app.yaml" \
   "$repo_dir/db/grants/persona_minimal.sql" \
@@ -66,8 +71,8 @@ ruby -ryaml - \
 # 기본 인코딩(Encoding.default_external)에는 영향을 주지 않으므로 별도로 UTF-8로 고정한다.
 Encoding.default_external = Encoding::UTF_8
 
-db_path, migrate_path, app_path,
-  app_db, app_apps,
+db_path, migrate_path, app_path, ingress_path,
+  app_db, app_apps, app_ingress, app_app_netpol, app_db_netpol,
   ns_data_path, ns_app_path, grants_path, traefik_values_path,
   migrate_base_path = ARGV
 
@@ -257,6 +262,10 @@ app = load(app_path)
 raise "[안전] 앱 overlay가 Namespace를 관리하면 안 된다" if app.any? { |i| i["kind"] == "Namespace" }
 raise "[안전] 앱 overlay에 migration Job을 넣지 않는다" if app.any? { |i| i["kind"] == "Job" }
 
+# persona-app-ingress(인터넷 진입 전용, Sync 분리 2026-09-19) — 별도 렌더.
+ingress = load(ingress_path)
+raise "[안전] ingress overlay가 Namespace를 관리하면 안 된다" if ingress.any? { |i| i["kind"] == "Namespace" }
+
 gateway = resource(app, "Deployment", "persona-gateway")
 gspec = gateway.fetch("spec")
 raise "[기준선] Gateway replica가 기준선(1)과 다르다" unless gspec["replicas"] == 1
@@ -314,7 +323,7 @@ end
   raise "[안전] #{name} Service는 ClusterIP다" unless service.dig("spec", "type") == "ClusterIP"
   raise "[안전] #{name} Service 포트는 8080이다" unless service.dig("spec", "ports", 0, "port") == 8080
 end
-(db + migrate + app).each do |item|
+(db + migrate + app + ingress).each do |item|
   next unless item["kind"] == "Service"
   type = item.dig("spec", "type")
   raise "[안전] 공개 노출 타입을 추가하면 안 된다: #{type}" if ["NodePort", "LoadBalancer"].include?(type)
@@ -383,7 +392,7 @@ check_v1_and_root_rules(
   extension_filters: { "/v1" => ["strip-auth-header"], "/" => ["strip-auth-header"] },
 )
 
-public_route = resource(app, "HTTPRoute", "persona-app-public")
+public_route = resource(ingress, "HTTPRoute", "persona-app-public")
 raise "[안전] 공개 HTTPRoute는 https listener에 붙어야 한다" unless public_route.dig("spec", "parentRefs", 0, "sectionName") == "https"
 raise "[안전] 공개 HTTPRoute hostname이 공개 진입 도메인과 다르다" unless public_route.dig("spec", "hostnames") == ["app.personaruntime.xyz"]
 raise "[안전] 공개 HTTPRoute: 규칙은 /oauth2·/v1·/ 세 개다" unless public_route.dig("spec", "rules")&.length == 3
@@ -406,31 +415,40 @@ oauth_filters = (oauth_rule["filters"] || []).map { |f| f.dig("extensionRef", "n
 raise "[안전] /oauth2 필터는 security-headers만이어야 한다" unless oauth_filters == ["security-headers"]
 
 # --- Traefik Middleware (Gate 4) -------------------------------------------
-middleware = resource(app, "Middleware", "oauth-forward")
+# 인터넷 진입용 4개는 persona-app-ingress 렌더에 있다(Sync 분리, 2026-09-19).
+middleware = resource(ingress, "Middleware", "oauth-forward")
 raise "[안전] oauth-forward: forwardAuth 주소가 다르다" unless middleware.dig("spec", "forwardAuth", "address") == "http://oauth2-proxy.persona-edge.svc:4180/"
 raise "[안전] oauth-forward: trustForwardHeader가 꺼져 있으면 안 된다" unless middleware.dig("spec", "forwardAuth", "trustForwardHeader") == true
 raise "[안전] oauth-forward: authResponseHeaders가 다르다" unless middleware.dig("spec", "forwardAuth", "authResponseHeaders") == ["X-Auth-Request-User", "X-Auth-Request-Email"]
 
-middleware = resource(app, "Middleware", "rate-limit")
+middleware = resource(ingress, "Middleware", "rate-limit")
 raise "[기준선] rate-limit: average/burst가 다르다" unless middleware.dig("spec", "rateLimit", "average") == 20 && middleware.dig("spec", "rateLimit", "burst") == 50
 # depth 0 = X-Forwarded-For를 안 쓰고 연결 자체의 IP를 쓴다 — externalTrafficPolicy: Local 전제.
 raise "[안전] rate-limit: sourceCriterion depth가 0이 아니다" unless middleware.dig("spec", "rateLimit", "sourceCriterion", "ipStrategy", "depth") == 0
 
-middleware = resource(app, "Middleware", "security-headers")
+middleware = resource(ingress, "Middleware", "security-headers")
 headers = middleware.dig("spec", "headers")
 raise "[기준선] security-headers: HSTS/nosniff/referrer 값이 다르다" unless headers["stsSeconds"] == 31_536_000 && headers["stsIncludeSubdomains"] == true &&
   headers["contentTypeNosniff"] == true && headers["referrerPolicy"] == "same-origin"
 
-middleware = resource(app, "Middleware", "body-limit")
+middleware = resource(ingress, "Middleware", "body-limit")
 raise "[기준선] body-limit: maxRequestBodyBytes가 다르다" unless middleware.dig("spec", "buffering", "maxRequestBodyBytes") == 2_097_152
 
+# strip-auth-header는 persona-app에 남아 있다 — 내부 httproute.yaml만 그것을 참조한다.
 middleware = resource(app, "Middleware", "strip-auth-header")
 raise "[안전] strip-auth-header: 위조 방지 헤더 목록이 다르다" unless middleware.dig("spec", "headers", "customRequestHeaders") == { "X-Auth-Request-User" => "", "X-Auth-Request-Email" => "" }
+raise "[안전] persona-app 렌더에 인터넷 진입용 Middleware가 남아 있으면 안 된다(persona-app-ingress로 옮겼어야 한다)" if
+  ["oauth-forward", "rate-limit", "security-headers", "body-limit"].any? { |n| app.any? { |i| i["kind"] == "Middleware" && i.dig("metadata", "name") == n } }
+raise "[안전] persona-app-ingress 렌더에 strip-auth-header가 있으면 안 된다(persona-app에 남아야 한다)" if
+  ingress.any? { |i| i["kind"] == "Middleware" && i.dig("metadata", "name") == "strip-auth-header" }
 
-# NodePort/LoadBalancer 금지 검사(아래)는 db+migrate+app 렌더만 순회한다. Traefik Service는
-# Helm(bootstrap/traefik/values.yaml)로 렌더되는 별도 경로라 이 배열에 없다 — 2026-09-17
-# 결정으로 Traefik만 LoadBalancer가 됐지만, 그 값은 scripts/validate-edge-manifests.sh가 아니라
-# 이 스크립트가 다루는 범위 밖(helm template 검증)에서 확인한다.
+# NodePort/LoadBalancer 금지 검사(위)는 db+migrate+app+ingress 렌더만 순회한다. Traefik
+# Service는 Helm(bootstrap/traefik/values.yaml)로 렌더되는 별도 경로라 이 배열에 없다 —
+# 2026-09-17 결정으로 Traefik만 LoadBalancer가 됐지만, 그 값은 scripts/validate-edge-manifests.sh
+# 가 아니라 이 스크립트가 다루는 범위 밖(helm template 검증)에서 확인한다.
+#
+# NetworkPolicy는 이 스크립트가 다루지 않는다 — persona-app-netpol·persona-db-netpol로
+# Sync 분리(2026-09-19)돼 scripts/validate-networkpolicy-manifests.sh가 검사한다.
 
 # --- Argo Application -----------------------------------------------------
 # persona-migrate Application 선언은 2026-09-16에 저장소에서 뺐다. 완료된 Job은 같은 선언을
@@ -439,8 +457,11 @@ raise "[안전] strip-auth-header: 위조 방지 헤더 목록이 다르다" unl
 # 그대로 두어 다음 revision 선언을 계속 검증한다.
 # 재등록 절차와 선언 원문은 runbooks/test-resource-cleanup.md에 있다.
 {
-  app_db      => ["persona-db", "kustomize/overlays/prod/persona-db", "persona-data"],
-  app_apps    => ["persona-app", "kustomize/overlays/prod/persona-app", "persona-app"],
+  app_db          => ["persona-db", "kustomize/overlays/prod/persona-db", "persona-data"],
+  app_apps        => ["persona-app", "kustomize/overlays/prod/persona-app", "persona-app"],
+  app_ingress     => ["persona-app-ingress", "kustomize/overlays/prod/persona-app-ingress", "persona-app"],
+  app_app_netpol  => ["persona-app-netpol", "kustomize/overlays/prod/persona-app-netpol", "persona-app"],
+  app_db_netpol   => ["persona-db-netpol", "kustomize/overlays/prod/persona-db-netpol", "persona-data"],
 }.each do |path, (name, source_path, namespace)|
   application = YAML.load_file(path)
   raise "[안전] #{name}: Application kind가 아니다" unless application["kind"] == "Application"

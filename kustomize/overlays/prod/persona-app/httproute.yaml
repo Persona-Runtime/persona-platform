@@ -18,6 +18,10 @@ metadata:
   labels:
     app.kubernetes.io/part-of: persona-platform
     app.kubernetes.io/component: application
+  annotations:
+    # Middleware(-1) → Gateway(0) → HTTPRoute(1) — strip-auth-header를 이름으로
+    # 참조하므로 그 뒤에 적용돼야 한다(Sync 통제, 2026-09-19).
+    argocd.argoproj.io/sync-wave: "1"
 spec:
   parentRefs:
     - name: persona-app

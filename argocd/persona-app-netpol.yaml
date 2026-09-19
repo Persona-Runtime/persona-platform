@@ -1,0 +1,21 @@
+# persona-app 네임스페이스 NetworkPolicy 전용. Sync 통제(2026-09-19)로 persona-app
+# (워크로드)에서 분리했다 — argocd/README.md 참고.
+#
+# syncPolicy를 두지 않는다. 수동 Sync 기준.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: persona-app-netpol
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: networkpolicy
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/Persona-Runtime/persona-platform.git
+    targetRevision: develop
+    path: kustomize/overlays/prod/persona-app-netpol
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: persona-app

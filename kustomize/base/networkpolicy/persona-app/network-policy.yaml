@@ -16,6 +16,10 @@ metadata:
   labels:
     app.kubernetes.io/part-of: persona-platform
     app.kubernetes.io/component: networkpolicy
+  annotations:
+    # allow-*(0) → default-deny(1). 허용 규칙이 먼저 들어가야 차단이 걸리는 순간에도
+    # 기존 통신이 끊기지 않는다(내부 순서 고정, 2026-09-19).
+    argocd.argoproj.io/sync-wave: "1"
 spec:
   podSelector: {}
   policyTypes:
@@ -33,6 +37,8 @@ metadata:
   labels:
     app.kubernetes.io/part-of: persona-platform
     app.kubernetes.io/component: networkpolicy
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
 spec:
   podSelector:
     matchLabels:
@@ -58,6 +64,8 @@ metadata:
   labels:
     app.kubernetes.io/part-of: persona-platform
     app.kubernetes.io/component: networkpolicy
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
 spec:
   podSelector:
     matchLabels:
@@ -110,6 +118,8 @@ metadata:
   labels:
     app.kubernetes.io/part-of: persona-platform
     app.kubernetes.io/component: networkpolicy
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
 spec:
   podSelector:
     matchLabels:

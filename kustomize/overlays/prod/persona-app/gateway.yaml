@@ -10,6 +10,8 @@ metadata:
     # Certificate를 자동 생성한다(→ Secret persona-app-tls). staging으로 발급 성공을 먼저 확인한
     # 뒤 prod로 바꾸는 것은 별도 커밋(runbooks/public-ingress.md Gate 3 CP 적용 순서 참고).
     cert-manager.io/cluster-issuer: letsencrypt-staging
+    # Middleware(-1) → Gateway(0) → HTTPRoute(1) — 내부 순서 고정(Sync 통제, 2026-09-19).
+    argocd.argoproj.io/sync-wave: "0"
 spec:
   gatewayClassName: traefik
   listeners:

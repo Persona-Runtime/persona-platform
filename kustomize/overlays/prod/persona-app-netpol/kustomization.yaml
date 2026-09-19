@@ -1,0 +1,10 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# persona-app 네임스페이스의 NetworkPolicy만 관리한다. Sync 통제(2026-09-19)로
+# persona-app(워크로드)에서 분리했다 — 워크로드 배포와 네트워크 정책 변경은 서로 다른
+# 위험도·롤백 절차를 가지므로 한 Sync에 묶지 않는다. namespace는
+# bootstrap/namespaces/persona-app.yaml이 소유한다(persona-app과 같은 네임스페이스,
+# 다른 Application).
+namespace: persona-app
+resources:
+  - ../../../base/networkpolicy/persona-app

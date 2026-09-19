@@ -25,8 +25,10 @@ edge_file=$(mktemp "${TMPDIR:-/tmp}/persona-edge.XXXXXX.yaml")
 traefik_file=$(mktemp "${TMPDIR:-/tmp}/traefik.XXXXXX.yaml")
 trap 'rm -f "$app_file" "$data_file" "$edge_file" "$traefik_file"' EXIT HUP INT TERM
 
-kubectl kustomize "$repo_dir/kustomize/overlays/prod/persona-app"             > "$app_file"
-kubectl kustomize "$repo_dir/kustomize/overlays/prod/persona-db"              > "$data_file"
+# persona-app·persona-db는 이제 NetworkPolicy를 안 갖는다 — Sync 분리(2026-09-19)로
+# 각각 persona-app-netpol·persona-db-netpol이 관리한다(argocd/README.md 참고).
+kubectl kustomize "$repo_dir/kustomize/overlays/prod/persona-app-netpol"      > "$app_file"
+kubectl kustomize "$repo_dir/kustomize/overlays/prod/persona-db-netpol"       > "$data_file"
 kubectl kustomize "$repo_dir/kustomize/overlays/prod/persona-edge"            > "$edge_file"
 kubectl kustomize "$repo_dir/kustomize/overlays/prod/traefik-networkpolicy"   > "$traefik_file"
 
@@ -70,21 +72,33 @@ def rule_ports(rule)
   (rule["ports"] || []).map { |p| [p["protocol"], p["port"]] }
 end
 
+# 내부 순서 고정(2026-09-19): allow-*(wave 0) → default-deny(wave 1). 허용 규칙이 먼저
+# 들어가야 차단이 걸리는 순간에도 기존 통신이 안 끊긴다. persona-app·persona-data만
+# 대상이다(persona-edge·traefik은 이번에 안 건드림).
+def check_sync_wave(policy, expected, context)
+  actual = policy.dig("metadata", "annotations", "argocd.argoproj.io/sync-wave")
+  raise "[안전] #{context}: sync-wave가 #{expected}가 아니다(실제: #{actual.inspect})" unless actual == expected
+end
+
 # --- persona-app -------------------------------------------------------------
 app = load(app_path)
 check_default_deny(app, "persona-app")
+check_sync_wave(resource(app, "NetworkPolicy", "default-deny"), "1", "persona-app default-deny")
 
 web = resource(app, "NetworkPolicy", "allow-web")
+check_sync_wave(web, "0", "persona-app allow-web")
 raise "[안전] allow-web: Egress policyType을 두면 안 된다 — 이 컴포넌트는 egress 없음" if web.dig("spec", "policyTypes")&.include?("Egress")
 raise "[안전] allow-web: traefik에서만 인입해야 한다" unless rule_from_namespaces(web.dig("spec", "ingress", 0)) == ["traefik"]
 raise "[안전] allow-web: 포트가 8080이 아니다" unless rule_ports(web.dig("spec", "ingress", 0)) == [["TCP", 8080]]
 
 gw = resource(app, "NetworkPolicy", "allow-gateway")
+check_sync_wave(gw, "0", "persona-app allow-gateway")
 raise "[안전] allow-gateway: traefik에서만 인입해야 한다" unless rule_from_namespaces(gw.dig("spec", "ingress", 0)) == ["traefik"]
 gw_egress_targets = gw.dig("spec", "egress").flat_map { |rule| (rule["to"] || []).map { |peer| peer.dig("namespaceSelector", "matchLabels", "kubernetes.io/metadata.name") || peer.dig("podSelector", "matchLabels", "app.kubernetes.io/name") } }
 raise "[안전] allow-gateway egress 대상이 다르다(persona-data·persona-embedding·kube-system이어야 한다)" unless gw_egress_targets.sort == %w[kube-system persona-data persona-embedding].sort
 
 migrate = resource(app, "NetworkPolicy", "allow-migrate")
+check_sync_wave(migrate, "0", "persona-app allow-migrate")
 raise "[안전] allow-migrate: Ingress policyType을 두면 안 된다 — Job은 인바운드를 받지 않는다" if migrate.dig("spec", "policyTypes")&.include?("Ingress")
 migrate_egress_targets = migrate.dig("spec", "egress").flat_map { |rule| (rule["to"] || []).map { |peer| peer.dig("namespaceSelector", "matchLabels", "kubernetes.io/metadata.name") } }
 raise "[안전] allow-migrate egress 대상이 다르다(persona-data·kube-system이어야 한다)" unless migrate_egress_targets.sort == %w[kube-system persona-data]
@@ -92,16 +106,20 @@ raise "[안전] allow-migrate egress 대상이 다르다(persona-data·kube-syst
 # --- persona-data --------------------------------------------------------------
 data = load(data_path)
 check_default_deny(data, "persona-data")
+check_sync_wave(resource(data, "NetworkPolicy", "default-deny"), "1", "persona-data default-deny")
 
 db_in = resource(data, "NetworkPolicy", "allow-db-ingress")
+check_sync_wave(db_in, "0", "persona-data allow-db-ingress")
 db_in_sources = db_in.dig("spec", "ingress").flat_map { |rule| (rule["from"] || []).map { |peer| peer.dig("namespaceSelector", "matchLabels", "kubernetes.io/metadata.name") } }.uniq
 raise "[안전] persona-db ingress 출처가 다르다(persona-app·cnpg-system·monitoring이어야 한다)" unless db_in_sources.sort == %w[cnpg-system monitoring persona-app].sort
 
 db_egress = resource(data, "NetworkPolicy", "allow-db-egress")
+check_sync_wave(db_egress, "0", "persona-data allow-db-egress")
 db_egress_targets = db_egress.dig("spec", "egress").flat_map { |rule| (rule["to"] || []).map { |peer| peer.dig("namespaceSelector", "matchLabels", "kubernetes.io/metadata.name") } }.uniq
 raise "[안전] persona-db egress 대상이 다르다(kube-system·cnpg-system이어야 한다)" unless db_egress_targets.sort == %w[cnpg-system kube-system]
 
 replication = resource(data, "NetworkPolicy", "allow-db-replication")
+check_sync_wave(replication, "0", "persona-data allow-db-replication")
 raise "[안전] 복제 정책은 Ingress·Egress 둘 다 있어야 한다(양방향 스트리밍 복제)" unless replication.dig("spec", "policyTypes")&.sort == %w[Egress Ingress]
 raise "[안전] 복제 ingress가 같은 Cluster Pod(cnpg.io/cluster: persona-db)를 셀렉트하지 않는다" unless replication.dig("spec", "ingress", 0, "from", 0, "podSelector", "matchLabels") == { "cnpg.io/cluster" => "persona-db" }
 raise "[안전] 복제 포트가 5432가 아니다" unless rule_ports(replication.dig("spec", "ingress", 0)) == [["TCP", 5432]]
@@ -111,6 +129,7 @@ raise "[안전] 복제 포트가 5432가 아니다" unless rule_ports(replicatio
 # 포트 — 와는 별개 경로다). 이게 없으면 지금 운영 중인 CNPG 2 인스턴스의 failover가
 # 불가능해진다(리뷰 차단 사유).
 db_apiserver = resource(data, "CiliumNetworkPolicy", "allow-egress-kube-apiserver")
+check_sync_wave(db_apiserver, "0", "persona-data allow-egress-kube-apiserver")
 raise "[안전] persona-db endpointSelector가 cnpg.io/cluster: persona-db가 아니다" unless db_apiserver.dig("spec", "endpointSelector", "matchLabels") == { "cnpg.io/cluster" => "persona-db" }
 raise "[안전] persona-db의 kube-apiserver egress가 예약 엔티티 kube-apiserver를 쓰지 않는다(하드코딩 IP는 노드 교체 때 끊긴다)" unless db_apiserver.dig("spec", "egress", 0, "toEntities") == ["kube-apiserver"]
 raise "[안전] persona-db의 kube-apiserver egress 포트가 6443이 아니다" unless db_apiserver.dig("spec", "egress", 0, "toPorts", 0, "ports", 0, "port") == "6443"

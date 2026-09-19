@@ -12,6 +12,9 @@
 # 불필요한 부하로부터 보호). /oauth2는 oauth2-proxy 콜백·정적 자산 경로라 인증
 # 필터 없이 바로 통과시킨다(그 경로 자체가 로그인 흐름이라 자기 자신을 인증할 수
 # 없다).
+#
+# Sync 분리(2026-09-19): persona-app-ingress 소속. Gateway 객체 자체(listener 선언)는
+# persona-app에 남아 있다 — 한 Gateway를 두 Application이 나눠 관리할 수 없어서다.
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
@@ -19,6 +22,10 @@ metadata:
   labels:
     app.kubernetes.io/part-of: persona-platform
     app.kubernetes.io/component: application
+  annotations:
+    # Middleware(-1) → HTTPRoute(1) — 이 Application엔 Gateway 객체가 없어 wave 0은
+    # 비운다(내부 순서 고정, 2026-09-19).
+    argocd.argoproj.io/sync-wave: "1"
 spec:
   parentRefs:
     - name: persona-app
