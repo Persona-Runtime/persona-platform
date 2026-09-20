@@ -1,0 +1,31 @@
+# Gate 4 §3 추가(2026-09-20 실측) — allow-ingress-world(network-policy.yaml, 표준
+# NetworkPolicy, ipBlock 0.0.0.0/0)는 Cilium 아이덴티티 체계에서 "world"만 매칭하고,
+# 클러스터 노드 자신에서 나온 트래픽(remote-node·host 아이덴티티)은 매칭하지 않는다 —
+# CP에서 Traefik VIP로 curl하면 000(연결 자체가 안 됨), 맥(LAN)에서는 302로 정상
+# 응답한 것으로 확인했다. 노드에서 도는 tailscale serve 내부 경로와 운영자가 CP에서
+# 직접 하는 점검(curl)이 이 경계에 걸린다.
+#
+# 대안: Cilium 전역 설정 policy-cidr-match-mode=nodes(ipBlock이 node identity도
+# 매칭하게 하는 옵션)도 이 문제를 해결하지만 클러스터 전체에 영향을 준다 — 이 요청
+# 하나만 CiliumNetworkPolicy로 좁히는 쪽을 택했다.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-ingress-cluster-nodes
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: networkpolicy
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: traefik
+  ingress:
+    - fromEntities:
+        - host
+        - remote-node
+      toPorts:
+        - ports:
+            - port: "8000"
+              protocol: TCP
+            - port: "8443"
+              protocol: TCP

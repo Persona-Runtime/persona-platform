@@ -171,5 +171,17 @@ apiserver = resource(traefik, "CiliumNetworkPolicy", "allow-egress-kube-apiserve
 raise "[안전] traefik의 kube-apiserver egress가 예약 엔티티 kube-apiserver를 쓰지 않는다(하드코딩 IP는 노드 교체 때 끊긴다)" unless apiserver.dig("spec", "egress", 0, "toEntities") == ["kube-apiserver"]
 raise "[안전] kube-apiserver egress 포트가 6443이 아니다" unless apiserver.dig("spec", "egress", 0, "toPorts", 0, "ports", 0, "port") == "6443"
 
+# allow-ingress-world(표준 NetworkPolicy, ipBlock 0.0.0.0/0)는 Cilium에서 world
+# 아이덴티티만 매칭하고 클러스터 노드 자신에서 나온 트래픽(remote-node·host)은 안
+# 걸린다(2026-09-20 실측 — CP curl 000, 맥 302) — 그 경로를 이 CiliumNetworkPolicy가
+# 별도로 연다.
+cluster_nodes = resource(traefik, "CiliumNetworkPolicy", "allow-ingress-cluster-nodes")
+raise "[안전] traefik의 클러스터 노드 인입이 host·remote-node 엔티티를 쓰지 않는다" unless cluster_nodes.dig("spec", "ingress", 0, "fromEntities")&.sort == %w[host remote-node]
+# rule_ports는 표준 NetworkPolicy의 flat ingress[].ports[] 모양만 본다 — Cilium은
+# ingress[].toPorts[].ports[]로 한 단계 더 감싸고 port 값도 문자열이라(apiserver 검사와
+# 같은 이유) 직접 파고든다.
+cluster_nodes_ports = (cluster_nodes.dig("spec", "ingress", 0, "toPorts", 0, "ports") || []).map { |p| [p["protocol"], p["port"]] }
+raise "[안전] traefik 클러스터 노드 인입 포트가 8000·8443이 아니다" unless cluster_nodes_ports.sort == [["TCP", "8000"], ["TCP", "8443"]]
+
 puts "networkpolicy(persona-app·persona-data·persona-edge·traefik) 렌더와 매니페스트 정책 검사 통과"
 RUBY
