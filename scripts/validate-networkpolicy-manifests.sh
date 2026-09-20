@@ -122,7 +122,12 @@ replication = resource(data, "NetworkPolicy", "allow-db-replication")
 check_sync_wave(replication, "0", "persona-data allow-db-replication")
 raise "[안전] 복제 정책은 Ingress·Egress 둘 다 있어야 한다(양방향 스트리밍 복제)" unless replication.dig("spec", "policyTypes")&.sort == %w[Egress Ingress]
 raise "[안전] 복제 ingress가 같은 Cluster Pod(cnpg.io/cluster: persona-db)를 셀렉트하지 않는다" unless replication.dig("spec", "ingress", 0, "from", 0, "podSelector", "matchLabels") == { "cnpg.io/cluster" => "persona-db" }
-raise "[안전] 복제 포트가 5432가 아니다" unless rule_ports(replication.dig("spec", "ingress", 0)) == [["TCP", 5432]]
+# 5432=스트리밍 복제, 8000=CNPG instance manager 상태 조회(인스턴스↔인스턴스, 2026-09-20
+# Hubble 실측 — 8000 없이는 Policy denied DROPPED가 반복됐다). ingress·egress 둘 다 확인해
+# 한쪽만 고치고 다른 쪽을 빠뜨리는 것을 잡는다.
+raise "[안전] 복제 ingress 포트가 5432·8000이 아니다" unless rule_ports(replication.dig("spec", "ingress", 0)).sort == [["TCP", 5432], ["TCP", 8000]]
+raise "[안전] 복제 egress가 같은 Cluster Pod(cnpg.io/cluster: persona-db)를 셀렉트하지 않는다" unless replication.dig("spec", "egress", 0, "to", 0, "podSelector", "matchLabels") == { "cnpg.io/cluster" => "persona-db" }
+raise "[안전] 복제 egress 포트가 5432·8000이 아니다" unless rule_ports(replication.dig("spec", "egress", 0)).sort == [["TCP", 5432], ["TCP", 8000]]
 
 # CNPG instance manager가 Cluster status·Secret/ConfigMap·승격 판단·readiness에
 # kube-apiserver를 직접 호출한다(cnpg-system:8000 — operator↔instance manager 상태
