@@ -378,7 +378,9 @@ def check_v1_and_root_rules(rules, context, extension_filters: {})
       raise "[안전] #{context} #{path}: ExtensionRef kind는 Middleware다" unless filter.dig("extensionRef", "kind") == "Middleware"
       filter.dig("extensionRef", "name")
     end
-    # 배열 순서 = Traefik 적용 순서(rate-limit이 oauth-forward보다 앞이어야 인증 전에 과호출을 끊는다).
+    # 배열 순서 = Traefik 적용 순서. 요청은 이 순서대로 통과하고 응답은 역순으로 돌아오므로,
+    # 앞쪽 필터일수록 뒤쪽 필터의 조기 반환(리다이렉트·429 등) 응답까지 감싸 적용된다 —
+    # 호출부(persona-app-public HTTPRoute 검사)의 extension_filters 주석 참고.
     raise "[안전] #{context} #{path}: Middleware 필터 순서가 다르다 (기대 #{expected}, 실제 #{actual})" unless actual == expected
   end
 end
@@ -399,10 +401,14 @@ raise "[안전] 공개 HTTPRoute hostname이 공개 진입 도메인과 다르�
 raise "[안전] 공개 HTTPRoute: 규칙은 /oauth2·/v1·/ 세 개다" unless public_route.dig("spec", "rules")&.length == 3
 check_v1_and_root_rules(
   public_route.dig("spec", "rules"), "persona-app-public HTTPRoute",
-  # rate-limit이 oauth-forward보다 앞 — 초당 요청이 많으면 GitHub 로그인 여부를 묻기 전에 429.
+  # security-headers가 맨 앞 — Traefik 체인은 앞선 미들웨어일수록 뒤 미들웨어의 응답까지
+  # 감싸므로, oauth-forward가 미인증 302를 돌려줘도(그 뒤 미들웨어는 실행 안 됨) 이 302가
+  # security-headers를 거쳐 나간다(2026-09-20 LTE 실측: 이전 순서에서 302에
+  # strict-transport-security가 없었다). rate-limit이 그다음 — 초당 요청이 많으면 GitHub
+  # 로그인 여부를 묻기 전에 429. oauth-forward가 맨 뒤 — 인증은 다른 필터를 다 거친 뒤.
   extension_filters: {
-    "/v1" => ["rate-limit", "oauth-forward", "body-limit", "security-headers"],
-    "/" => ["rate-limit", "oauth-forward", "security-headers"],
+    "/v1" => ["security-headers", "rate-limit", "body-limit", "oauth-forward"],
+    "/" => ["security-headers", "rate-limit", "oauth-forward"],
   },
 )
 

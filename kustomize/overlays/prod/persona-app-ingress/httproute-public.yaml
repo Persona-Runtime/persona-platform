@@ -7,11 +7,18 @@
 # 경로를 다시 쓰지 않는다(URLRewrite 필터 없음). Python API가 실제로 /v1/me, /v1/personas 를
 # 받는다. 접두사를 떼면 404가 된다.
 #
-# Gate 4: 필터 목록의 순서가 곧 적용 순서다 — rate-limit이 oauth-forward보다 앞이라,
-# 초당 요청이 너무 많으면 GitHub 로그인 여부를 묻기도 전에 429로 끊는다(oauth2-proxy를
-# 불필요한 부하로부터 보호). /oauth2는 oauth2-proxy 콜백·정적 자산 경로라 인증
-# 필터 없이 바로 통과시킨다(그 경로 자체가 로그인 흐름이라 자기 자신을 인증할 수
-# 없다).
+# Gate 4: 필터 목록의 순서가 곧 적용 순서다. Traefik 미들웨어 체인은 요청은 목록 순서대로
+# 통과하고 응답은 역순으로 돌아온다 — 목록에서 앞선 미들웨어일수록 뒤에 오는 미들웨어를
+# 감싸는 바깥쪽 레이어가 된다. oauth-forward(ForwardAuth)가 미인증 요청에 302를 돌려주면
+# 그 뒤(목록상 뒤)의 미들웨어는 아예 실행되지 않지만, 그 앞(목록상 앞)의 미들웨어는 이미
+# 감싸고 있어 이 302 응답도 거쳐 나간다. 그래서 security-headers를 맨 앞에 둬야 302든
+# 429든 모든 응답에 보안 헤더가 실제로 붙는다(2026-09-20 LTE 실측: 기존 순서에서 미인증
+# 302 응답에 strict-transport-security가 없었다). rate-limit은 그다음 — 초당 요청이 너무
+# 많으면 GitHub 로그인 여부를 묻기도 전에 429로 끊는다(oauth2-proxy를 불필요한 부하로부터
+# 보호). body-limit(/v1만)은 요청 크기 제한이라 인증보다 먼저 걸러도 무방해 oauth-forward
+# 앞에 둔다. oauth-forward가 맨 뒤 — 실제 인증 확인은 다른 필터를 다 통과한 뒤에 한다.
+# /oauth2는 oauth2-proxy 콜백·정적 자산 경로라 인증 필터 없이 바로 통과시킨다(그 경로
+# 자체가 로그인 흐름이라 자기 자신을 인증할 수 없다).
 #
 # Sync 분리(2026-09-19): persona-app-ingress 소속. Gateway 객체 자체(listener 선언)는
 # persona-app에 남아 있다 — 한 Gateway를 두 Application이 나눠 관리할 수 없어서다.
@@ -56,12 +63,12 @@ spec:
           extensionRef:
             group: traefik.io
             kind: Middleware
-            name: rate-limit
+            name: security-headers
         - type: ExtensionRef
           extensionRef:
             group: traefik.io
             kind: Middleware
-            name: oauth-forward
+            name: rate-limit
         - type: ExtensionRef
           extensionRef:
             group: traefik.io
@@ -71,7 +78,7 @@ spec:
           extensionRef:
             group: traefik.io
             kind: Middleware
-            name: security-headers
+            name: oauth-forward
       backendRefs:
         - name: persona-gateway
           port: 8080
@@ -84,17 +91,17 @@ spec:
           extensionRef:
             group: traefik.io
             kind: Middleware
+            name: security-headers
+        - type: ExtensionRef
+          extensionRef:
+            group: traefik.io
+            kind: Middleware
             name: rate-limit
         - type: ExtensionRef
           extensionRef:
             group: traefik.io
             kind: Middleware
             name: oauth-forward
-        - type: ExtensionRef
-          extensionRef:
-            group: traefik.io
-            kind: Middleware
-            name: security-headers
       backendRefs:
         - name: persona-web
           port: 8080
