@@ -3,3 +3,4 @@ kind: Kustomization
 resources:
   - network-policy.yaml
   - network-policy-apiserver.yaml
+  - network-policy-ingress-nodes.yaml
