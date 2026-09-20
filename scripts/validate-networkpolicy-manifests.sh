@@ -188,5 +188,12 @@ raise "[안전] traefik의 클러스터 노드 인입이 host·remote-node 엔�
 cluster_nodes_ports = (cluster_nodes.dig("spec", "ingress", 0, "toPorts", 0, "ports") || []).map { |p| [p["protocol"], p["port"]] }
 raise "[안전] traefik 클러스터 노드 인입 포트가 8000·8443이 아니다" unless cluster_nodes_ports.sort == [["TCP", "8000"], ["TCP", "8443"]]
 
+# monitoring이 PodMonitor로 traefik metrics 포트(9100, Service엔 없고 Pod에만 있다)를
+# 직접 스크레이프한다 — persona-data의 monitoring → postgres-exporter:9187과 같은 패턴
+# (2026-09-20 실측: 이 허용 없이는 Prometheus 타깃 traefik/traefik이 down).
+metrics = resource(traefik, "NetworkPolicy", "allow-ingress-metrics")
+raise "[안전] traefik 메트릭 인입이 monitoring에서만 오지 않는다" unless rule_from_namespaces(metrics.dig("spec", "ingress", 0)) == ["monitoring"]
+raise "[안전] traefik 메트릭 인입 포트가 9100이 아니다" unless rule_ports(metrics.dig("spec", "ingress", 0)) == [["TCP", 9100]]
+
 puts "networkpolicy(persona-app·persona-data·persona-edge·traefik) 렌더와 매니페스트 정책 검사 통과"
 RUBY

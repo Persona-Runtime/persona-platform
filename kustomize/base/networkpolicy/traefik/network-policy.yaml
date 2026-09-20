@@ -52,6 +52,36 @@ spec:
         - protocol: TCP
           port: 8443
 ---
+# 관측(Gate 4 §5) — monitoring 네임스페이스의 Prometheus가 PodMonitor
+# (kustomize/base/observability/traefik/podmonitor.yaml)로 traefik Pod의 metrics 포트를
+# 직접 스크레이프한다. 9100은 Traefik 차트 metrics entryPoint의 containerPort다 —
+# ports.metrics.expose가 꺼져 있어(기본값) Service엔 없고 Pod에만 있다. 이 허용이
+# 없으면 default-deny에 막힌다(실측 2026-09-20: traefik-observability 적용 후
+# Prometheus 타깃 traefik/traefik이 down 2개, cert-manager는 up — persona-data의
+# monitoring → postgres-exporter:9187 허용과 같은 패턴, network-policy.yaml의 그
+# 규칙 참고).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-metrics
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: networkpolicy
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: traefik
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 9100
+---
 # 아웃바운드: 백엔드로 프록시할 세 네임스페이스(포트를 좁히지 않는다 — Traefik이 프록시하는
 # 백엔드 포트가 HTTPRoute·Middleware 변경마다 늘어날 수 있어, 대상 네임스페이스 단위로
 # 허용하고 실제 도달 가능한 포트는 각 백엔드 네임스페이스의 ingress 규칙이 이미 좁혀
