@@ -110,7 +110,11 @@ spec:
           port: 8000
 ---
 # 인스턴스 간 스트리밍 복제(instances: 2, primary↔replica). 같은 Cluster의 Pod끼리
-# 5432를 상호 허용한다 — podSelector to/from이 같아 self-referential 규칙이 된다.
+# 5432·8000을 상호 허용한다 — podSelector to/from이 같아 self-referential 규칙이 된다.
+# 5432 = 스트리밍 복제(WAL 전송). 8000 = CNPG instance manager 상태 조회 — operator가
+# 인스턴스에 묻는 경로(allow-db-ingress가 이미 허용)와 별개로, 인스턴스끼리도 서로의
+# 상태를 이 포트로 묻는다(실측 2026-09-20, Hubble: 8000 없이는 persona-db-1 →
+# persona-db-2:8000이 10초 주기로 Policy denied DROPPED).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -135,6 +139,8 @@ spec:
       ports:
         - protocol: TCP
           port: 5432
+        - protocol: TCP
+          port: 8000
   egress:
     - to:
         - podSelector:
@@ -143,3 +149,5 @@ spec:
       ports:
         - protocol: TCP
           port: 5432
+        - protocol: TCP
+          port: 8000
