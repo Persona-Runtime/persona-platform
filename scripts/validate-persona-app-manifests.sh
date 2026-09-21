@@ -77,7 +77,7 @@ db_path, migrate_path, app_path, ingress_path,
   ns_data_path, ns_app_path, grants_path, traefik_values_path,
   migrate_base_path, argocd_dir = ARGV
 
-GATEWAY_IMAGE = "ghcr.io/persona-runtime/persona-minimal-api@sha256:922ae043feaa1a893336816c38ac17f448aa96c44ba06983652181784f52c2f6"
+GATEWAY_IMAGE = "ghcr.io/persona-runtime/persona-minimal-api@sha256:404b270a3095e496db5050c8fca05f4dbaf2e7da75bbb5cd0a8f74c89ce9a041"
 
 # migration Job의 승인 이미지는 revision별로 따로 적는다.
 #
