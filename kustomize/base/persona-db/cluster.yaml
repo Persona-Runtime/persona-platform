@@ -39,6 +39,12 @@ spec:
       # 값은 Git에 없다. 사용자가 CP에서 username/password 키로 만든다.
       secret:
         name: persona-db-migrator
+      # 이 이미지의 pgvector는 superuser만 만들 수 있어 migrator가 도는 0003이 새
+      # DB에선 실패한다(2026-09-21 복원 리허설에서 발견, 적용 기록 §2-15). initdb
+      # 때만 실행되므로 기존 클러스터 무영향 — 재해복구·재구축으로 새 Cluster를
+      # 만들 때만 의미가 있다.
+      postInitApplicationSQL:
+        - CREATE EXTENSION IF NOT EXISTS vector
 
   storage:
     size: 20Gi
