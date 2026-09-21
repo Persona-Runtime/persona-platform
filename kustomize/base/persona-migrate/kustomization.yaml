@@ -12,5 +12,8 @@ kind: Kustomization
 #
 # 새 revision을 낼 때 그 Job 파일 하나만 넣고, 적용·확인이 끝나면 history/로 옮기고
 # 다시 비운다(0001 때와 같은 패턴). 연결 시점과 순서는 persona-gateway/docs/migrations.md.
-resources:
-  - job-0003-material-chunks.yaml
+#
+# 0003 Job은 적용·복원 리허설까지 끝났다(2026-09-21, persona-gateway/docs/
+# migrations.md "후속 커밋 완료", persona-platform/runbooks/
+# gate3-4-apply-record-2026-09-19.md §2-15) — history/로 옮기고 다시 비운다.
+resources: []
