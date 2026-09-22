@@ -10,9 +10,7 @@ namespace: persona-app
 resources:
   - ../../../base/persona-gateway
   - ../../../base/persona-web
-  # persona-embedding은 이미지를 아직 GHCR에 push하지 않아 여기서 뺀다 — 이대로
-  # Sync하면 자리표시자 digest 때문에 ImagePullBackOff로 Degraded가 된다. base는
-  # 그대로 두고, push·digest 확정 뒤 이 줄만 되돌린다.
+  - ../../../base/persona-embedding
   - gateway.yaml
   - httproute.yaml
   - middlewares.yaml

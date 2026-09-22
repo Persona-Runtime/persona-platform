@@ -48,9 +48,9 @@ spec:
                       - k8s-worker2
       containers:
         - name: embedding
-          # 이번 라운드는 GHCR push를 하지 않는다(§5·§7) — 실제 push 이후 이 자리표시자
-          # 다이제스트를 검증된 값으로 교체해야 한다.
-          image: ghcr.io/persona-runtime/persona-embedding-service@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          # 소스 커밋 gateway 9e60150(PR #8 머지), 검증 기록은 docs/ghcr-publication-
+          # 2026-09-22-embedding.md에 있다.
+          image: ghcr.io/persona-runtime/persona-embedding-service@sha256:a0165c1c16c96c7525f36af013aee1fa635501aad9b7f2aab05cfee31be1e887
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
@@ -80,14 +80,16 @@ spec:
             runAsGroup: 10001
           # 모델 로딩이 끝나기 전에도 프로세스는 응답한다 — liveness가 로딩 시간 동안
           # 파드를 죽이면 복구 안 되는 재시작 루프에 빠진다. 로딩 대기는 startupProbe가
-          # 맡는다(잠정값 — 실측 후 조정, periodSeconds 3 * failureThreshold 40 = 최대 120초).
+          # 맡는다. CPU 추론 모델 로딩 예상 30초~2분(persona-gateway docs/ghcr-
+          # publication-2026-09-22-embedding.md) — 상한에 여유를 두어 3분
+          # (periodSeconds 3 * failureThreshold 60 = 최대 180초)으로 둔다.
           startupProbe:
             httpGet:
               path: /healthz
               port: http
             periodSeconds: 3
             timeoutSeconds: 1
-            failureThreshold: 40
+            failureThreshold: 60
           livenessProbe:
             httpGet:
               path: /healthz
