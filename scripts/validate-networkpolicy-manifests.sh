@@ -97,6 +97,13 @@ raise "[안전] allow-gateway: traefik에서만 인입해야 한다" unless rule
 gw_egress_targets = gw.dig("spec", "egress").flat_map { |rule| (rule["to"] || []).map { |peer| peer.dig("namespaceSelector", "matchLabels", "kubernetes.io/metadata.name") || peer.dig("podSelector", "matchLabels", "app.kubernetes.io/name") } }
 raise "[안전] allow-gateway egress 대상이 다르다(persona-data·persona-embedding·kube-system이어야 한다)" unless gw_egress_targets.sort == %w[kube-system persona-data persona-embedding].sort
 
+embedding = resource(app, "NetworkPolicy", "allow-embedding")
+check_sync_wave(embedding, "0", "persona-app allow-embedding")
+raise "[안전] allow-embedding: Egress policyType을 두면 안 된다 — 이 컴포넌트는 egress 없음(오프라인 모델)" if embedding.dig("spec", "policyTypes")&.include?("Egress")
+embedding_sources = embedding.dig("spec", "ingress").flat_map { |rule| (rule["from"] || []).map { |peer| peer.dig("podSelector", "matchLabels", "app.kubernetes.io/name") } }.compact
+raise "[안전] allow-embedding: persona-gateway Pod에서만 인입해야 한다" unless embedding_sources == ["persona-gateway"]
+raise "[안전] allow-embedding: 포트가 8081이 아니다" unless rule_ports(embedding.dig("spec", "ingress", 0)) == [["TCP", 8081]]
+
 migrate = resource(app, "NetworkPolicy", "allow-migrate")
 check_sync_wave(migrate, "0", "persona-app allow-migrate")
 raise "[안전] allow-migrate: Ingress policyType을 두면 안 된다 — Job은 인바운드를 받지 않는다" if migrate.dig("spec", "policyTypes")&.include?("Ingress")

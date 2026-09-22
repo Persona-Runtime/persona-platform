@@ -55,8 +55,7 @@ spec:
           port: 8080
 ---
 # persona-gateway: traefik에서 인입, DB·같은 네임스페이스의 persona-embedding·DNS로만
-# 나간다. persona-embedding은 이 브랜치(Gate 3 기준)엔 아직 없지만, 라벨 셀렉터라
-# feat/persona-embedding-kustomize가 나중에 합쳐져도 이 규칙이 그대로 맞는다.
+# 나간다. persona-embedding 쪽 ingress 허용(allow-embedding)은 별도로 아래에 있다.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -108,6 +107,34 @@ spec:
           port: 53
         - protocol: TCP
           port: 53
+---
+# persona-embedding: 같은 네임스페이스의 gateway에서만 인입, egress 규칙을 아예 안 둬서
+# (Egress policyType 자체를 안 씀) default-deny의 전면 egress 차단을 그대로 유지한다 —
+# 모델이 이미지에 이미 구워져 있어 오프라인으로 뜨고(HF_HUB_OFFLINE=1), DNS를 포함해
+# 어디로도 나갈 필요가 없다(allow-web과 같은 이유).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-embedding
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: networkpolicy
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: persona-embedding
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: persona-gateway
+      ports:
+        - protocol: TCP
+          port: 8081
 ---
 # persona-migrate: Job이라 인바운드를 받을 이유가 없다(Ingress policyType 자체를 안 써서
 # default-deny의 전면 ingress 차단을 유지). DB로 DDL을 실행하고 DNS만 쓴다.

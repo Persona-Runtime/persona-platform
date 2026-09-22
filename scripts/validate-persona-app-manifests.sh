@@ -47,10 +47,6 @@ kubectl kustomize "$repo_dir/kustomize/overlays/prod/persona-migrate"       > "$
 kubectl kustomize "$repo_dir/kustomize/overlays/prod/persona-app"           > "$app_file"
 kubectl kustomize "$repo_dir/kustomize/overlays/prod/persona-app-ingress"   > "$ingress_file"
 
-# persona-embedding은 이미지 push 전이라 overlay에서 빠져 있다(위 app_file 렌더에는
-# 안 나온다) — base 자체가 여전히 유효하게 렌더되는지는 이 단독 빌드로만 확인한다.
-kubectl kustomize "$repo_dir/kustomize/base/persona-embedding" > /dev/null
-
 ruby -ryaml - \
   "$db_file" "$migrate_file" "$app_file" "$ingress_file" \
   "$repo_dir/argocd/persona-db.yaml" \
@@ -93,6 +89,7 @@ MIGRATION_IMAGES = {
   "0003-material-chunks" => "ghcr.io/persona-runtime/persona-minimal-api@sha256:404b270a3095e496db5050c8fca05f4dbaf2e7da75bbb5cd0a8f74c89ce9a041",
 }
 WEB_IMAGE     = "ghcr.io/persona-runtime/persona-web@sha256:26e6f0ed439ee02374be3b726bb34ee1a8fccbbeace60219084d9acbd3caf968"
+EMBEDDING_IMAGE = "ghcr.io/persona-runtime/persona-embedding-service@sha256:a0165c1c16c96c7525f36af013aee1fa635501aad9b7f2aab05cfee31be1e887"
 HOME_WORKERS  = ["k8s-worker1", "k8s-worker2"]
 
 def load(path)
@@ -319,12 +316,36 @@ raise "[안전] Web에는 Secret을 주입하지 않는다" unless (wcontainer["
   raise "[안전] Web #{probe}는 /healthz다" unless wcontainer.dig(probe, "httpGet", "path") == "/healthz"
 end
 
+embedding = resource(app, "Deployment", "persona-embedding")
+espec = embedding.fetch("spec")
+raise "[기준선] Embedding replica가 기준선(1)과 다르다 — 모델이 프로세스 메모리에 있어 여러 대면 중복 로딩된다" unless espec["replicas"] == 1
+epod = espec.dig("template", "spec")
+check_hardened_pod(epod, "Embedding", "persona-app-ghcr")
+
+econtainer = epod.fetch("containers").fetch(0)
+raise "[안전] Embedding 이미지가 검증된 amd64 child digest가 아니다" unless econtainer["image"] == EMBEDDING_IMAGE
+raise "[안전] Embedding 포트는 8081이다" unless econtainer.dig("ports", 0, "containerPort") == 8081
+check_hardened_container(econtainer, "Embedding", 10_001)
+
+# 모델 로딩이 끝나기 전에도 healthz는 응답한다 — liveness가 로딩 시간 동안 파드를
+# 죽이면 복구 안 되는 재시작 루프에 빠진다. 로딩 대기는 startupProbe가 맡는다.
+raise "[안전] Embedding startup probe는 /healthz다" unless econtainer.dig("startupProbe", "httpGet", "path") == "/healthz"
+raise "[안전] Embedding liveness probe는 /healthz다" unless econtainer.dig("livenessProbe", "httpGet", "path") == "/healthz"
+raise "[안전] Embedding readiness probe는 /readyz다" unless econtainer.dig("readinessProbe", "httpGet", "path") == "/readyz"
+# CPU 추론 모델 로딩 예상 30초~2분(persona-gateway docs/ghcr-publication-2026-09-22-
+# embedding.md) — 상한에 여유를 두어 3분(periodSeconds 3 * failureThreshold 60)으로 둔다.
+raise "[기준선] Embedding startup period가 기준선(3초)과 다르다" unless econtainer.dig("startupProbe", "periodSeconds") == 3
+raise "[기준선] Embedding startup failureThreshold가 기준선(60, 최대 180초)과 다르다" unless econtainer.dig("startupProbe", "failureThreshold") == 60
+
 # --- Service / 외부 노출 --------------------------------------------------
 ["persona-gateway", "persona-web"].each do |name|
   service = resource(app, "Service", name)
   raise "[안전] #{name} Service는 ClusterIP다" unless service.dig("spec", "type") == "ClusterIP"
   raise "[안전] #{name} Service 포트는 8080이다" unless service.dig("spec", "ports", 0, "port") == 8080
 end
+embedding_service = resource(app, "Service", "persona-embedding")
+raise "[안전] Embedding Service는 ClusterIP다" unless embedding_service.dig("spec", "type") == "ClusterIP"
+raise "[안전] Embedding Service 포트는 8081이다" unless embedding_service.dig("spec", "ports", 0, "port") == 8081
 (db + migrate + app + ingress).each do |item|
   next unless item["kind"] == "Service"
   type = item.dig("spec", "type")
