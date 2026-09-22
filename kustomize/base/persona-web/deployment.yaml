@@ -55,9 +55,9 @@ spec:
                     app.kubernetes.io/name: persona-web
       containers:
         - name: web
-          # 검증된 linux/amd64 child manifest. 소스 커밋 95d7a55 기준이며
-          # 검증 기록은 docs/ghcr-publication-2026-09-11.md에 있다.
-          image: ghcr.io/persona-runtime/persona-web@sha256:26e6f0ed439ee02374be3b726bb34ee1a8fccbbeace60219084d9acbd3caf968
+          # 검증된 linux/amd64 child manifest. 소스 커밋 7634986(PR #4 머지,
+          # 초안 화면 gateway API 계약 정합 보정).
+          image: ghcr.io/persona-runtime/persona-web@sha256:5fdebbfeca1bc6a7e8d0ecc0c203138b6cfdd908c9680ad9ca90eef6a2bb1990
           imagePullPolicy: IfNotPresent
           ports:
             - name: http

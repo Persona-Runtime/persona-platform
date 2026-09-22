@@ -88,7 +88,7 @@ MIGRATION_IMAGES = {
   "0001-persona-minimal" => "ghcr.io/persona-runtime/persona-minimal-api@sha256:922ae043feaa1a893336816c38ac17f448aa96c44ba06983652181784f52c2f6",
   "0003-material-chunks" => "ghcr.io/persona-runtime/persona-minimal-api@sha256:404b270a3095e496db5050c8fca05f4dbaf2e7da75bbb5cd0a8f74c89ce9a041",
 }
-WEB_IMAGE     = "ghcr.io/persona-runtime/persona-web@sha256:26e6f0ed439ee02374be3b726bb34ee1a8fccbbeace60219084d9acbd3caf968"
+WEB_IMAGE     = "ghcr.io/persona-runtime/persona-web@sha256:5fdebbfeca1bc6a7e8d0ecc0c203138b6cfdd908c9680ad9ca90eef6a2bb1990"
 EMBEDDING_IMAGE = "ghcr.io/persona-runtime/persona-embedding-service@sha256:a0165c1c16c96c7525f36af013aee1fa635501aad9b7f2aab05cfee31be1e887"
 HOME_WORKERS  = ["k8s-worker1", "k8s-worker2"]
 
