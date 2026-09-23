@@ -68,6 +68,22 @@ spec:
             # 환경 변수명은 PERSONA_EMBEDDING_URL이다(EMBEDDING_URL이 아니다).
             - name: PERSONA_EMBEDDING_URL
               value: http://persona-embedding.persona-app.svc.cluster.local:8081
+            # oauth2-proxy가 GitHub 인증 뒤 넘기는 X-Auth-Request-User를 신원으로
+            # 받아들인다(subject = github:<login>, 소문자). 이 신뢰는 세 가지가
+            # 동시에 성립할 때만 안전하고, 셋 다 이 저장소에서 확인했다:
+            #   1. 이 Gateway는 traefik 네임스페이스에서만 도달 가능하다
+            #      (networkpolicy/persona-app allow-gateway ingress) — 클라이언트가
+            #      Gateway에 직접 헤더를 보낼 경로가 없다.
+            #   2. 공개 경로(persona-app-ingress httproute-public.yaml)의 /v1·/ 규칙은
+            #      oauth-forward Middleware를 거치고, 그 forwardAuth.authResponseHeaders가
+            #      X-Auth-Request-User를 oauth2-proxy 응답 값으로 세운다(oauth2-proxy는
+            #      --set-xauthrequest=true로 뜬다) — 클라이언트가 보낸 값은 남지 않는다.
+            #   3. 내부/Serve 경로(persona-app httproute.yaml)는 oauth-forward를 안
+            #      거치는 대신 strip-auth-header가 /v1·/ 양쪽에서 이 헤더를 지운다.
+            # 헤더가 아예 없으면 gateway는 기존 정적 토큰 경로로 넘어간다 — 내부
+            # port-forward 검증은 이 값을 켜도 Bearer로 그대로 된다.
+            - name: PERSONA_FORWARD_AUTH_ENABLED
+              value: "true"
           envFrom:
             # DATABASE_URL(runtime 계정)과 정적 토큰·서명 키가 들어 있다.
             # migrator 자격증명은 여기 없다 — migration Job만 그것을 본다.
