@@ -295,6 +295,10 @@ gateway_secrets += (gcontainer["env"] || []).map { |e| e.dig("valueFrom", "secre
 raise "[안전] Gateway는 runtime Secret만 참조해야 한다" unless gateway_secrets.uniq == ["persona-gateway-runtime"]
 raise "[안전] Gateway에 migrator 자격증명을 주면 안 된다" if gateway_secrets.include?("persona-gateway-migrator")
 raise "[안전] DB timeout 예산을 명시해야 한다" unless (gcontainer["env"] || []).any? { |e| e["name"] == "PERSONA_DB_TIMEOUT_SECONDS" && e["value"] == "2" }
+# 이 값이 켜져 있어야 공개 경로에서 GitHub 로그인만으로 쓸 수 있다. 꺼지거나 사라지면
+# 조용히 정적 토큰 요구로 돌아가 사용자에게 토큰 입력창이 다시 뜬다 — 그 회귀를 막는다.
+# 켜도 안전한 근거(헤더 덮어쓰기·헤더 제거)는 deployment.yaml 주석에 있다.
+raise "[안전] ForwardAuth가 꺼지면 공개 경로가 정적 토큰 요구로 돌아간다" unless (gcontainer["env"] || []).any? { |e| e["name"] == "PERSONA_FORWARD_AUTH_ENABLED" && e["value"] == "true" }
 
 # DB 장애로 재시작되면 안 되므로 startup·liveness는 /healthz여야 한다.
 raise "[안전] Gateway startup probe는 /healthz다" unless gcontainer.dig("startupProbe", "httpGet", "path") == "/healthz"
