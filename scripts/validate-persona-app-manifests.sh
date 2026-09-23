@@ -92,6 +92,16 @@ WEB_IMAGE     = "ghcr.io/persona-runtime/persona-web@sha256:5fdebbfeca1bc6a7e8d0
 EMBEDDING_IMAGE = "ghcr.io/persona-runtime/persona-embedding-service@sha256:a0165c1c16c96c7525f36af013aee1fa635501aad9b7f2aab05cfee31be1e887"
 HOME_WORKERS  = ["k8s-worker1", "k8s-worker2"]
 
+# 게시 전 Job·Deployment 선언은 digest 자리에 0으로 채운 자리표시자를 쓴다(예:
+# job-0004-chat.yaml). 그 값이 승인 이미지 목록에 그대로 등록되면 "승인된 digest와
+# 일치한다"는 검사가 자리표시자끼리 맞춰져 통과해 버린다 — 실제로 존재하지 않는
+# 이미지를 승인한 셈이다. 상수 쪽에서 먼저 막는다.
+{ "GATEWAY_IMAGE" => GATEWAY_IMAGE, "WEB_IMAGE" => WEB_IMAGE, "EMBEDDING_IMAGE" => EMBEDDING_IMAGE }
+  .merge(MIGRATION_IMAGES.transform_keys { |rev| "MIGRATION_IMAGES[#{rev}]" })
+  .each do |label, image|
+    raise "[안전] #{label}에 자리표시자 digest가 남아 있다 — 게시한 이미지의 digest로 바꿔라" if image =~ /sha256:0+\z/
+  end
+
 def load(path)
   YAML.load_stream(File.read(path)).compact
 end
