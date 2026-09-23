@@ -73,7 +73,9 @@ db_path, migrate_path, app_path, ingress_path,
   ns_data_path, ns_app_path, grants_path, traefik_values_path,
   migrate_base_path, argocd_dir = ARGV
 
-GATEWAY_IMAGE = "ghcr.io/persona-runtime/persona-minimal-api@sha256:09bac81fbe4bb64e4da541e617d9e3b04dc596316a7a741616b08ecd75e65c68"
+# 호환 릴리스(gateway 7bc9738, SUPPORTED=0003·0004). 0004 Job을 적용하기 전까지는
+# 이 이미지가 0003 DB에서도 Ready다.
+GATEWAY_IMAGE = "ghcr.io/persona-runtime/persona-minimal-api@sha256:ce380717fcf1d2db0ffd22e9d4726914a82006472f4ea725e4a2d889b2d032da"
 
 # migration Job의 승인 이미지는 revision별로 따로 적는다.
 #
@@ -87,6 +89,10 @@ GATEWAY_IMAGE = "ghcr.io/persona-runtime/persona-minimal-api@sha256:09bac81fbe4b
 MIGRATION_IMAGES = {
   "0001-persona-minimal" => "ghcr.io/persona-runtime/persona-minimal-api@sha256:922ae043feaa1a893336816c38ac17f448aa96c44ba06983652181784f52c2f6",
   "0003-material-chunks" => "ghcr.io/persona-runtime/persona-minimal-api@sha256:404b270a3095e496db5050c8fca05f4dbaf2e7da75bbb5cd0a8f74c89ce9a041",
+  # 0004 Job은 아직 kustomization의 resources에 없어 렌더되지 않는다 — 그래도 승인
+  # 이미지를 먼저 등록해 둔다. 이 항목이 없으면 Job을 연결하는 커밋(백업 뒤 5단계)에서
+  # "승인 이미지가 등록되지 않은 migration Job"으로 막힌다.
+  "0004-chat" => "ghcr.io/persona-runtime/persona-minimal-api@sha256:ce380717fcf1d2db0ffd22e9d4726914a82006472f4ea725e4a2d889b2d032da",
 }
 WEB_IMAGE     = "ghcr.io/persona-runtime/persona-web@sha256:5fdebbfeca1bc6a7e8d0ecc0c203138b6cfdd908c9680ad9ca90eef6a2bb1990"
 EMBEDDING_IMAGE = "ghcr.io/persona-runtime/persona-embedding-service@sha256:a0165c1c16c96c7525f36af013aee1fa635501aad9b7f2aab05cfee31be1e887"

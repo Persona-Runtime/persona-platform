@@ -65,14 +65,21 @@ spec:
           # Gateway와 완전히 같은(호환) 이미지를 쓴다. migration 코드와 앱 코드가 갈라지면
           # readiness가 요구하는 revision과 실제 적용된 revision이 어긋난다.
           # 검증된 linux/amd64 child manifest다. tag나 parent index digest로 바꾸지 않는다.
+          # Gateway Deployment와 같은 digest이고, 소스는 gateway 7bc9738(PR #14 머지),
+          # 검증 기록은 docs/ghcr-publication-2026-09-23-compat-0004.md에 있다.
           #
-          # **자리표시자다.** 0004 호환 이미지(SUPPORTED=0003·0004)를 아직 게시하지
-          # 않았다. 게시 뒤 이 digest를 채우고, **같은 커밋에서** kustomization.yaml의
-          # resources에 이 파일을 연결하고 validator의 MIGRATION_IMAGES에 "0004-chat"
-          # 항목을 등록한다. 셋을 한 커밋으로 묶는 이유: 하나라도 빠지면 렌더가
-          # 자리표시자를 들고 통과하거나(연결만 함), 승인 이미지가 없어 검증이 막힌다.
-          # 그때까지 이 파일은 resources에 없어 렌더되지 않는다.
-          image: ghcr.io/persona-runtime/persona-minimal-api@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          # **이 파일은 아직 kustomization.yaml의 resources에 없다 — 일부러 그렇다.**
+          # 연결하면 그 순간부터 Argo가 이 Job을 만든다. 그런데 런북 "N번째 호환 창"에서
+          # 이미지 digest 반영(2단계)과 Sync(3단계)는 **백업(4단계)보다 앞이다** — 지금
+          # 연결하면 백업 전에 migration이 돌아 되돌릴 지점이 사라진다.
+          # 그래서 순서를 이렇게 나눈다:
+          #   (지금 커밋) digest 채우기 + validator MIGRATION_IMAGES["0004-chat"] 등록
+          #   (Sync·백업 뒤 별도 커밋) resources에 연결 → 5단계 Job 적용
+          # 지켜야 할 불변식은 "셋을 한 커밋에"가 아니라 **"연결은 digest와 승인 등록이
+          # 끝난 뒤에만"**이다. 이 순서면 validator도 안전하다: 자리표시자 거부는 상수만
+          # 보므로 승인 목록에 실제 digest가 있으면 통과하고, Job 이미지 매칭은 렌더된
+          # 것만 보므로 연결 전에는 검사 대상 자체가 아니다.
+          image: ghcr.io/persona-runtime/persona-minimal-api@sha256:ce380717fcf1d2db0ffd22e9d4726914a82006472f4ea725e4a2d889b2d032da
           imagePullPolicy: IfNotPresent
           command: ["/app/.venv/bin/alembic"]
           args: ["upgrade", "head"]
