@@ -17,8 +17,6 @@ kind: Kustomization
 # migrations.md "후속 커밋 완료", persona-platform/runbooks/
 # gate3-4-apply-record-2026-09-19.md §2-15) — history/로 옮기고 다시 비운다.
 #
-# job-0004-chat.yaml은 digest까지 채워져 있지만 **아직 여기 넣지 않는다.** 연결하는
-# 순간 Argo가 Job을 만드는데, 호환 이미지 Sync(런북 3단계)는 백업(4단계)보다 앞이라
-# 지금 연결하면 되돌릴 지점 없이 migration이 돈다. 백업을 끝낸 뒤 5단계 커밋에서
-# 이 줄을 `resources: [job-0004-chat.yaml]`로 바꾼다 — 자세한 근거는 그 파일 주석.
-resources: []
+# job-0004-chat.yaml은 2026-09-23 백업·subject 전환을 끝낸 뒤 연결했다(런북 5단계).
+resources:
+  - job-0004-chat.yaml
