@@ -34,6 +34,12 @@ ruby -ryaml - \
   "$repo_dir/argocd/cert-manager.yaml" \
   "$repo_dir/argocd/cert-manager-issuers.yaml" \
   "$repo_dir/argocd/persona-edge.yaml" <<'RUBY'
+# encoding: utf-8
+#
+# heredoc로 넘긴 Ruby 소스는 파일이 아니라 stdin이라, 로케일이 UTF-8이 아니면(LC_ALL=C,
+# cron 등) US-ASCII로 파싱돼 아래 한글 메시지에서 "invalid multibyte char"로 즉시 죽는다.
+# 아래 Encoding.default_external 대입은 이미 파싱이 끝난 뒤에 실행되므로 그 실패를 막지
+# 못한다 — 소스 인코딩을 고정하는 것은 이 매직 코멘트뿐이고, 반드시 첫 줄이어야 한다.
 Encoding.default_external = Encoding::UTF_8
 
 metallb_path, issuers_path, edge_path,

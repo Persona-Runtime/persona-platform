@@ -14,6 +14,16 @@ cp "$repo_dir/scripts/validate-persona-app-manifests.sh" "$test_dir/scripts/"
 sh "$test_dir/scripts/validate-persona-app-manifests.sh"
 
 ruby -ryaml - "$test_dir" <<'RUBY'
+# encoding: utf-8
+#
+# heredoc로 넘긴 Ruby 소스는 파일이 아니라 stdin이라, 로케일이 UTF-8이 아니면(LC_ALL=C,
+# cron 등) US-ASCII로 파싱돼 아래 한글 사례 이름에서 "invalid multibyte char"로 즉시 죽는다.
+# 매직 코멘트는 반드시 첫 줄이어야 하며, 고치는 것은 이 소스의 인코딩뿐이다.
+# 아래 Encoding.default_external은 다른 문제를 푼다 — 이 스크립트는 한글이 든 매니페스트를
+# File.read로 읽고 다시 File.write로 쓰므로, 외부 인코딩이 US-ASCII면 파싱을 넘겨도
+# 쓰기에서 Encoding::UndefinedConversionError가 난다.
+Encoding.default_external = Encoding::UTF_8
+
 root = ARGV.fetch(0)
 # 각 사례는 원래 파일로 되돌린 뒤 다음 사례를 실행한다. 검증 실패뿐 아니라 의도한 오류도 확인한다.
 cases = [

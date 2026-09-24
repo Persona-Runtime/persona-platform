@@ -33,6 +33,14 @@ kubectl kustomize "$repo_dir/kustomize/overlays/prod/persona-edge"            > 
 kubectl kustomize "$repo_dir/kustomize/overlays/prod/traefik-networkpolicy"   > "$traefik_file"
 
 ruby -ryaml - "$app_file" "$data_file" "$edge_file" "$traefik_file" <<'RUBY'
+# encoding: utf-8
+#
+# heredoc로 넘긴 Ruby 소스는 파일이 아니라 stdin이라, 로케일이 UTF-8이 아니면(LC_ALL=C,
+# cron 등) US-ASCII로 파싱돼 아래 한글 메시지에서 "invalid multibyte char"로 즉시 죽는다.
+# 아래 Encoding.default_external 대입은 이미 파싱이 끝난 뒤에 실행되므로 그 실패를 막지
+# 못한다 — 소스 인코딩을 고정하는 것은 이 매직 코멘트뿐이고, 반드시 첫 줄이어야 한다.
+# 두 줄은 서로 다른 문제를 푼다: 매직 코멘트는 이 소스, 아래 대입은 File.read로 읽는
+# 외부 매니페스트의 인코딩이다.
 Encoding.default_external = Encoding::UTF_8
 
 app_path, data_path, edge_path, traefik_path = ARGV
