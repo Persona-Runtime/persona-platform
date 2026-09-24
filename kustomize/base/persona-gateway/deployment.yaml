@@ -52,13 +52,17 @@ spec:
       containers:
         - name: gateway
           # 검증된 linux/amd64 child manifest. tag, latest, parent OCI index digest로 바꾸지 않는다.
-          # 소스 커밋 7bc9738(호환 릴리스: 0003_material_chunks·0004_chat 둘 다 허용,
-          # PR #14 머지), 검증 기록은 docs/ghcr-publication-2026-09-23-compat-0004.md에 있다.
+          # 소스 커밋 b59eb39(기능 릴리스: 0004_chat만 허용, PR #15 머지),
+          # 검증 기록은 docs/ghcr-publication-2026-09-24-feature-0004.md에 있다.
           #
-          # 이 이미지는 0004 채팅·초안 기능 코드를 이미 담고 있지만 DB가 아직 0003이어도
-          # Ready다 — migration보다 먼저 배포해야 하는 이유는 replicas가 1이라 migration을
-          # 먼저 올리면 떠 있는 파드가 스스로 Ready를 잃기 때문이다(런북 "N번째 호환 창" 1단계).
-          image: ghcr.io/persona-runtime/persona-minimal-api@sha256:ce380717fcf1d2db0ffd22e9d4726914a82006472f4ea725e4a2d889b2d032da
+          # 이 이미지는 0004_chat **하나만** 허용한다 — DB가 0004가 아닌 상태로 Sync하면
+          # readyz가 503이 되어 롤아웃이 멈춘다. 운영 DB는 2026-09-23에 0004를 적용·검증
+          # 했으므로 전제는 충족돼 있지만, Sync 전에 alembic revision을 한 번 더 확인한다.
+          #
+          # 롤백 대상은 직전 호환 이미지 sha256:ce380717…d032da(소스 7bc9738,
+          # 0003·0004 둘 다 허용)다 — 되돌릴 수 있는지는 돌아갈 이미지가 현재 DB
+          # revision을 지원하는지가 정한다(persona-gateway/docs/migrations.md).
+          image: ghcr.io/persona-runtime/persona-minimal-api@sha256:001d3f57640535436f6db4db810341f92b7ac55d950dc48e6599cd5c912dccfe
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
