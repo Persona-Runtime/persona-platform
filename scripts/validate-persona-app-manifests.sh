@@ -95,7 +95,7 @@ MIGRATION_IMAGES = {
   # "승인 이미지가 등록되지 않은 migration Job"으로 막힌다.
   "0004-chat" => "ghcr.io/persona-runtime/persona-minimal-api@sha256:ce380717fcf1d2db0ffd22e9d4726914a82006472f4ea725e4a2d889b2d032da",
 }
-WEB_IMAGE     = "ghcr.io/persona-runtime/persona-web@sha256:5fdebbfeca1bc6a7e8d0ecc0c203138b6cfdd908c9680ad9ca90eef6a2bb1990"
+WEB_IMAGE     = "ghcr.io/persona-runtime/persona-web@sha256:fc8e7f4a3ff5b576b197bb8bdc884debfaec8c9bf1f47297e623aae0111c2237"
 EMBEDDING_IMAGE = "ghcr.io/persona-runtime/persona-embedding-service@sha256:a0165c1c16c96c7525f36af013aee1fa635501aad9b7f2aab05cfee31be1e887"
 HOME_WORKERS  = ["k8s-worker1", "k8s-worker2"]
 
