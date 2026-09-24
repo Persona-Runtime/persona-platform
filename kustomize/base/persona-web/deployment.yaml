@@ -55,9 +55,15 @@ spec:
                     app.kubernetes.io/name: persona-web
       containers:
         - name: web
-          # 검증된 linux/amd64 child manifest. 소스 커밋 7634986(PR #4 머지,
-          # 초안 화면 gateway API 계약 정합 보정).
-          image: ghcr.io/persona-runtime/persona-web@sha256:5fdebbfeca1bc6a7e8d0ecc0c203138b6cfdd908c9680ad9ca90eef6a2bb1990
+          # 검증된 linux/amd64 child manifest. 소스 커밋 317a7ed(PR #5 머지,
+          # 대화 화면 실 구현 — SSE 스트리밍·취소·재시도).
+          #
+          # 이 번들은 0004 채팅 API(대화 생성·messages·/v1/chat/completions SSE·
+          # cancel·retry)를 호출한다 — gateway가 그 API를 제공하는 이미지여야 화면이
+          # 동작한다. 2026-09-24 기준 gateway는 기능 이미지 sha256:001d3f57…(0004 전용)다.
+          # SSE 자체는 이 컨테이너를 거치지 않는다(파일 첫 줄 참고) — HTTPRoute가
+          # /v1을 persona-gateway로 직접 보내므로 nginx 버퍼링과 무관하다.
+          image: ghcr.io/persona-runtime/persona-web@sha256:fc8e7f4a3ff5b576b197bb8bdc884debfaec8c9bf1f47297e623aae0111c2237
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
