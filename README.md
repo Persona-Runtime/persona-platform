@@ -125,6 +125,8 @@ Operator의 CP 배치는 일반 앱 CP 배치 금지 원칙의 제한적 예외�
 kubectl kustomize kustomize/overlays/prod/persona-db
 sh scripts/validate-persona-app-manifests.sh
 bash scripts/test-persona-scheduling.sh
+# monitoring-stack만 Helm chart를 네트워크로 받아 렌더한다. 오프라인에서는 돌지 않는다.
+sh scripts/validate-monitoring-manifests.sh
 ```
 
 렌더·정책 검사 성공은 실제 스케줄링, 무중단 배포, 메트릭 수집 성공의 증거가 아니다.
