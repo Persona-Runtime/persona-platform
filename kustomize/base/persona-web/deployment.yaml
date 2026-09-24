@@ -55,15 +55,22 @@ spec:
                     app.kubernetes.io/name: persona-web
       containers:
         - name: web
-          # 검증된 linux/amd64 child manifest. 소스 커밋 317a7ed(PR #5 머지,
-          # 대화 화면 실 구현 — SSE 스트리밍·취소·재시도).
+          # 검증된 linux/amd64 child manifest. 소스 커밋 d8e41e1(PR #7 머지,
+          # ForwardAuth 세션 판정·채팅 판정 보정·모바일 레이아웃).
+          #
+          # 직전 이미지(317a7ed)의 두 결함을 고친다. (1) 대화 가능 여부를 초안
+          # 상태로 판정해, 활성화하면 초안 슬롯이 비는 탓에 자료를 제대로 적용한
+          # 캐릭터일수록 대화가 막혔다 — 이제 persona.active_version_id로 판정한다.
+          # (2) 공개 경로에서도 토큰 입력창이 떠 아무 문자열이나 넣어야 통과했다 —
+          # 이제 시작할 때 토큰 없이 GET /v1/me를 한 번 보내 경로를 스스로 가른다.
           #
           # 이 번들은 0004 채팅 API(대화 생성·messages·/v1/chat/completions SSE·
-          # cancel·retry)를 호출한다 — gateway가 그 API를 제공하는 이미지여야 화면이
-          # 동작한다. 2026-09-24 기준 gateway는 기능 이미지 sha256:001d3f57…(0004 전용)다.
+          # cancel·retry)에 더해 POST /draft의 base_version_id 경로와 409
+          # draft_not_started를 쓴다 — 셋 다 gateway 기능 이미지 sha256:001d3f57…
+          # (소스 b59eb39, 0004 전용)에 이미 있다.
           # SSE 자체는 이 컨테이너를 거치지 않는다(파일 첫 줄 참고) — HTTPRoute가
           # /v1을 persona-gateway로 직접 보내므로 nginx 버퍼링과 무관하다.
-          image: ghcr.io/persona-runtime/persona-web@sha256:fc8e7f4a3ff5b576b197bb8bdc884debfaec8c9bf1f47297e623aae0111c2237
+          image: ghcr.io/persona-runtime/persona-web@sha256:a8232f5a2541e044f4db0d7efa94003a880f0cf48bf390edce4f07540689a9ed
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
