@@ -35,7 +35,11 @@ require_tools() {
 # 이유: 매핑이 실제 선언과 어긋나면(경로를 옮기고 여기를 안 고치면) 렌더가 그 자리에서
 # 실패해 바로 드러난다.
 app_source_path() {
-  ruby -ryaml -e '
+  # 매직 코멘트가 -e 소스의 **첫 줄**에 있어야 한다. -e로 넘긴 Ruby 소스는 파일이 아니라
+  # 로케일 인코딩으로 파싱되므로, LC_ALL=C 같은 환경에서는 아래 한글 abort 메시지에서
+  # "invalid multibyte char"로 죽는다. `ruby -E UTF-8`은 외부 인코딩만 바꿔 이 문제를
+  # 고치지 못한다(확인함) — 아래 다른 ruby 블록들도 같은 이유로 같은 첫 줄을 갖는다.
+  ruby -ryaml -e '# encoding: utf-8
     app = YAML.load_file(ARGV[0])
     path = app.dig("spec", "source", "path")
     abort "source.path가 없다 — 이 스크립트는 단일 source(kustomize path) Application만 지원한다" if path.nil?
@@ -44,7 +48,7 @@ app_source_path() {
 }
 
 app_namespace() {
-  ruby -ryaml -e '
+  ruby -ryaml -e '# encoding: utf-8
     app = YAML.load_file(ARGV[0])
     puts app.dig("spec", "destination", "namespace")
   ' "$repo_dir/argocd/$1.yaml"
@@ -54,7 +58,7 @@ app_namespace() {
 # 저장소의 값 파일 source)를 쓴다 — kustomize path가 아예 없다. 아래 app_helm_* 함수들이
 # 그 차트 source에서 render_at_sha가 helm template에 필요한 값을 뽑는다.
 app_is_multi_source() {
-  ruby -ryaml -e '
+  ruby -ryaml -e '# encoding: utf-8
     app = YAML.load_file(ARGV[0])
     puts app.dig("spec", "sources").nil? ? "false" : "true"
   ' "$repo_dir/argocd/$1.yaml"
@@ -63,7 +67,7 @@ app_is_multi_source() {
 app_helm_chart_source() {
   # 인자로 받은 필드(field) 하나만 출력한다 — sources 배열에서 "chart" 키를 가진
   # 항목(Helm 차트 source, 값 파일만 가리키는 source와 구분)을 찾아 그 필드를 읽는다.
-  ruby -ryaml -e '
+  ruby -ryaml -e '# encoding: utf-8
     app = YAML.load_file(ARGV[0])
     field = ARGV[1]
     chart_source = app.fetch("spec").fetch("sources").find { |s| s.key?("chart") } ||
@@ -83,7 +87,7 @@ app_helm_chart_source() {
 # $values/helm/values/<name>.yaml 형태의 valueFiles 경로에서 "$values/" 접두사를 뺀,
 # 이 저장소 루트 기준 상대 경로를 줄바꿈으로 하나씩 출력한다.
 app_helm_value_files() {
-  ruby -ryaml -e '
+  ruby -ryaml -e '# encoding: utf-8
     app = YAML.load_file(ARGV[0])
     chart_source = app.fetch("spec").fetch("sources").find { |s| s.key?("chart") } ||
       abort("Helm 차트 source를 못 찾았다")

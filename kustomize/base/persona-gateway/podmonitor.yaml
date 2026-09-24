@@ -1,0 +1,46 @@
+# Gateway 메트릭 수집. Gateway는 이미 /metrics를 제공하지만 지금까지 아무도 그걸
+# 읽지 않았다 — 무중단 배포·DB 장애 전환을 실측하려면 먼저 수집 경로가 있어야 한다.
+#
+# **이 선언만으로는 수집되지 않는다.** persona-app은 default-deny NetworkPolicy가
+# 걸려 있어 monitoring에서 들어오는 인입을 따로 허용해야 한다 — 그 허용이
+# kustomize/base/networkpolicy/persona-app/network-policy.yaml의
+# allow-gateway-metrics다. 둘은 한 쌍이며, 하나만 넣으면 Prometheus 타깃이 down으로
+# 뜬다(traefik에서 실제로 그렇게 됐다: runbooks/gate3-4-apply-record-2026-09-19.md
+# §2-13).
+#
+# 포트 이름이 metrics가 아니라 http인 이유: persona-db(9187)·traefik(9100)은 exporter가
+# 전용 포트를 따로 열지만, Gateway는 같은 FastAPI 앱이 API와 /metrics를 함께 8080에서
+# 제공한다(persona-gateway main.py의 @app.get("/metrics")). 그래서 Deployment에 있는
+# 이름은 http 하나뿐이고, 없는 이름을 지어내는 대신 그 이름을 그대로 쓴다.
+# 숫자(8080)가 아니라 이름을 쓰는 원칙은 두 선례와 같다 — 포트 번호가 바뀌어도 Pod 쪽
+# 이름만 맞으면 이 선언은 깨지지 않는다.
+#
+# 자격증명을 주지 않는다. Gateway의 /metrics는 /healthz·/readyz와 같은 운영
+# 엔드포인트로 취급돼 인증을 요구하지 않는다. 그렇다고 외부에 열려 있는 것은 아니다 —
+# HTTPRoute가 /v1만 Gateway로 보내고 /는 Web으로 보내므로 공개 URL의 /metrics는
+# Web의 404로 끝난다.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: persona-gateway
+  namespace: persona-app
+  labels:
+    # Prometheus(monitoring-stack)의 podMonitorSelector가 Helm releaseName 기준 기본
+    # 선택자(release: monitoring-stack)를 쓴다. 이 라벨이 없으면 대상에서 빠진다.
+    release: monitoring-stack
+    app.kubernetes.io/part-of: persona-platform
+spec:
+  namespaceSelector:
+    matchNames:
+      - persona-app
+  selector:
+    # Gateway Pod만 고른다. 같은 네임스페이스에 Web·Embedding·migration Job이 함께
+    # 있으므로 이 라벨 하나로 좁히지 않으면 /metrics가 없는 Pod까지 긁으려 한다.
+    matchLabels:
+      app.kubernetes.io/name: persona-gateway
+  podMetricsEndpoints:
+    - port: http
+      path: /metrics
+      scheme: http
+      interval: 30s
+      scrapeTimeout: 10s

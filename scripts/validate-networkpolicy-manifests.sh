@@ -33,6 +33,14 @@ kubectl kustomize "$repo_dir/kustomize/overlays/prod/persona-edge"            > 
 kubectl kustomize "$repo_dir/kustomize/overlays/prod/traefik-networkpolicy"   > "$traefik_file"
 
 ruby -ryaml - "$app_file" "$data_file" "$edge_file" "$traefik_file" <<'RUBY'
+# encoding: utf-8
+#
+# heredoc로 넘긴 Ruby 소스는 파일이 아니라 stdin이라, 로케일이 UTF-8이 아니면(LC_ALL=C,
+# cron 등) US-ASCII로 파싱돼 아래 한글 메시지에서 "invalid multibyte char"로 즉시 죽는다.
+# 아래 Encoding.default_external 대입은 이미 파싱이 끝난 뒤에 실행되므로 그 실패를 막지
+# 못한다 — 소스 인코딩을 고정하는 것은 이 매직 코멘트뿐이고, 반드시 첫 줄이어야 한다.
+# 두 줄은 서로 다른 문제를 푼다: 매직 코멘트는 이 소스, 아래 대입은 File.read로 읽는
+# 외부 매니페스트의 인코딩이다.
 Encoding.default_external = Encoding::UTF_8
 
 app_path, data_path, edge_path, traefik_path = ARGV
@@ -109,6 +117,24 @@ check_sync_wave(migrate, "0", "persona-app allow-migrate")
 raise "[안전] allow-migrate: Ingress policyType을 두면 안 된다 — Job은 인바운드를 받지 않는다" if migrate.dig("spec", "policyTypes")&.include?("Ingress")
 migrate_egress_targets = migrate.dig("spec", "egress").flat_map { |rule| (rule["to"] || []).map { |peer| peer.dig("namespaceSelector", "matchLabels", "kubernetes.io/metadata.name") } }
 raise "[안전] allow-migrate egress 대상이 다르다(persona-data·kube-system이어야 한다)" unless migrate_egress_targets.sort == %w[kube-system persona-data]
+
+# monitoring이 PodMonitor(kustomize/base/persona-gateway/podmonitor.yaml)로 Gateway의
+# /metrics를 직접 스크레이프한다. Gateway는 API와 /metrics를 같은 8080에서 내므로
+# 전용 metrics 포트가 없다 — 그래서 from을 monitoring 하나로 좁히는 것이 특히 중요하다.
+# 이 허용이 없으면 default-deny에 막혀 타깃이 down으로 남는다(traefik에서 실측:
+# runbooks/gate3-4-apply-record-2026-09-19.md §2-13, 같은 패턴의 allow-ingress-metrics).
+gw_metrics = resource(app, "NetworkPolicy", "allow-gateway-metrics")
+check_sync_wave(gw_metrics, "0", "persona-app allow-gateway-metrics")
+raise "[안전] allow-gateway-metrics: Egress policyType을 두면 안 된다 — 관측은 인입만 연다" if gw_metrics.dig("spec", "policyTypes")&.include?("Egress")
+raise "[안전] allow-gateway-metrics: persona-gateway Pod만 대상이어야 한다" unless gw_metrics.dig("spec", "podSelector") == { "matchLabels" => { "app.kubernetes.io/name" => "persona-gateway" } }
+gw_metrics_rules = gw_metrics.dig("spec", "ingress")
+raise "[안전] allow-gateway-metrics: ingress 규칙이 정확히 1개여야 한다" unless gw_metrics_rules.length == 1
+raise "[안전] allow-gateway-metrics: monitoring에서만 인입해야 한다" unless rule_from_namespaces(gw_metrics_rules.fetch(0)) == ["monitoring"]
+raise "[안전] allow-gateway-metrics: 포트가 8080이 아니다" unless rule_ports(gw_metrics_rules.fetch(0)) == [["TCP", 8080]]
+# 관측을 연다는 이유로 서비스 경로 규칙이 느슨해지지 않았는지 함께 본다 — 둘은 별도
+# 정책이어야 하고, allow-gateway의 인입은 traefik 한 곳(8080)으로 남아야 한다.
+raise "[안전] allow-gateway: ingress 규칙이 정확히 1개여야 한다 — 관측 허용은 allow-gateway-metrics로 분리한다" unless gw.dig("spec", "ingress").length == 1
+raise "[안전] allow-gateway: 포트가 8080이 아니다" unless rule_ports(gw.dig("spec", "ingress", 0)) == [["TCP", 8080]]
 
 # --- persona-data --------------------------------------------------------------
 data = load(data_path)

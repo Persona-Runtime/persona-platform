@@ -318,6 +318,33 @@ raise "[기준선] Gateway readiness timeout이 기준선(3초)과 다르다" un
 raise "[기준선] Gateway readiness period가 기준선(5초)과 다르다" unless gcontainer.dig("readinessProbe", "periodSeconds") == 5
 raise "[기준선] Gateway readiness failureThreshold가 기준선(1)과 다르다" unless gcontainer.dig("readinessProbe", "failureThreshold") == 1
 
+# Gateway PodMonitor — 수집 대상이 조용히 넓어지거나 사라지는 것을 막는다.
+#
+# 이 선언만으로는 수집되지 않는다. persona-app의 default-deny를 뚫는
+# allow-gateway-metrics가 함께 있어야 하고, 그쪽은 scripts/validate-networkpolicy-
+# manifests.sh가 검사한다(NetworkPolicy는 Sync가 분리돼 이 스크립트가 다루지 않는다).
+gateway_monitors = app.select { |item| item["kind"] == "PodMonitor" }
+raise "[안전] Gateway PodMonitor가 정확히 1개여야 한다: #{gateway_monitors.length}개" unless gateway_monitors.length == 1
+gateway_monitor = gateway_monitors.fetch(0)
+raise "[안전] Gateway PodMonitor 이름은 persona-gateway다" unless gateway_monitor.dig("metadata", "name") == "persona-gateway"
+raise "[안전] Gateway PodMonitor는 persona-app namespace여야 한다" unless gateway_monitor.dig("metadata", "namespace") == "persona-app"
+raise "[안전] Gateway PodMonitor에 release=monitoring-stack 라벨이 있어야 Prometheus가 대상으로 인식한다" unless gateway_monitor.dig("metadata", "labels", "release") == "monitoring-stack"
+raise "[안전] Gateway PodMonitor namespaceSelector가 persona-app만 가리켜야 한다" unless gateway_monitor.dig("spec", "namespaceSelector", "matchNames") == ["persona-app"]
+# selector를 통째로 비교한다. matchLabels만 보면 matchExpressions를 덧붙여 Web·
+# Embedding·migration Job까지 긁게 만드는 우회를 놓친다 — 그 Pod들에는 /metrics가
+# 없어 타깃이 down으로 남는다.
+raise "[안전] Gateway PodMonitor selector는 app.kubernetes.io/name=persona-gateway 하나여야 한다 — matchExpressions로 대상을 넓히지 않는다" unless gateway_monitor.dig("spec", "selector") == { "matchLabels" => { "app.kubernetes.io/name" => "persona-gateway" } }
+gateway_endpoints = gateway_monitor.dig("spec", "podMetricsEndpoints") || raise("[안전] Gateway PodMonitor에 podMetricsEndpoints가 없다")
+raise "[안전] Gateway PodMonitor podMetricsEndpoints가 정확히 1개여야 한다: #{gateway_endpoints.length}개" unless gateway_endpoints.length == 1
+gateway_endpoint = gateway_endpoints.fetch(0)
+# Gateway는 API와 /metrics를 같은 8080에서 제공하므로 전용 metrics 포트가 없다.
+# 숫자가 아니라 Deployment가 선언한 이름(http)을 써야 포트 번호가 바뀌어도 깨지지 않는다.
+raise "[안전] Gateway PodMonitor 포트는 숫자가 아니라 이름(http)이어야 한다" unless gateway_endpoint["port"] == "http"
+raise "[안전] Gateway PodMonitor 경로는 /metrics여야 한다" unless gateway_endpoint["path"] == "/metrics"
+raise "[안전] Gateway PodMonitor scheme은 http여야 한다 — 홈 클러스터 내부 통신은 TLS를 전제하지 않는다" unless gateway_endpoint["scheme"] == "http"
+raise "[기준선] Gateway PodMonitor scrape interval이 기준선(30s)과 다르다" unless gateway_endpoint["interval"] == "30s"
+raise "[기준선] Gateway PodMonitor scrapeTimeout이 기준선(10s)과 다르다" unless gateway_endpoint["scrapeTimeout"] == "10s"
+
 web = resource(app, "Deployment", "persona-web")
 wspec = web.fetch("spec")
 raise "[기준선] Web replica가 기준선(2)과 다르다" unless wspec["replicas"] == 2

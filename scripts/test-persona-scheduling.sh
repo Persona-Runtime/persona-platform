@@ -14,6 +14,16 @@ cp "$repo_dir/scripts/validate-persona-app-manifests.sh" "$test_dir/scripts/"
 sh "$test_dir/scripts/validate-persona-app-manifests.sh"
 
 ruby -ryaml - "$test_dir" <<'RUBY'
+# encoding: utf-8
+#
+# heredoc로 넘긴 Ruby 소스는 파일이 아니라 stdin이라, 로케일이 UTF-8이 아니면(LC_ALL=C,
+# cron 등) US-ASCII로 파싱돼 아래 한글 사례 이름에서 "invalid multibyte char"로 즉시 죽는다.
+# 매직 코멘트는 반드시 첫 줄이어야 하며, 고치는 것은 이 소스의 인코딩뿐이다.
+# 아래 Encoding.default_external은 다른 문제를 푼다 — 이 스크립트는 한글이 든 매니페스트를
+# File.read로 읽고 다시 File.write로 쓰므로, 외부 인코딩이 US-ASCII면 파싱을 넘겨도
+# 쓰기에서 Encoding::UndefinedConversionError가 난다.
+Encoding.default_external = Encoding::UTF_8
+
 root = ARGV.fetch(0)
 # 각 사례는 원래 파일로 되돌린 뒤 다음 사례를 실행한다. 검증 실패뿐 아니라 의도한 오류도 확인한다.
 cases = [
@@ -31,6 +41,13 @@ cases = [
   ["kustomize/base/persona-gateway/deployment.yaml", ["spec", "strategy", "type"], "Recreate", "Gateway는 RollingUpdate"],
   ["kustomize/base/persona-gateway/deployment.yaml", ["spec", "strategy", "rollingUpdate", "maxSurge"], 0, "Gateway maxSurge는 1"],
   ["kustomize/base/persona-gateway/deployment.yaml", ["spec", "strategy", "rollingUpdate", "maxUnavailable"], 1, "Gateway maxUnavailable은 0"],
+  # Gateway PodMonitor — 수집 계약을 약화·우회하는 세 가지만 고른다.
+  # (1) 간격을 줄여 기준선을 벗어나는 것, (2) selector를 matchExpressions로 바꿔
+  # /metrics가 없는 Pod까지 대상에 넣는 것, (3) 포트 이름 대신 숫자를 박아
+  # Deployment의 포트 이름과의 연결을 끊는 것.
+  ["kustomize/base/persona-gateway/podmonitor.yaml", ["spec", "podMetricsEndpoints", 0, "interval"], "5s", "Gateway PodMonitor scrape interval이 기준선(30s)과 다르다"],
+  ["kustomize/base/persona-gateway/podmonitor.yaml", ["spec", "selector"], { "matchExpressions" => [{ "key" => "app.kubernetes.io/part-of", "operator" => "In", "values" => ["persona-platform"] }] }, "matchExpressions로 대상을 넓히지 않는다"],
+  ["kustomize/base/persona-gateway/podmonitor.yaml", ["spec", "podMetricsEndpoints", 0, "port"], 8080, "Gateway PodMonitor 포트는 숫자가 아니라 이름(http)이어야 한다"],
 ]
 # migration Job 사례는 **활성 렌더에 연결된 파일**에서 뽑는다. 경로를 고정하면 다음 배포에서
 # 다른 Job이 활성화됐을 때 이 검사가 렌더되지 않는 파일을 건드리며 조용히 통과한다.
