@@ -31,6 +31,13 @@ cases = [
   ["kustomize/base/persona-gateway/deployment.yaml", ["spec", "strategy", "type"], "Recreate", "Gateway는 RollingUpdate"],
   ["kustomize/base/persona-gateway/deployment.yaml", ["spec", "strategy", "rollingUpdate", "maxSurge"], 0, "Gateway maxSurge는 1"],
   ["kustomize/base/persona-gateway/deployment.yaml", ["spec", "strategy", "rollingUpdate", "maxUnavailable"], 1, "Gateway maxUnavailable은 0"],
+  # Gateway PodMonitor — 수집 계약을 약화·우회하는 세 가지만 고른다.
+  # (1) 간격을 줄여 기준선을 벗어나는 것, (2) selector를 matchExpressions로 바꿔
+  # /metrics가 없는 Pod까지 대상에 넣는 것, (3) 포트 이름 대신 숫자를 박아
+  # Deployment의 포트 이름과의 연결을 끊는 것.
+  ["kustomize/base/persona-gateway/podmonitor.yaml", ["spec", "podMetricsEndpoints", 0, "interval"], "5s", "Gateway PodMonitor scrape interval이 기준선(30s)과 다르다"],
+  ["kustomize/base/persona-gateway/podmonitor.yaml", ["spec", "selector"], { "matchExpressions" => [{ "key" => "app.kubernetes.io/part-of", "operator" => "In", "values" => ["persona-platform"] }] }, "matchExpressions로 대상을 넓히지 않는다"],
+  ["kustomize/base/persona-gateway/podmonitor.yaml", ["spec", "podMetricsEndpoints", 0, "port"], 8080, "Gateway PodMonitor 포트는 숫자가 아니라 이름(http)이어야 한다"],
 ]
 # migration Job 사례는 **활성 렌더에 연결된 파일**에서 뽑는다. 경로를 고정하면 다음 배포에서
 # 다른 Job이 활성화됐을 때 이 검사가 렌더되지 않는 파일을 건드리며 조용히 통과한다.

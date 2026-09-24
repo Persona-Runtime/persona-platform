@@ -1,4 +1,7 @@
-# Python 최소 API. 현재 제공하는 것은 /v1/me, /v1/personas(목록·생성)와 두 probe 경로뿐이다.
+# Python API. 캐릭터·초안·대화 API(/v1/*)와 두 probe 경로(/healthz·/readyz), 그리고
+# Prometheus 노출용 /metrics를 **모두 아래 containerPort 8080 하나에서** 제공한다.
+# /metrics는 probe와 같은 운영 엔드포인트로 취급돼 인증을 요구하지 않으며, 수집 선언은
+# 같은 디렉터리의 podmonitor.yaml이다.
 apiVersion: apps/v1
 kind: Deployment
 metadata:

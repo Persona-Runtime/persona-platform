@@ -173,3 +173,53 @@ spec:
           port: 53
         - protocol: TCP
           port: 53
+---
+# persona-gateway 메트릭 인입: monitoring의 Prometheus만 8080으로 들어온다.
+#
+# 왜 allow-gateway에 규칙을 더하지 않고 별도 정책인가: allow-gateway는 "서비스
+# 트래픽"의 계약이다(traefik에서 들어오고, DB·embedding·DNS로만 나간다). 관측은
+# 목적도 주체도 수명도 다르다 — 수집을 끄거나 대상을 바꿀 때 서비스 경로 규칙을
+# 건드리지 않아야 하고, 반대로 서비스 규칙을 고칠 때 관측이 딸려 끊기지도 않아야
+# 한다. traefik도 같은 이유로 allow-ingress-metrics를 따로 뒀다.
+#
+# 왜 수집 주체를 명시해야 하는가: 이 네임스페이스는 default-deny라 "허용하지 않은
+# 것은 전부 막힘"이 기본이다. PodMonitor는 Prometheus에게 "이 Pod를 긁어라"라고
+# 알려줄 뿐 경로를 열어 주지 않는다. 실제로 traefik에서 PodMonitor만 넣었다가
+# Prometheus 타깃이 down 2개로 뜨고 `context deadline exceeded`가 난 기록이 있다
+# (runbooks/gate3-4-apply-record-2026-09-19.md §2-13). 그때와 같은 실수를 막으려고
+# PodMonitor와 이 정책을 한 쌍으로 둔다.
+#
+# from을 네임스페이스 라벨로만 좁히는 이유: Prometheus Pod의 라벨은 Helm 차트가
+# 정하고 이 저장소가 선언하지 않는다. 차트 업그레이드로 바뀌면 조용히 수집이 끊기므로,
+# 저장소가 아는 값(네임스페이스 이름)으로만 건다 — persona-data(9187)·traefik(9100)
+# 선례도 전부 같다.
+#
+# Ingress만 연다. Gateway가 monitoring으로 나갈 일은 없으므로 egress는 default-deny
+# 그대로 둔다(allow-web·allow-embedding이 Egress policyType 자체를 안 쓰는 것과 같은 뜻).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-gateway-metrics
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: networkpolicy
+  annotations:
+    # allow-*(0) → default-deny(1). 이 파일의 다른 허용 규칙과 같은 wave에 둔다.
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: persona-gateway
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        # Gateway는 API와 /metrics를 같은 8080에서 제공한다. 전용 metrics 포트가
+        # 없으므로 이 허용은 그 포트를 monitoring에도 여는 것이다 — 그래서 from을
+        # 네임스페이스 하나로 좁혀 두는 것이 중요하다.
+        - protocol: TCP
+          port: 8080

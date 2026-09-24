@@ -110,6 +110,24 @@ raise "[안전] allow-migrate: Ingress policyType을 두면 안 된다 — Job�
 migrate_egress_targets = migrate.dig("spec", "egress").flat_map { |rule| (rule["to"] || []).map { |peer| peer.dig("namespaceSelector", "matchLabels", "kubernetes.io/metadata.name") } }
 raise "[안전] allow-migrate egress 대상이 다르다(persona-data·kube-system이어야 한다)" unless migrate_egress_targets.sort == %w[kube-system persona-data]
 
+# monitoring이 PodMonitor(kustomize/base/persona-gateway/podmonitor.yaml)로 Gateway의
+# /metrics를 직접 스크레이프한다. Gateway는 API와 /metrics를 같은 8080에서 내므로
+# 전용 metrics 포트가 없다 — 그래서 from을 monitoring 하나로 좁히는 것이 특히 중요하다.
+# 이 허용이 없으면 default-deny에 막혀 타깃이 down으로 남는다(traefik에서 실측:
+# runbooks/gate3-4-apply-record-2026-09-19.md §2-13, 같은 패턴의 allow-ingress-metrics).
+gw_metrics = resource(app, "NetworkPolicy", "allow-gateway-metrics")
+check_sync_wave(gw_metrics, "0", "persona-app allow-gateway-metrics")
+raise "[안전] allow-gateway-metrics: Egress policyType을 두면 안 된다 — 관측은 인입만 연다" if gw_metrics.dig("spec", "policyTypes")&.include?("Egress")
+raise "[안전] allow-gateway-metrics: persona-gateway Pod만 대상이어야 한다" unless gw_metrics.dig("spec", "podSelector") == { "matchLabels" => { "app.kubernetes.io/name" => "persona-gateway" } }
+gw_metrics_rules = gw_metrics.dig("spec", "ingress")
+raise "[안전] allow-gateway-metrics: ingress 규칙이 정확히 1개여야 한다" unless gw_metrics_rules.length == 1
+raise "[안전] allow-gateway-metrics: monitoring에서만 인입해야 한다" unless rule_from_namespaces(gw_metrics_rules.fetch(0)) == ["monitoring"]
+raise "[안전] allow-gateway-metrics: 포트가 8080이 아니다" unless rule_ports(gw_metrics_rules.fetch(0)) == [["TCP", 8080]]
+# 관측을 연다는 이유로 서비스 경로 규칙이 느슨해지지 않았는지 함께 본다 — 둘은 별도
+# 정책이어야 하고, allow-gateway의 인입은 traefik 한 곳(8080)으로 남아야 한다.
+raise "[안전] allow-gateway: ingress 규칙이 정확히 1개여야 한다 — 관측 허용은 allow-gateway-metrics로 분리한다" unless gw.dig("spec", "ingress").length == 1
+raise "[안전] allow-gateway: 포트가 8080이 아니다" unless rule_ports(gw.dig("spec", "ingress", 0)) == [["TCP", 8080]]
+
 # --- persona-data --------------------------------------------------------------
 data = load(data_path)
 check_default_deny(data, "persona-data")
