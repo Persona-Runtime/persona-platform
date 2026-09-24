@@ -43,6 +43,29 @@ grafana:
     passwordKey: admin-password
   persistence:
     enabled: false
+  # 이미지 태그를 chart 기본값에 맡기지 않고 고정한다. 아래 plugins의 버전이 이 이미지
+  # 버전을 따라가야 하므로, chart를 올릴 때 **두 줄을 함께** 고쳐야 한다. 태그만 chart가
+  # 정하게 두면 이미지만 바뀌고 플러그인 버전은 낡은 채로 남는다.
+  # 값은 chart 89.2.0의 기본값과 같다(grafana subchart 13.2.0, appVersion 13.2.1).
+  image:
+    tag: 13.2.1-distroless
+  # Grafana 13.2부터 Prometheus datasource는 본체에 들어 있지 않은 별도 플러그인이다.
+  # 위 persistence가 꺼져 있어 /var/lib/grafana(= GF_PATHS_PLUGINS의 부모)가 emptyDir이라
+  # 플러그인은 Pod가 새로 뜰 때마다 사라진다. 그래서 기동할 때마다 다시 설치되도록
+  # 선언으로 남긴다 — Pod 안에서 수동 설치하거나 UI에서 datasource를 만들면 다음
+  # 재시작에 없어진다.
+  #
+  # chart는 이 값을 GF_PLUGINS_PREINSTALL_SYNC 환경변수로 바꾼다(grafana subchart의
+  # _pod.tpl과 _config.tpl). _SYNC는 설치가 끝날 때까지 기동을 막는 방식이라, 카탈로그를
+  # 받지 못하면 Grafana가 아예 뜨지 않는다. datasource 없이 떠서 조용히 빈 화면을 보여
+  # 주는 것보다 낫다고 보고 그 대가를 받아들인다.
+  #
+  # 한계: 기동할 때마다 외부 플러그인 카탈로그에서 내려받으므로 재현성이 네트워크에
+  # 달려 있다. 지금은 버전을 이미지와 같은 13.2.1로 고정해 흔들림만 막는다. 더 재현
+  # 가능한 길은 플러그인을 포함한 Grafana 이미지를 직접 빌드해 digest로 고정하는 것이며,
+  # 이번 범위에서는 하지 않는다.
+  plugins:
+    - prometheus@13.2.1
   ingress:
     enabled: false
   service:
