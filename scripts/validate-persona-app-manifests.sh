@@ -73,10 +73,11 @@ db_path, migrate_path, app_path, ingress_path,
   ns_data_path, ns_app_path, grants_path, traefik_values_path,
   migrate_base_path, argocd_dir = ARGV
 
-# 기능 릴리스(gateway b59eb39, SUPPORTED=0004만). 0004 적용이 끝나 호환 창을 닫았다.
-# 아래 MIGRATION_IMAGES["0004-chat"]은 이 값과 달라졌지만 그게 맞다 — 그쪽은 이미
-# 만들어진 Job이 쓴 이미지라 바꿀 수 없다(다음 주석 참고).
-GATEWAY_IMAGE = "ghcr.io/persona-runtime/persona-minimal-api@sha256:001d3f57640535436f6db4db810341f92b7ac55d950dc48e6599cd5c912dccfe"
+# bridge 릴리스(gateway 6fe5200, SUPPORTED=0004·0005, G-1 lease 인식). 0005 migration을
+# 운영 중에 안전하게 넘기기 위한 호환 창이다 — 0005 Job과 0005 전용 기능 이미지는 아직 없다.
+# 아래 MIGRATION_IMAGES["0004-chat"]은 이 값과 다르지만 그게 맞다 — 그쪽은 이미 만들어진
+# Job이 쓴 이미지라 바꿀 수 없다(다음 주석 참고).
+GATEWAY_IMAGE = "ghcr.io/persona-runtime/persona-minimal-api@sha256:26dcf9e0f2b64aa49c7683bab37ba6a937027b92b0ba2fa1f1f6ed21f53d311e"
 
 # migration Job의 승인 이미지는 revision별로 따로 적는다.
 #
