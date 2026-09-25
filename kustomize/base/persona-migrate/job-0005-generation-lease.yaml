@@ -1,0 +1,112 @@
+# Alembic migration을 Gateway와 분리해 실행한다 — 0004_chat → 0005_generation_lease.
+#
+# 왜 분리하는가·왜 PreSync hook이 아닌가·왜 이름에 revision이 들어가는가는 history/의 0004 Job과
+# 같다: 앱 시작 시 DDL을 돌리지 않는 계약의 반대편이고, 사람이 단계별로 확인한 뒤 적용하며, Job은
+# 불변 필드가 많아 revision마다 새 Job으로 만들고 로그를 남긴다.
+#
+# 무엇을 하는가(persona-gateway migrations/versions/0005_generation_lease.py): generations에
+# nullable 컬럼 두 개(owner_instance_id uuid, lease_expires_at timestamptz)와 활성 상태 부분 인덱스
+# 두 개를 더한다 — generation 소유권 lease(G-1). 기존 행은 NULL(= 소유자 없는 행)로 남는다. 새
+# 테이블이 아니라 컬럼 추가이므로 기존 테이블 권한을 상속한다 — grants 재적용 단계가 없다
+# (db/grants/persona_minimal.sql의 generations 권한은 테이블 단위다).
+#
+# 왜 `upgrade head`가 아닌가: 이 Job이 올리는 revision을 선언에 고정한다. head는 이미지가 담은
+# 마지막 revision이라, 나중에 다른 revision을 담은 이미지로 잘못 연결돼도 조용히 더 올라간다.
+# target을 적어 두면 의도한 revision에서 멈춘다(validator가 Job 이름과 target 일치를 검사한다).
+#
+# 전제(적용 전 사람이 확인):
+# - 운영 Gateway가 bridge 이미지(아래와 같은 digest, 0004·0005 둘 다 Ready)로 롤아웃돼 있어야 한다.
+#   0004 전용 이미지가 떠 있을 때 적용하면 그 Pod는 0005에서 NotReady가 된다.
+# - 운영 DB가 정확히 0004_chat이고, 백업이 끝나 있어야 한다(기존 5단계 불변식: 연결은 digest·승인
+#   등록 뒤, 그리고 백업 뒤에만).
+#
+# 실행 영향: 컬럼 추가는 메타데이터만 바꾸지만 짧은 ACCESS EXCLUSIVE 잠금을 잡고, 인덱스 생성은
+# 끝날 때까지 generations 쓰기를 막는다(작은 표라 짧다). bridge Gateway는 적용이 커밋된 뒤 재시작
+# 없이 lease 모드로 바뀐다.
+#
+# 실패 시: 재시도하지 않고(backoffLimit: 0), 자동 rollback·downgrade도 하지 않는다. DDL은 트랜잭션이라
+# 실패하면 DB는 0004에 그대로 남는다 — 사람이 로그를 보고 판단한다. 0005가 적용된 뒤에는 lease를
+# 인식하는 Gateway(bridge 이후)가 실행 중일 때 0005 downgrade를 하지 않는다 — 컬럼을 한 번 확인한
+# 프로세스는 컬럼이 사라지면 채팅 요청이 실패한다(persona-gateway api/generation-ownership-lease-
+# design.md 3절).
+#
+# 적용·확인이 끝나면 이 파일을 history/로 옮기고 kustomization의 resources를 다시 비운다.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: persona-migrate-0005-generation-lease
+  labels:
+    app.kubernetes.io/name: persona-migrate
+    app.kubernetes.io/component: database-migration
+    app.kubernetes.io/part-of: persona-platform
+    persona.runtime/alembic-revision: "0005-generation-lease"
+spec:
+  # 실패를 재시도로 덮지 않는다. DDL 실패는 사람이 로그를 보고 판단할 문제다.
+  backoffLimit: 0
+  # 잠금 대기 등으로 영원히 매달리지 않게 상한을 둔다. migration 자체는 수 초면 끝난다.
+  activeDeadlineSeconds: 600
+  # 완료된 Job과 로그를 바로 지우지 않는다. ttlSecondsAfterFinished를 두지 않는 이유다.
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: persona-migrate
+        app.kubernetes.io/component: database-migration
+        app.kubernetes.io/part-of: persona-platform
+    spec:
+      restartPolicy: Never
+      # migration은 Kubernetes API를 쓰지 않는다.
+      automountServiceAccountToken: false
+      imagePullSecrets:
+        - name: persona-app-ghcr
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - k8s-worker1
+                      - k8s-worker2
+      containers:
+        - name: alembic
+          # 운영 Gateway와 같은 bridge 이미지다. migration 코드와 앱 코드가 갈라지면 readiness가
+          # 요구하는 revision과 실제 적용된 revision이 어긋난다. 검증된 linux/amd64 child
+          # manifest다. tag나 parent index digest로 바꾸지 않는다. 소스는 gateway 6fe5200
+          # (PR #19 머지), 게시·검증 기록은 docs/ghcr-publication-2026-09-25-bridge-g1.md에 있다.
+          image: ghcr.io/persona-runtime/persona-minimal-api@sha256:26dcf9e0f2b64aa49c7683bab37ba6a937027b92b0ba2fa1f1f6ed21f53d311e
+          imagePullPolicy: IfNotPresent
+          command: ["/app/.venv/bin/alembic"]
+          args: ["upgrade", "0005_generation_lease"]
+          env:
+            # migrator 전용 자격증명만 준다. runtime Secret을 참조하지 않는다.
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: persona-gateway-migrator
+                  key: DATABASE_URL
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        # read-only rootfs에서 쓰기가 필요한 유일한 경로다.
+        - name: tmp
+          emptyDir: {}
