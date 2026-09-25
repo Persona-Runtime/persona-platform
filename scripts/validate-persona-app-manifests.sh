@@ -73,8 +73,10 @@ db_path, migrate_path, app_path, ingress_path,
   ns_data_path, ns_app_path, grants_path, traefik_values_path,
   migrate_base_path, argocd_dir = ARGV
 
-# bridge 릴리스(gateway 6fe5200, SUPPORTED=0004·0005, G-1 lease 인식). 0005 migration을
-# 운영 중에 안전하게 넘기기 위한 호환 창이다 — 0005 Job과 0005 전용 기능 이미지는 아직 없다.
+# bridge 릴리스(gateway 6fe5200, SUPPORTED=0004·0005, G-1 lease 인식). 0005 migration은
+# 적용·Complete됐다(Job은 history/). 0005 전용 기능 이미지(gateway release/gateway-0005-only)는
+# 아직 게시되지 않았다 — 게시·검증 뒤 이 값과 kustomize/base/persona-gateway/deployment.yaml의
+# image를 함께 바꾼다. 그 전까지 tag·자리표시자·추측 digest를 넣지 않는다.
 # 아래 MIGRATION_IMAGES["0004-chat"]은 이 값과 다르지만 그게 맞다 — 그쪽은 이미 만들어진
 # Job이 쓴 이미지라 바꿀 수 없다(다음 주석 참고).
 GATEWAY_IMAGE = "ghcr.io/persona-runtime/persona-minimal-api@sha256:26dcf9e0f2b64aa49c7683bab37ba6a937027b92b0ba2fa1f1f6ed21f53d311e"
@@ -95,8 +97,9 @@ MIGRATION_IMAGES = {
   # 이미지를 먼저 등록해 둔다. 이 항목이 없으면 Job을 연결하는 커밋(백업 뒤 5단계)에서
   # "승인 이미지가 등록되지 않은 migration Job"으로 막힌다.
   "0004-chat" => "ghcr.io/persona-runtime/persona-minimal-api@sha256:ce380717fcf1d2db0ffd22e9d4726914a82006472f4ea725e4a2d889b2d032da",
-  # 0005 Job은 운영 Gateway와 같은 bridge 이미지(gateway 6fe5200)를 쓴다 — 0004·0005를 둘 다
+  # 0005 Job은 운영 Gateway와 같은 bridge 이미지(gateway 6fe5200)를 썼다 — 0004·0005를 둘 다
   # 허용하므로 migration 앞뒤로 같은 이미지가 Ready이고, migration 코드와 앱 코드가 갈라지지 않는다.
+  # 적용·Complete 뒤 history/로 옮겼지만 이력으로 남긴다(0001·0003·0004와 같은 정책).
   "0005-generation-lease" => "ghcr.io/persona-runtime/persona-minimal-api@sha256:26dcf9e0f2b64aa49c7683bab37ba6a937027b92b0ba2fa1f1f6ed21f53d311e",
 }
 WEB_IMAGE     = "ghcr.io/persona-runtime/persona-web@sha256:a8232f5a2541e044f4db0d7efa94003a880f0cf48bf390edce4f07540689a9ed"
@@ -302,13 +305,36 @@ raise "[안전] ingress overlay가 Namespace를 관리하면 안 된다" if ingr
 
 gateway = resource(app, "Deployment", "persona-gateway")
 gspec = gateway.fetch("spec")
-raise "[기준선] Gateway replica가 기준선(1)과 다르다" unless gspec["replicas"] == 1
+# G-1 generation 소유권 lease(운영 DB 0005) 이후의 기준선이다. 그 전에는 새 Pod 기동이 다른
+# Pod의 진행 중 SSE를 끊었으므로 1이었다. 아래 PDB(minAvailable 1)는 replica 2를 전제한다 —
+# replica 1에서는 drain을 영원히 막는다.
+raise "[기준선] Gateway replica가 기준선(2)과 다르다 — PDB minAvailable 1과 hostname 분산이 2대를 전제한다" unless gspec["replicas"] == 2
 raise "[기준선] Gateway는 RollingUpdate로 교체한다" unless gspec.dig("strategy", "type") == "RollingUpdate"
 raise "[기준선] Gateway maxSurge는 1이다" unless gspec.dig("strategy", "rollingUpdate", "maxSurge") == 1
 raise "[기준선] Gateway maxUnavailable은 0이다" unless gspec.dig("strategy", "rollingUpdate", "maxUnavailable") == 0
 gpod = gspec.dig("template", "spec")
 check_hardened_pod(gpod, "Gateway", "persona-app-ghcr")
 raise "[기준선] Gateway 종료 유예가 기준선(30초)과 다르다 — Uvicorn graceful 25초보다 길어야 한다" unless gpod["terminationGracePeriodSeconds"] == 30
+
+# 정상 시 두 replica를 서로 다른 홈 워커에 둔다. 정확히 하나의 제약만 허용하고 값을 고정한다.
+# - ScheduleAnyway로 바꾸면 두 워커가 멀쩡해도 두 Pod가 한 워커에 몰릴 수 있어, 워커 하나 장애가
+#   두 Pod를 함께 잃는다.
+# - selector가 비었거나 part-of처럼 넓으면 다른 앱 Pod까지 셈에 들어가 분산이 틀어진다.
+# - nodeTaintsPolicy Honor: 빠지거나 Ignore면 cordon·NotReady 노드가 계산에 남아 두 번째 Pod가
+#   Pending이 된다. 워커 하나만 남았을 때는 그 워커에 함께 배치하는 것이 의도다.
+# - minDomains는 두지 않는다. 2 이상이면 워커 하나만 남았을 때 항상 Pending이다.
+GATEWAY_POD_SELECTOR = { "matchLabels" => { "app.kubernetes.io/name" => "persona-gateway" } }
+spreads = gpod["topologySpreadConstraints"] || []
+raise "[안전] Gateway topologySpreadConstraints가 정확히 1개여야 한다: #{spreads.length}개" unless spreads.length == 1
+spread = spreads.first
+raise "[안전] Gateway topology spread key는 kubernetes.io/hostname이다" unless spread["topologyKey"] == "kubernetes.io/hostname"
+raise "[안전] Gateway topology spread maxSkew는 1이다" unless spread["maxSkew"] == 1
+raise "[안전] Gateway topology spread는 DoNotSchedule이다 — ScheduleAnyway는 한 워커 몰림을 허용한다" unless spread["whenUnsatisfiable"] == "DoNotSchedule"
+raise "[안전] Gateway topology spread nodeTaintsPolicy는 Honor다 — Ignore면 cordon·NotReady 워커가 계산에 남아 두 번째 Pod가 Pending이 된다" unless spread["nodeTaintsPolicy"] == "Honor"
+raise "[안전] Gateway topology spread에 minDomains를 두지 않는다 — 워커 하나만 남으면 두 번째 Pod가 항상 Pending이다" if spread.key?("minDomains")
+raise "[안전] Gateway topology spread labelSelector는 app.kubernetes.io/name=persona-gateway 하나여야 한다 — 비거나 넓은 selector는 다른 Pod를 셈에 넣는다" unless spread["labelSelector"] == GATEWAY_POD_SELECTOR
+# 분산이 셈하는 label이 실제 Gateway Pod label과 어긋나면 제약이 아무 Pod도 세지 않는다.
+raise "[안전] Gateway Pod label이 topology spread selector와 맞지 않는다" unless gspec.dig("template", "metadata", "labels", "app.kubernetes.io/name") == "persona-gateway"
 
 gcontainer = gpod.fetch("containers").fetch(0)
 raise "[안전] Gateway 이미지가 검증된 amd64 child digest가 아니다" unless gcontainer["image"] == GATEWAY_IMAGE
@@ -362,6 +388,24 @@ raise "[안전] Gateway PodMonitor 경로는 /metrics여야 한다" unless gatew
 raise "[안전] Gateway PodMonitor scheme은 http여야 한다 — 홈 클러스터 내부 통신은 TLS를 전제하지 않는다" unless gateway_endpoint["scheme"] == "http"
 raise "[기준선] Gateway PodMonitor scrape interval이 기준선(30s)과 다르다" unless gateway_endpoint["interval"] == "30s"
 raise "[기준선] Gateway PodMonitor scrapeTimeout이 기준선(10s)과 다르다" unless gateway_endpoint["scrapeTimeout"] == "10s"
+
+# Gateway PDB — 자발적 중단(drain·eviction) 중에도 한 대는 남긴다. 노드 장애나 진행 중 SSE
+# 지속은 PDB가 보장하지 않는다(pdb.yaml 주석).
+#
+# persona-app 렌더 전체에서 PDB가 정확히 하나인지 본다. 두 번째 PDB가 같은 Pod를 겹쳐 고르면
+# eviction이 둘 다 만족해야 해서 drain이 예상과 다르게 막힐 수 있다.
+# - minAvailable은 정수 1만 허용한다: 2면 replica 2에서 drain이 영원히 막히고, "50%" 같은
+#   비율은 replica 수에 따라 뜻이 바뀐다. maxUnavailable과 함께 쓰는 것도 막는다.
+# - selector는 Gateway Pod만 고른다. part-of·빈 selector는 Web 등 다른 Pod까지 묶는다.
+pdbs = app.select { |item| item["kind"] == "PodDisruptionBudget" }
+raise "[안전] persona-app PDB가 정확히 1개(Gateway)여야 한다: #{pdbs.length}개" unless pdbs.length == 1
+gateway_pdb = pdbs.first
+raise "[안전] Gateway PDB 이름은 persona-gateway다" unless gateway_pdb.dig("metadata", "name") == "persona-gateway"
+raise "[안전] Gateway PDB는 persona-app namespace여야 한다" unless gateway_pdb.dig("metadata", "namespace") == "persona-app"
+pdb_spec = gateway_pdb.fetch("spec")
+raise "[안전] Gateway PDB minAvailable은 정수 1이다 — 2는 replica 2에서 drain을 막고, 비율은 replica 수에 따라 뜻이 바뀐다" unless pdb_spec["minAvailable"] == 1
+raise "[안전] Gateway PDB에 maxUnavailable을 함께 쓰지 않는다" if pdb_spec.key?("maxUnavailable")
+raise "[안전] Gateway PDB selector는 app.kubernetes.io/name=persona-gateway 하나여야 한다 — 넓은 selector는 다른 앱 Pod를 묶는다" unless pdb_spec["selector"] == GATEWAY_POD_SELECTOR
 
 web = resource(app, "Deployment", "persona-web")
 wspec = web.fetch("spec")
