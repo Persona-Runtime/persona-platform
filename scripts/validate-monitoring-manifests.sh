@@ -9,8 +9,9 @@ set -eu
 #
 # 이 스크립트가 지키려는 것: Grafana 13.2의 Prometheus datasource는 본체에 없는 별도
 # 플러그인이고, persistence가 꺼져 있어 플러그인 디렉터리가 Pod마다 새로 빈다. 그래서
-# "기동할 때마다 다시 설치"라는 선언이 정확히 하나 있어야 하고, 그 버전은 Grafana
-# 이미지 버전과 같아야 한다. 둘이 어긋나면 여기서 실패한다.
+# "기동할 때마다 다시 설치"라는 선언이 정확히 하나 있어야 하고, 그 설치가 이미지 안의
+# bundled 플러그인(읽기 전용)을 건드리지 않도록 as_external이 켜져 있어야 한다.
+# 둘 중 하나라도 없으면 Grafana가 기동하지 못하므로 여기서 실패한다.
 #
 # chart는 네트워크로 받는다(argocd/monitoring-stack.yaml이 가리키는 Helm 저장소).
 # 오프라인에서는 실행되지 않는다 — 그 점은 argo-preflight.sh의 render_at_sha와 같다.
@@ -65,6 +66,9 @@ Encoding.default_external = Encoding::UTF_8
 rendered_path, release_name = ARGV
 resources = YAML.load_stream(File.read(rendered_path)).compact
 
+# 기동 검증을 통과한 플러그인 버전. 올릴 때 values와 이 줄을 함께 고친다.
+PINNED_PLUGIN_VERSION = "13.2.1"
+
 def resource(all, kind, name)
   all.find { |item| item["kind"] == kind && item.dig("metadata", "name") == name } ||
     raise("[안전] #{kind}/#{name}이 렌더 결과에 없다")
@@ -102,21 +106,48 @@ raise "[안전] 설치 대상 플러그인이 prometheus가 아니다: #{plugin_
 if plugin_version.nil? || plugin_version.empty?
   raise "[안전] 플러그인 버전을 고정하지 않으면 기동할 때마다 다른 버전이 설치될 수 있다"
 end
-
-# 3. 플러그인 버전은 Grafana 이미지 버전을 따라간다. 이미지를 올리고 이 줄을 잊으면
-#    본체와 플러그인이 어긋난 채로 배포된다.
-image = grafana.fetch("image")
-image_tag = image.split(":", 2).fetch(1, "")
-expected_image = "docker.io/grafana/grafana:#{plugin_version}-distroless"
-unless image == expected_image
-  raise "[안전] Grafana 이미지와 플러그인 버전이 어긋난다: 이미지 #{image}, " \
-        "플러그인 #{plugin_version} — helm/values/monitoring-stack.yaml의 두 줄을 함께 고친다"
+# 버전은 기동 검증을 통과한 값 하나로 고정한다. Grafana 이미지 버전과 숫자가 같아야
+# 하는 계약은 없다 — 13.2.1 이미지에 bundled 13.1.7이 들어 있는 것이 그 증거다.
+# 올릴 때는 이 줄과 values를 함께 고치고, 호환은 실제 기동으로 확인한다.
+unless plugin_version == PINNED_PLUGIN_VERSION
+  raise "[기준선] 고정한 플러그인 버전과 다르다: #{plugin_version} " \
+        "(기준선 #{PINNED_PLUGIN_VERSION})"
 end
+
+# 3. bundled 플러그인을 쓰지 않게 만드는 한 줄. 이것이 없으면 preinstall이 이미지 안의
+#    bundled Prometheus를 업데이트하려 하고, 그 경로가 읽기 전용이라 설치가 실패한다.
+#    preinstall_sync는 설치 실패를 기동 실패로 만들기 때문에 Grafana가 CrashLoop에 빠진다
+#    (2026-09-25 실측: unlinkat /usr/share/grafana/data/plugins-bundled/prometheus:
+#    read-only file system).
+ini = config.dig("data", "grafana.ini") || raise("[안전] Grafana ConfigMap에 grafana.ini가 없다")
+# 같은 키가 다른 섹션에도 있을 수 있으므로 섹션을 추적하며 읽는다.
+plugin_section = {}
+current_section = nil
+ini.each_line do |line|
+  text = line.strip
+  if text.start_with?("[") && text.end_with?("]")
+    current_section = text[1..-2]
+  elsif current_section == "plugin.prometheus" && text.include?("=")
+    key, value = text.split("=", 2)
+    plugin_section[key.strip] = value.strip
+  end
+end
+if plugin_section.empty?
+  raise "[안전] grafana.ini에 [plugin.prometheus] 섹션이 없다 — bundled 플러그인을 " \
+        "업데이트하려다 읽기 전용 경로에서 실패해 Grafana가 기동하지 못한다"
+end
+unless plugin_section["as_external"] == "true"
+  raise "[안전] [plugin.prometheus] as_external이 true가 아니다: " \
+        "#{plugin_section['as_external'].inspect} — 외부 플러그인으로 설치되지 않는다"
+end
+
+# 4. 이미지는 distroless 계열을 유지한다. 버전 숫자는 위 플러그인과 맞추지 않는다.
+image_tag = grafana.fetch("image").split(":", 2).fetch(1, "")
 unless image_tag.end_with?("-distroless")
   raise "[기준선] Grafana 이미지는 distroless 태그를 쓴다: #{image_tag}"
 end
 
-# 4. 플러그인이 왜 매번 다시 설치돼야 하는지의 전제. persistence를 켜면서 위 선언을
+# 5. 플러그인이 왜 매번 다시 설치돼야 하는지의 전제. persistence를 켜면서 위 선언을
 #    지우는 조합이라면 그때 이 검사를 함께 고쳐야 한다.
 volumes = deployment.dig("spec", "template", "spec", "volumes") || []
 mount = grafana.fetch("volumeMounts").find { |item| item["mountPath"] == "/var/lib/grafana" } ||
@@ -127,7 +158,7 @@ unless storage.key?("emptyDir")
   raise "[기준선] /var/lib/grafana가 emptyDir이 아니다 — 플러그인 휘발 전제가 바뀌었다"
 end
 
-# 5. 이번 변경이 datasource provisioning을 건드리지 않았는지 확인한다. chart가 만드는
+# 6. 이번 변경이 datasource provisioning을 건드리지 않았는지 확인한다. chart가 만드는
 #    ConfigMap이라 저장소에서 직접 고칠 수 없고, 고쳐서도 안 되는 자리다.
 datasource = resource(resources, "ConfigMap", "#{release_name}-kube-prom-grafana-datasource")
 provisioning = YAML.safe_load(datasource.dig("data", "datasource.yaml"))
