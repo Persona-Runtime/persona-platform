@@ -52,6 +52,13 @@ grafana:
   # 13.2.1-distroless에서 이 설치가 이미지 안의 bundled Prometheus 플러그인을 업데이트하려다
   # 읽기 전용 bundled 경로와 충돌해 CrashLoop를 일으켰다(as_external 설정 후에도 같았다).
   # 별도 검증 전에는 사용하지 않는다.
+  #
+  # Grafana 13.2.1-distroless의 기본 자동 업데이트는 bundled plugin을 읽기 전용 이미지
+  # 경로에서 갱신하려다 실패한다. 이미 이미지에 들어 있는 plugin을 쓰고, 별도 검증 전에는
+  # Pod 기동 시 업데이트하지 않는다.
+  grafana.ini:
+    plugins:
+      preinstall_auto_update: false
   ingress:
     enabled: false
   service:

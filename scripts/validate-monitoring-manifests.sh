@@ -9,7 +9,8 @@ set -eu
 #
 # Grafana 플러그인 런타임 설치(GF_PLUGINS_PREINSTALL*)와 [plugin.prometheus] 설정은
 # 13.2.1-distroless에서 읽기 전용 bundled 경로와 충돌해 CrashLoop를 일으켰다. 별도 검증 없이
-# 다시 들어오지 않도록, 그 선언이 렌더에 없어야 통과한다.
+# 다시 들어오지 않도록, 그 선언이 렌더에 없어야 통과한다. 같은 이유로 bundled plugin
+# 자동 업데이트([plugins] preinstall_auto_update)가 false로 꺼져 있어야 통과한다.
 #
 # chart는 네트워크로 받는다(argocd/monitoring-stack.yaml이 가리키는 Helm 저장소).
 # 오프라인에서는 실행되지 않는다 — 그 점은 argo-preflight.sh의 render_at_sha와 같다.
@@ -91,20 +92,51 @@ config = resource(resources, "ConfigMap", grafana_name)
 plugins = (config.dig("data", "plugins") || "").strip
 raise "[안전] Grafana ConfigMap에 plugins 값이 있다: #{plugins}" unless plugins.empty?
 
+# grafana.ini를 섹션별 [키, 값] 목록으로 읽는다. 같은 키가 다른 섹션에 있어도 섞이지 않고,
+# 한 섹션 안에서 같은 키가 두 번 나오는 것도 셀 수 있게 Hash가 아니라 목록으로 둔다.
+ini = config.dig("data", "grafana.ini") || raise("[안전] Grafana ConfigMap에 grafana.ini가 없다")
+ini_sections = Hash.new { |hash, key| hash[key] = [] }
+current_section = nil
+ini.each_line do |line|
+  text = line.strip
+  next if text.empty? || text.start_with?("#", ";")
+  if text.start_with?("[") && text.end_with?("]")
+    current_section = text[1..-2]
+    ini_sections[current_section]
+  elsif text.include?("=")
+    key, value = text.split("=", 2)
+    ini_sections[current_section] << [key.strip, value.strip]
+  end
+end
+
 # 2. [plugin.prometheus] 섹션도 없어야 한다. as_external을 켜도 같은 경로·같은 오류가
 #    재현돼, 이 설정은 해결책으로 확인되지 않았다.
-ini = config.dig("data", "grafana.ini") || ""
-if ini.each_line.any? { |line| line.strip == "[plugin.prometheus]" }
+if ini_sections.key?("plugin.prometheus")
   raise "[안전] grafana.ini에 검증되지 않은 [plugin.prometheus] 섹션이 있다"
 end
 
-# 3. 이미지는 distroless 계열을 유지한다.
+# 3. bundled plugin 자동 업데이트를 꺼 둔다. 기본값(true)이면 Grafana가 기동 뒤 이미지 안의
+#    bundled Prometheus plugin을 새 버전으로 올리려다 읽기 전용 plugins-bundled 경로에서
+#    실패하고, 그 plugin을 잃어 datasource를 쓸 수 없게 된다(2026-09-25 로그: unlinkat
+#    .../plugins-bundled/prometheus: read-only file system → plugin prometheus not found).
+#    [plugins] 섹션의 값만 인정한다 — 다른 섹션의 같은 키는 Grafana가 읽지 않는다.
+auto_update = ini_sections["plugins"].select { |key, _| key == "preinstall_auto_update" }
+unless auto_update.length == 1
+  raise "[안전] grafana.ini [plugins]에 preinstall_auto_update가 정확히 1개여야 한다: " \
+        "#{auto_update.length}개"
+end
+unless auto_update.fetch(0).fetch(1) == "false"
+  raise "[안전] grafana.ini [plugins] preinstall_auto_update가 false가 아니다: " \
+        "#{auto_update.fetch(0).fetch(1).inspect}"
+end
+
+# 4. 이미지는 distroless 계열을 유지한다.
 image_tag = grafana.fetch("image").split(":", 2).fetch(1, "")
 unless image_tag.end_with?("-distroless")
   raise "[기준선] Grafana 이미지는 distroless 태그를 쓴다: #{image_tag}"
 end
 
-# 4. persistence를 끈 기준선. /var/lib/grafana가 emptyDir이라 Pod 안에서 수동으로 설치한
+# 5. persistence를 끈 기준선. /var/lib/grafana가 emptyDir이라 Pod 안에서 수동으로 설치한
 #    플러그인이나 UI에서 만든 설정은 재시작 때 사라진다. 이 전제가 바뀌면 여기서 드러난다.
 volumes = deployment.dig("spec", "template", "spec", "volumes") || []
 mount = grafana.fetch("volumeMounts").find { |item| item["mountPath"] == "/var/lib/grafana" } ||
@@ -115,7 +147,7 @@ unless storage.key?("emptyDir")
   raise "[기준선] /var/lib/grafana가 emptyDir이 아니다 — 플러그인 휘발 전제가 바뀌었다"
 end
 
-# 5. datasource provisioning 기준선을 확인한다. chart가 만드는 ConfigMap이라 저장소에서
+# 6. datasource provisioning 기준선을 확인한다. chart가 만드는 ConfigMap이라 저장소에서
 #    직접 고칠 수 없고, 고쳐서도 안 되는 자리다.
 datasource = resource(resources, "ConfigMap", "#{release_name}-kube-prom-grafana-datasource")
 provisioning = YAML.safe_load(datasource.dig("data", "datasource.yaml"))
