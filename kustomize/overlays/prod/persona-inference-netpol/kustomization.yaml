@@ -1,0 +1,12 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# persona-inference 네임스페이스의 NetworkPolicy만 관리한다. persona-app-netpol과 같은
+# 분리 규약이다 — 워크로드 배포와 네트워크 정책 변경은 위험도·롤백 절차가 달라 한 Sync에
+# 묶지 않는다. namespace는 bootstrap/namespaces/persona-inference.yaml이 소유한다.
+#
+# **이 overlay를 가리키는 Argo Application이 아직 없다.** 렌더와 validator 검사만 되고
+# 클러스터에는 들어가지 않는다. GPU 노드 조인과 vLLM 배포 승인 뒤에 argocd/ 아래
+# Application을 만든다(argocd/README.md의 "신규 Application 추가 시" 5단계를 따른다).
+namespace: persona-inference
+resources:
+  - ../../../base/networkpolicy/persona-inference

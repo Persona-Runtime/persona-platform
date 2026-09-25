@@ -1,0 +1,85 @@
+---
+# 읽기 전용 host 증거 수집이다. Join 전에도 안전하게 실행할 수 있지만, 성공이 GPU driver,
+# Tailscale 경로, kubeadm Join 성공을 뜻하지는 않는다.
+#
+# 모든 조회 task에 `check_mode: false`를 붙인다. `command`는 기본적으로 `--check`에서
+# 건너뛰어지므로, 그대로 두면 `--check` 실행이 아무것도 읽지 못하고 "통과"로 보인다.
+# 읽기만 하는 task이므로 check mode에서 실행해도 host를 바꾸지 않는다.
+- name: GPU worker host preflight
+  hosts: gpu_nodes
+  gather_facts: true
+  become: false
+  any_errors_fatal: true
+
+  tasks:
+    - name: Ubuntu 24.04 amd64 대상만 허용
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.distribution == 'Ubuntu'
+          - ansible_facts.distribution_major_version == '24'
+          - ansible_facts.architecture == 'x86_64'
+        fail_msg: >-
+          이 playbook은 검토한 Ubuntu 24.04 amd64 GPU host만 대상으로 한다.
+
+    # 여유 공간 기준을 숫자로 고정한다. 모델 cache와 vLLM image가 같은 루트 볼륨을 쓰므로
+    # "넉넉해 보인다"로 판단하지 않는다. gp3 100 GiB 전제에서 20 GiB 미만이면 seed 전에
+    # 정리가 필요하다.
+    - name: Root filesystem 여유 확인
+      ansible.builtin.assert:
+        that:
+          - >-
+            (ansible_facts.mounts | selectattr('mount', 'equalto', '/') | first).size_available
+            > 20 * 1024 * 1024 * 1024
+        fail_msg: >-
+          루트 여유가 20 GiB 미만이다. 모델 cache seed 전에 공간을 확보한다.
+
+    # RAM 16 GiB(g6.xlarge) 전제. 값이 크게 다르면 인스턴스 타입이 계획과 다르다는 뜻이다.
+    - name: 메모리 용량이 계획한 인스턴스와 맞는지 확인
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.memtotal_mb > 14000
+        fail_msg: >-
+          RAM이 g6.xlarge 전제(16 GiB)와 다르다. 대상 host를 다시 확인한다.
+
+    - name: Swap이 켜져 있는지 확인 (10-base가 끄기 전 상태 기록)
+      ansible.builtin.debug:
+        msg: "swaptotal_mb={{ ansible_facts.swaptotal_mb }}"
+
+    - name: Root filesystem 여유와 swap 상태 읽기
+      ansible.builtin.command:
+        cmd: "sh -c 'df -h / && swapon --show'"
+      changed_when: false
+      check_mode: false
+      register: gpu_host_storage_and_swap
+
+    - name: Clock 동기화 상태 읽기
+      ansible.builtin.command:
+        cmd: timedatectl show --property=NTPSynchronized --property=TimeUSec
+      changed_when: false
+      check_mode: false
+      register: gpu_host_clock
+
+    # MTU를 여기서 읽는 이유: Cilium underlay 기준이 1280이고 여유가 0이다. Join 뒤에
+    # 확인하면 이미 Pod 통신이 조용히 깨진 상태에서 원인을 찾게 된다. tailscale0은 아직
+    # 없을 수 있으므로 없는 것도 정상 기록이다.
+    - name: 네트워크 인터페이스와 MTU 읽기
+      ansible.builtin.command:
+        cmd: "sh -c 'ip -o link show | awk \"{print \\$2, \\$NF}\"; ip route show default'"
+      changed_when: false
+      check_mode: false
+      register: gpu_host_network
+
+    - name: 아직 설치하지 않은 binary 상태를 구분해 기록
+      ansible.builtin.command:
+        cmd: "sh -c 'for bin in nvidia-smi containerd kubeadm kubelet tailscale; do command -v \"$bin\" || true; done'"
+      changed_when: false
+      check_mode: false
+      register: gpu_host_binaries
+
+    - name: Preflight 증거 표시
+      ansible.builtin.debug:
+        msg:
+          storage_and_swap: "{{ gpu_host_storage_and_swap.stdout_lines }}"
+          clock: "{{ gpu_host_clock.stdout_lines }}"
+          network_and_mtu: "{{ gpu_host_network.stdout_lines }}"
+          binaries: "{{ gpu_host_binaries.stdout_lines }}"

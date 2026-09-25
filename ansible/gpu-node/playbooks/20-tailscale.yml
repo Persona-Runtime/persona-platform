@@ -1,0 +1,80 @@
+---
+# Tailscale **패키지 설치까지만** 한다. `tailscale up`, auth key 전달, subnet route 광고·수락,
+# SNAT 설정은 이 playbook이 하지 않는다.
+#
+# 왜 나누는가: auth key는 한 번 쓰면 끝나는 단기 비밀이다. playbook이나 inventory에 담으면
+# Ansible 로그·`--diff` 출력·셸 히스토리에 남고, 그 흔적을 되돌릴 방법이 없다. 그래서 등록은
+# 사람이 host에서 직접 하고, 이 playbook은 "그 명령을 쓸 수 있는 상태"까지만 만든다.
+#
+# route 승인은 tailnet 관리 화면에서 사람이 눌러야 유효해진다 — 자동화 대상이 아니다.
+- name: Install the Tailscale package only
+  hosts: gpu_nodes
+  gather_facts: true
+  become: true
+  any_errors_fatal: true
+
+  tasks:
+    - name: Ubuntu 24.04 amd64 대상만 변경 허용
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.distribution == 'Ubuntu'
+          - ansible_facts.distribution_major_version == '24'
+          - ansible_facts.architecture == 'x86_64'
+        fail_msg: >-
+          검토하지 않은 OS나 architecture에는 패키지를 설치하지 않는다.
+
+    - name: keyring 디렉터리 준비
+      ansible.builtin.file:
+        path: /usr/share/keyrings
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Tailscale apt 저장소 키 등록
+      ansible.builtin.get_url:
+        url: https://pkgs.tailscale.com/stable/ubuntu/noble.noarmor.gpg
+        dest: /usr/share/keyrings/tailscale-archive-keyring.gpg
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Tailscale apt 저장소 등록
+      ansible.builtin.apt_repository:
+        repo: >-
+          deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg]
+          https://pkgs.tailscale.com/stable/ubuntu noble main
+        filename: tailscale
+        state: present
+
+    - name: Tailscale 설치
+      ansible.builtin.apt:
+        name: tailscale
+        state: present
+        update_cache: true
+
+    # 서비스는 켜 두지만 tailnet에 등록하지는 않는다. `tailscaled`가 떠 있어도
+    # `tailscale up` 없이는 어떤 네트워크에도 붙지 않는다.
+    - name: tailscaled 서비스 활성화 (등록은 하지 않음)
+      ansible.builtin.systemd_service:
+        name: tailscaled
+        state: started
+        enabled: true
+
+    - name: 등록 상태 읽기 (등록하지 않는다)
+      ansible.builtin.command:
+        cmd: tailscale status --json
+      changed_when: false
+      check_mode: false
+      failed_when: false
+      register: gpu_tailscale_status
+
+    - name: 다음 단계는 사람이 실행한다
+      ansible.builtin.debug:
+        msg: >-
+          패키지 설치까지 끝났다. tailnet 등록은 이 playbook이 하지 않는다.
+          host에서 사람이 직접 `tailscale up --accept-routes`를 실행하고 auth key를 그 자리에서
+          입력한다. auth key를 이 playbook·inventory·vars·셸 인자에 넣지 않는다.
+          CP 쪽 `--advertise-routes`·`--snat-subnet-routes=false`와 route 승인도 사람이 한다.
+          현재 등록 상태 조회 결과의 exit code: {{ gpu_tailscale_status.rc }}
+          (등록 전에는 0이 아닌 값이 정상이다)

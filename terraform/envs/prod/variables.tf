@@ -1,6 +1,9 @@
 variable "expected_account_id" {
   description = "Explicit target AWS account; authenticate outside Terraform (e.g. AWS_PROFILE)."
   type        = string
+  # Not a credential, but keeping the account number out of CLI output, plan diffs and CI
+  # logs costs nothing. The other variables here are public keys, CIDRs and a bool.
+  sensitive = true
   validation {
     condition     = can(regex("^[0-9]{12}$", var.expected_account_id))
     error_message = "Provide the verified 12-digit target account ID."

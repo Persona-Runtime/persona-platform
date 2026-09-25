@@ -1,0 +1,211 @@
+---
+# NVIDIA driver와 NVIDIA Container Toolkit 설치·검증.
+#
+# driver 분기를 왜 변수로 받고 기본값을 비워 두는가: 이 조합은 vLLM image가 요구하는 것에
+# 묶여 있다. `v0.29.0-cu129-ubuntu2404`의 `NVIDIA_REQUIRE_CUDA`가 허용하는 분기는
+# 535·550·560·565·570뿐이고 그 중 가장 높은 570 LTS를 고른다(근거는
+# terraform/envs/prod/vllm-node-join-plan.md §4). 패키지 이름·patch는 실행 직전에 실제
+# 저장소에서 읽어 넘긴다 — 여기서 추측하지 않는다.
+#
+# 재부팅을 조건부로 두는 이유: driver는 kernel module이라 적재 중인 버전을 교체하려면
+# 재부팅이 필요하다. 매 실행마다 재부팅하면 두 번째 실행이 멱등하지 않고, 운영 중 노드를
+# 이유 없이 내린다. 그래서 "설치가 실제로 바뀐 경우"에만 재부팅을 요청한다.
+- name: Install the NVIDIA driver and container toolkit
+  hosts: gpu_nodes
+  gather_facts: true
+  become: true
+  any_errors_fatal: true
+
+  vars:
+    # 예: "570". 비어 있으면 아무것도 설치하지 않고 끝낸다.
+    nvidia_driver_branch: ""
+    # 예: "1.20.1-1". 비어 있으면 저장소의 현재 버전을 쓴다(실행 기록에 실제 값을 남긴다).
+    nvidia_container_toolkit_version: ""
+
+  tasks:
+    - name: Ubuntu 24.04 amd64 대상만 변경 허용
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.distribution == 'Ubuntu'
+          - ansible_facts.distribution_major_version == '24'
+          - ansible_facts.architecture == 'x86_64'
+        fail_msg: >-
+          검토하지 않은 OS나 architecture에는 GPU runtime을 설치하지 않는다.
+
+    - name: driver 분기가 주어지지 않았음을 알린다
+      ansible.builtin.debug:
+        msg: >-
+          nvidia_driver_branch가 비어 있어 아무것도 설치하지 않고 끝낸다. 실제 저장소에서
+          패키지 이름과 patch를 읽어 `-e nvidia_driver_branch=570` 형태로 넘긴 뒤 다시
+          실행한다. 570을 고른 근거는 vllm-node-join-plan.md §4에 있다.
+      when: nvidia_driver_branch | length == 0
+
+    - name: driver 분기가 주어지지 않으면 여기서 멈춘다
+      ansible.builtin.meta: end_host
+      when: nvidia_driver_branch | length == 0
+
+    # 이미 설치된 driver를 먼저 읽는다. 같은 분기가 이미 있으면 재설치하지 않는다.
+    - name: 설치된 NVIDIA driver 확인
+      ansible.builtin.command:
+        cmd: nvidia-smi --query-gpu=driver_version --format=csv,noheader
+      changed_when: false
+      check_mode: false
+      failed_when: false
+      register: gpu_driver_before
+
+    - name: 현재 driver 상태 표시
+      ansible.builtin.debug:
+        msg: >-
+          driver 조회 rc={{ gpu_driver_before.rc }},
+          값={{ gpu_driver_before.stdout | default('(없음)') | trim }}
+
+    - name: NVIDIA driver 설치
+      ansible.builtin.apt:
+        name: "nvidia-driver-{{ nvidia_driver_branch }}-server"
+        state: present
+        update_cache: true
+      register: gpu_driver_install
+
+    - name: NVIDIA Container Toolkit apt 저장소 키 등록
+      ansible.builtin.get_url:
+        url: https://nvidia.github.io/libnvidia-container/gpgkey
+        dest: /usr/share/keyrings/nvidia-container-toolkit-keyring.asc
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: NVIDIA Container Toolkit apt 저장소 등록
+      ansible.builtin.apt_repository:
+        repo: >-
+          deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.asc]
+          https://nvidia.github.io/libnvidia-container/stable/deb/$(ARCH) /
+        filename: nvidia-container-toolkit
+        state: present
+
+    # 네 패키지의 버전이 서로 어긋나면 runtime hook이 조용히 실패한다. 버전을 지정할 때는
+    # 네 개를 같은 값으로 묶는다.
+    - name: NVIDIA Container Toolkit 설치
+      ansible.builtin.apt:
+        name: >-
+          {{
+            ['nvidia-container-toolkit', 'nvidia-container-toolkit-base',
+             'libnvidia-container-tools', 'libnvidia-container1']
+            | map('regex_replace', '$', '=' ~ nvidia_container_toolkit_version)
+            | list
+            if nvidia_container_toolkit_version | length > 0
+            else ['nvidia-container-toolkit']
+          }}
+        state: present
+        update_cache: true
+      register: gpu_toolkit_install
+
+    # containerd에 nvidia runtime을 등록한다. `--set-as-default`는 쓰지 않는다 — 모든
+    # container가 GPU runtime을 거치게 하면 GPU를 요청하지 않은 Pod까지 영향을 받는다.
+    #
+    # 등록 여부를 **매번 읽는다.** toolkit 설치가 바뀐 경우에만 등록하면, toolkit이 이미
+    # 깔린 뒤 config.toml의 nvidia 항목이 사라지는 경우(containerd 재설치, `containerd
+    # config default` 재생성, 수동 편집)를 재실행으로 복구하지 못한다. GPU 노드 bootstrap은
+    # 몇 번 돌려도 같은 상태로 수렴해야 한다.
+    - name: containerd 설정의 nvidia runtime 등록 상태 읽기
+      ansible.builtin.command:
+        # 인용 방식이 containerd 버전마다 다르다(`runtimes.nvidia` / `runtimes."nvidia"`).
+        cmd: grep -Eq 'runtimes\.["'"'"']?nvidia' /etc/containerd/config.toml
+      changed_when: false
+      check_mode: false
+      failed_when: false
+      register: gpu_nvidia_runtime_before
+
+    - name: nvidia runtime이 없으면 등록 (drift 복구)
+      ansible.builtin.command:
+        cmd: nvidia-ctk runtime configure --runtime=containerd
+      when: gpu_nvidia_runtime_before.rc != 0
+      changed_when: true
+      notify: Restart containerd
+
+    # 아래 검증이 **실행 중인 daemon의 실효 설정**을 읽으므로, handler를 play 끝까지 미루면
+    # 옛 설정을 보고 통과시킨다. 변경이 있었을 때만 재시작이 일어난다.
+    - name: 변경이 있었으면 containerd 재시작을 먼저 처리
+      ansible.builtin.meta: flush_handlers
+
+    # 파일이 아니라 daemon이 실제로 로드한 설정을 본다. 파일만 맞고 재시작이 안 된 상태를
+    # 통과로 기록하지 않는다.
+    - name: 실행 중인 containerd의 실효 설정에서 nvidia runtime 확인
+      ansible.builtin.shell:
+        cmd: set -o pipefail; containerd config dump | grep -Eq 'runtimes\.["'"'"']?nvidia'
+      args:
+        executable: /bin/bash
+      changed_when: false
+      check_mode: false
+      failed_when: false
+      register: gpu_nvidia_runtime_effective
+
+    - name: nvidia runtime이 실효 설정에 있는지 단정
+      ansible.builtin.assert:
+        that:
+          - gpu_nvidia_runtime_effective.rc == 0
+        fail_msg: >-
+          실행 중인 containerd의 실효 설정에 nvidia runtime이 없다. 파일에는 있어도 daemon이
+          아직 읽지 않았거나, nvidia-ctk 설정이 다른 곳에 쓰였을 수 있다. config.toml 경로와
+          containerd 서비스 상태를 확인한다.
+      # --check에서는 위 등록 task가 건너뛰어진다. drift가 있는 host라면 실효 설정에도
+      # 없는 것이 당연하므로, check mode에서 이 단정을 실패로 만들지 않는다.
+      when: not ansible_check_mode
+
+    - name: check mode에서는 실효 설정 단정을 건너뛴다
+      ansible.builtin.debug:
+        msg: >-
+          --check 실행이라 nvidia runtime 등록과 실효 설정 단정을 건너뛰었다. 등록 필요 여부는
+          위 "nvidia runtime이 없으면 등록" task의 skipped/changed 표시로 판단한다.
+      when: ansible_check_mode
+
+    - name: driver나 toolkit이 바뀐 경우에만 재부팅
+      ansible.builtin.reboot:
+        reboot_timeout: 600
+        msg: "NVIDIA driver 적재를 위해 Ansible이 재부팅한다"
+      when: gpu_driver_install.changed
+
+    - name: 재부팅 뒤 driver 확인
+      ansible.builtin.command:
+        cmd: nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader
+      changed_when: false
+      check_mode: false
+      register: gpu_driver_after
+
+    # GPU가 정확히 1장인지 확인한다. 0장이면 driver가 적재되지 않았거나 인스턴스가
+    # 계획과 다르고, 2장 이상이면 기준선 전제가 깨진다.
+    - name: GPU 1장과 driver 분기 확인
+      ansible.builtin.assert:
+        that:
+          - gpu_driver_after.stdout_lines | length == 1
+          - nvidia_driver_branch in gpu_driver_after.stdout
+        fail_msg: >-
+          GPU가 1장이 아니거나 driver 분기가 요청값({{ nvidia_driver_branch }})과 다르다.
+          실제 값: {{ gpu_driver_after.stdout | default('(없음)') }}
+
+    - name: GPU runtime 증거 표시
+      ansible.builtin.debug:
+        msg:
+          driver_before: "{{ gpu_driver_before.stdout | default('(없음)') | trim }}"
+          driver_after: "{{ gpu_driver_after.stdout_lines }}"
+          toolkit_changed: "{{ gpu_toolkit_install.changed }}"
+          nvidia_runtime_was_registered: "{{ gpu_nvidia_runtime_before.rc == 0 }}"
+          note: >-
+            container 안에서의 GPU 실행과 Kubernetes device plugin 배포는 이 playbook의
+            범위가 아니다. `nvidia.com/gpu: 1` allocatable 확인은 Join 뒤 별도 단계다.
+
+# 실제 host에서 확인할 것 (개발 환경에 ansible이 없어 실행하지 못했다)
+#
+# 1. **재실행 수렴**: 연속으로 두 번 실행해 두 번째가 `changed=0`인지 본다. driver·toolkit이
+#    이미 맞고 nvidia runtime도 등록돼 있으면 재부팅도 등록도 일어나지 않아야 한다.
+# 2. **drift 복구**: `/etc/containerd/config.toml`에서 `runtimes.nvidia` 블록을 일부러 지운 뒤
+#    다시 실행한다. 등록 task가 `changed`가 되고 containerd가 재시작되고 실효 설정 단정이
+#    통과해야 한다. 그리고 세 번째 실행은 다시 `changed=0`이어야 한다.
+# 3. **`--check`**: drift가 있는 host에서 `--check`를 돌리면 등록 task가 "would change"로
+#    보이고 실효 설정 단정은 건너뛰어진다. 이때 통과를 "정상"으로 읽지 않는다.
+
+  handlers:
+    - name: Restart containerd
+      ansible.builtin.systemd_service:
+        name: containerd
+        state: restarted
+        enabled: true

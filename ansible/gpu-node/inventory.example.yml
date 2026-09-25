@@ -1,0 +1,8 @@
+# 합성 예시다. 실제 IP, 키 경로, Tailnet 주소, 토큰을 Git에 넣지 않는다.
+all:
+  children:
+    gpu_nodes:
+      hosts:
+        persona-gpu-01:
+          ansible_host: 203.0.113.10
+          ansible_user: ubuntu

@@ -1,0 +1,207 @@
+---
+# Kubernetes host 공통 전제와 container runtime·kube 패키지 준비. driver와 Tailscale
+# 등록, Join은 하지 않는다. 이 파일에는 token·tailnet auth·Join 정보가 없으므로 재실행해도
+# 클러스터 등록 상태를 바꾸지 않는다.
+#
+# `--check`에 대한 규칙: 상태를 **읽는** task는 `check_mode: false`로 check mode에서도
+# 실행하고, 그 결과를 조건으로 삼는 **바꾸는** task는 check mode에서 건너뛰어진다.
+# 이렇게 하면 `--check`가 "무엇이 바뀔지"를 실제 host 상태 기준으로 보여 준다. 이전 판은
+# 읽기와 쓰기를 모두 `command`로 두어 `--check`가 아무것도 검사하지 못했다.
+- name: Prepare base OS prerequisites for one GPU worker
+  hosts: gpu_nodes
+  gather_facts: true
+  become: true
+  any_errors_fatal: true
+
+  vars:
+    gpu_base_packages:
+      - ca-certificates
+      - curl
+      - gnupg
+      - kmod
+    gpu_kernel_modules:
+      - overlay
+      - br_netfilter
+    # 실제 값은 control plane에서 읽어 채운다. 추측한 버전으로 설치하지 않는다 —
+    # kubelet이 CP보다 새 minor면 Join이 거부되거나 이후 동작이 보장되지 않는다.
+    gpu_kubernetes_minor: ""
+
+  tasks:
+    - name: Ubuntu 24.04 amd64 대상만 변경 허용
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.distribution == 'Ubuntu'
+          - ansible_facts.distribution_major_version == '24'
+          - ansible_facts.architecture == 'x86_64'
+        fail_msg: >-
+          검토하지 않은 OS나 architecture에는 Kubernetes host 설정을 적용하지 않는다.
+
+    - name: Base package 설치
+      ansible.builtin.apt:
+        name: "{{ gpu_base_packages }}"
+        state: present
+        update_cache: true
+
+    - name: Kubernetes 네트워크 kernel module을 부팅 후에도 유지
+      ansible.builtin.copy:
+        dest: /etc/modules-load.d/persona-kubernetes.conf
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          overlay
+          br_netfilter
+
+    # 지금 적재된 module 목록을 먼저 읽는다(읽기라서 check mode에서도 돈다).
+    - name: 현재 적재된 kernel module 읽기
+      ansible.builtin.command:
+        cmd: cat /proc/modules
+      changed_when: false
+      check_mode: false
+      register: gpu_loaded_modules
+
+    # 없는 것만 적재한다. 두 번째 실행에서는 조건이 거짓이 되어 아무것도 하지 않는다.
+    - name: 빠진 module만 현재 kernel에 적재
+      ansible.builtin.command:
+        cmd: "modprobe {{ item }}"
+      loop: "{{ gpu_kernel_modules }}"
+      when: item not in gpu_loaded_modules.stdout
+      changed_when: true
+
+    - name: Kubernetes bridge와 forwarding sysctl 선언
+      ansible.builtin.copy:
+        dest: /etc/sysctl.d/99-persona-kubernetes.conf
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          net.bridge.bridge-nf-call-iptables = 1
+          net.bridge.bridge-nf-call-ip6tables = 1
+          net.ipv4.ip_forward = 1
+      register: gpu_sysctl_file
+
+    # 파일이 바뀐 경우에만 반영한다. 매 실행마다 `sysctl --system`을 돌리면 다른 곳의
+    # 설정까지 다시 적용되고, 무엇이 바뀌었는지 기록에서 사라진다.
+    - name: 선언이 바뀐 경우에만 sysctl 반영
+      ansible.builtin.command:
+        cmd: sysctl --system
+      when: gpu_sysctl_file.changed
+      changed_when: true
+
+    - name: sysctl 실효값 읽기
+      ansible.builtin.command:
+        cmd: "sh -c 'sysctl -n net.ipv4.ip_forward net.bridge.bridge-nf-call-iptables'"
+      changed_when: false
+      check_mode: false
+      register: gpu_sysctl_effective
+
+    - name: sysctl 실효값이 1인지 확인
+      ansible.builtin.assert:
+        that:
+          - gpu_sysctl_effective.stdout_lines | map('trim') | list == ['1', '1']
+        fail_msg: >-
+          ip_forward 또는 bridge-nf-call-iptables가 1이 아니다. 파일만 쓰였고 반영되지 않았다.
+
+    # swap이 실제로 켜져 있을 때만 끈다 — 두 번째 실행에서 건너뛰어진다.
+    - name: Swap이 켜져 있으면 비활성화
+      ansible.builtin.command:
+        cmd: swapoff -a
+      when: ansible_facts.swaptotal_mb | default(0) > 0
+      changed_when: true
+
+    - name: Reboot 뒤에도 swap mount를 막기 위한 fstab 주석 처리
+      ansible.builtin.replace:
+        path: /etc/fstab
+        regexp: '^(?!#)(\S+\s+\S+\s+swap\s+.*)$'
+        replace: '# \1'
+
+    - name: Base 변경 뒤 swap 상태 재확인
+      ansible.builtin.command:
+        cmd: swapon --noheadings
+      changed_when: false
+      check_mode: false
+      register: gpu_host_swap
+
+    - name: Swap이 남아 있지 않은지 확인
+      ansible.builtin.assert:
+        that:
+          - gpu_host_swap.stdout | length == 0
+        fail_msg: >-
+          swap이 아직 활성 상태다. kubelet은 swap이 있으면 기동을 거부한다.
+
+    # containerd와 kube 패키지는 버전이 확정되기 전에는 설치하지 않는다. 패키지 이름을
+    # 추측해 설치하면 CP보다 새 kubelet이 들어와 Join이 거부될 수 있다.
+    - name: control plane 버전이 주어지지 않으면 kube 패키지 단계를 건너뛴다
+      ansible.builtin.debug:
+        msg: >-
+          gpu_kubernetes_minor가 비어 있어 containerd·kubeadm·kubelet 설치를 건너뛴다.
+          control plane의 실제 minor·patch를 읽어 `-e gpu_kubernetes_minor=1.36` 형태로
+          넘긴 뒤 다시 실행한다.
+      when: gpu_kubernetes_minor | length == 0
+
+    - name: containerd 설치
+      ansible.builtin.apt:
+        name: containerd
+        state: present
+        update_cache: true
+      when: gpu_kubernetes_minor | length > 0
+
+    # kubelet은 systemd cgroup driver를 쓰는 containerd를 전제한다. 기본 설정 파일은
+    # SystemdCgroup=false로 생성되므로 그대로 두면 kubelet이 불안정해진다.
+    - name: containerd 기본 설정 생성
+      ansible.builtin.shell:
+        cmd: containerd config default > /etc/containerd/config.toml
+        creates: /etc/containerd/config.toml
+      when: gpu_kubernetes_minor | length > 0
+
+    - name: containerd를 systemd cgroup driver로 설정
+      ansible.builtin.replace:
+        path: /etc/containerd/config.toml
+        regexp: '^(\s*)SystemdCgroup = false$'
+        replace: '\1SystemdCgroup = true'
+      when: gpu_kubernetes_minor | length > 0
+      notify: Restart containerd
+
+    - name: Kubernetes apt 저장소 키 등록
+      ansible.builtin.get_url:
+        url: "https://pkgs.k8s.io/core:/stable:/v{{ gpu_kubernetes_minor }}/deb/Release.key"
+        dest: /etc/apt/keyrings/kubernetes-apt-keyring.asc
+        mode: '0644'
+      when: gpu_kubernetes_minor | length > 0
+
+    - name: Kubernetes apt 저장소 등록
+      ansible.builtin.apt_repository:
+        repo: >-
+          deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.asc]
+          https://pkgs.k8s.io/core:/stable:/v{{ gpu_kubernetes_minor }}/deb/ /
+        filename: kubernetes
+        state: present
+      when: gpu_kubernetes_minor | length > 0
+
+    - name: kubeadm·kubelet·kubectl 설치
+      ansible.builtin.apt:
+        name:
+          - kubeadm
+          - kubelet
+          - kubectl
+        state: present
+        update_cache: true
+      when: gpu_kubernetes_minor | length > 0
+
+    # hold를 걸어야 apt 전체 업그레이드가 kubelet을 CP보다 앞서 올리지 않는다.
+    - name: kube 패키지 버전 고정
+      ansible.builtin.dpkg_selections:
+        name: "{{ item }}"
+        selection: hold
+      loop:
+        - kubeadm
+        - kubelet
+        - kubectl
+      when: gpu_kubernetes_minor | length > 0
+
+  handlers:
+    - name: Restart containerd
+      ansible.builtin.systemd_service:
+        name: containerd
+        state: restarted
+        enabled: true
