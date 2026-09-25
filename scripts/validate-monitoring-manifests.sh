@@ -11,7 +11,8 @@ set -eu
 # 플러그인이고, persistence가 꺼져 있어 플러그인 디렉터리가 Pod마다 새로 빈다. 그래서
 # "기동할 때마다 다시 설치"라는 선언이 정확히 하나 있어야 하고, 그 설치가 이미지 안의
 # bundled 플러그인(읽기 전용)을 건드리지 않도록 as_external이 켜져 있어야 한다.
-# 둘 중 하나라도 없으면 Grafana가 기동하지 못하므로 여기서 실패한다.
+# as_external 없이 Sync했을 때 실제로 기동하지 못했으므로 둘 다 없으면 여기서 실패한다.
+# 반대로 여기를 통과했다는 것이 기동 성공을 뜻하지는 않는다.
 #
 # chart는 네트워크로 받는다(argocd/monitoring-stack.yaml이 가리키는 Helm 저장소).
 # 오프라인에서는 실행되지 않는다 — 그 점은 argo-preflight.sh의 render_at_sha와 같다.
@@ -66,7 +67,9 @@ Encoding.default_external = Encoding::UTF_8
 rendered_path, release_name = ARGV
 resources = YAML.load_stream(File.read(rendered_path)).compact
 
-# 기동 검증을 통과한 플러그인 버전. 올릴 때 values와 이 줄을 함께 고친다.
+# 이번 배포 후보로 고정한 플러그인 버전.
+# 외부 plugin 경로의 실제 기동 검증은 Argo Sync 뒤에 수행한다.
+# 올릴 때는 values와 이 줄을 함께 고친다.
 PINNED_PLUGIN_VERSION = "13.2.1"
 
 def resource(all, kind, name)
@@ -106,19 +109,19 @@ raise "[안전] 설치 대상 플러그인이 prometheus가 아니다: #{plugin_
 if plugin_version.nil? || plugin_version.empty?
   raise "[안전] 플러그인 버전을 고정하지 않으면 기동할 때마다 다른 버전이 설치될 수 있다"
 end
-# 버전은 기동 검증을 통과한 값 하나로 고정한다. Grafana 이미지 버전과 숫자가 같아야
-# 하는 계약은 없다 — 13.2.1 이미지에 bundled 13.1.7이 들어 있는 것이 그 증거다.
-# 올릴 때는 이 줄과 values를 함께 고치고, 호환은 실제 기동으로 확인한다.
+# 버전은 배포 후보 하나로 고정한다. Grafana 이미지 버전과 숫자가 같아야 하는 계약은
+# 없다 — 13.2.1 이미지에 bundled 13.1.7이 들어 있는 것이 그 증거다. 이 검사는 선언이
+# 흔들리지 않는지만 보며, 그 버전이 실제로 기동하는지는 Sync 뒤 로그로 확인한다.
 unless plugin_version == PINNED_PLUGIN_VERSION
   raise "[기준선] 고정한 플러그인 버전과 다르다: #{plugin_version} " \
         "(기준선 #{PINNED_PLUGIN_VERSION})"
 end
 
-# 3. bundled 플러그인을 쓰지 않게 만드는 한 줄. 이것이 없으면 preinstall이 이미지 안의
-#    bundled Prometheus를 업데이트하려 하고, 그 경로가 읽기 전용이라 설치가 실패한다.
-#    preinstall_sync는 설치 실패를 기동 실패로 만들기 때문에 Grafana가 CrashLoop에 빠진다
+# 3. bundled 플러그인을 쓰지 않게 하려는 한 줄. 이것 없이 Sync했을 때 preinstall이 이미지
+#    안의 bundled Prometheus를 업데이트하려 했고, 그 경로가 읽기 전용이라 설치가 실패했다.
+#    preinstall_sync는 설치 실패를 기동 실패로 만들어 Grafana가 CrashLoop에 빠졌다
 #    (2026-09-25 실측: unlinkat /usr/share/grafana/data/plugins-bundled/prometheus:
-#    read-only file system).
+#    read-only file system). 이 검사는 그 선언이 렌더에 들어갔는지까지만 본다.
 ini = config.dig("data", "grafana.ini") || raise("[안전] Grafana ConfigMap에 grafana.ini가 없다")
 # 같은 키가 다른 섹션에도 있을 수 있으므로 섹션을 추적하며 읽는다.
 plugin_section = {}
@@ -138,7 +141,7 @@ if plugin_section.empty?
 end
 unless plugin_section["as_external"] == "true"
   raise "[안전] [plugin.prometheus] as_external이 true가 아니다: " \
-        "#{plugin_section['as_external'].inspect} — 외부 플러그인으로 설치되지 않는다"
+        "#{plugin_section['as_external'].inspect} — 외부 플러그인 경로로 보내는 선언이 없다"
 end
 
 # 4. 이미지는 distroless 계열을 유지한다. 버전 숫자는 위 플러그인과 맞추지 않는다.

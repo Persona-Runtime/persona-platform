@@ -70,7 +70,7 @@ grafana:
   # 이번 범위에서는 하지 않는다.
   plugins:
     - prometheus@13.2.1
-  # as_external이 없으면 Grafana가 기동하지 못한다. 2026-09-25 Sync 뒤 실제로 CrashLoop에
+  # as_external 없이 Sync했을 때 Grafana가 기동하지 못했다. 2026-09-25 실제로 CrashLoop에
   # 빠졌고 로그가 이렇게 남았다:
   #
   #   Updating plugin pluginId=prometheus from=13.1.7 to=13.2.1
@@ -81,9 +81,14 @@ grafana:
   # 읽기 전용인 /usr/share/grafana/data/plugins-bundled를 지워야 해서 설치가 실패했다.
   # preinstall이 _SYNC라 설치 실패가 곧 기동 실패가 된다.
   #
-  # as_external은 Prometheus datasource를 bundled가 아니라 외부 플러그인으로 다루게 한다.
-  # 그러면 설치 대상이 읽기 전용 경로가 아니라 위 GF_PATHS_PLUGINS(/var/lib/grafana/plugins,
-  # emptyDir)가 되어 지울 것이 없다.
+  # as_external은 Prometheus datasource를 bundled가 아니라 외부 플러그인으로 다루게 하려는
+  # 선언이다. 의도는 설치 대상을 읽기 전용 경로가 아니라 위 GF_PATHS_PLUGINS
+  # (/var/lib/grafana/plugins, emptyDir)로 보내는 것이다.
+  #
+  # 지금 확인된 것은 렌더까지다 — Grafana ini에 [plugin.prometheus] as_external = true가
+  # 들어간다는 것만 검증했다. 실제로 그 경로에 설치되고 Grafana가 기동하는지는 Argo Sync
+  # 뒤 로그로 확인한다. 로그에 plugins-bundled read-only 오류가 다시 보이면 이 선언으로는
+  # 부족하다는 뜻이다.
   grafana.ini:
     plugin.prometheus:
       as_external: true
