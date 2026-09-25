@@ -4,6 +4,17 @@ locals {
   gpu_node_name       = "persona-gpu-01"
   gpu_instance_type   = "g6.xlarge"
   gpu_root_volume_gib = 100
+
+  # 아웃바운드 규칙을 한 곳에 모은다. 새 규칙은 이 map에 항목을 더하는 방식이 되고,
+  # tests/safety.tftest.hcl이 항목 수를 단정하므로 조용히 늘어나지 않는다.
+  # 지금은 전체 허용 하나다 — README의 "외부 송신 통제는 하지 않는 초기 정책"이 그것이다.
+  gpu_egress_rules = {
+    all_outbound = {
+      ip_protocol = "-1"
+      cidr_ipv4   = "0.0.0.0/0"
+      description = "Initial downloads, updates and Tailscale connectivity; egress is not filtered in v1"
+    }
+  }
 }
 
 data "aws_ami" "ubuntu" {
@@ -74,11 +85,20 @@ resource "aws_security_group" "gpu" {
   tags        = { Name = "persona-gpu" }
 }
 
+# Egress rules are declared only through this collection, so a test can count them.
+#
+# What the count does and does not cover: `terraform test` can assert the size of this map,
+# so a rule added here is caught. It cannot enumerate resources it was not told about, so a
+# separate `aws_vpc_security_group_egress_rule` declared elsewhere stays invisible to it.
+# The collection is therefore a convention and the test checks that the convention holds --
+# it is not proof that the security group has exactly one egress rule.
 resource "aws_vpc_security_group_egress_rule" "outbound" {
+  for_each = local.gpu_egress_rules
+
   security_group_id = aws_security_group.gpu.id
-  ip_protocol       = "-1"
-  cidr_ipv4         = "0.0.0.0/0"
-  description       = "Initial downloads, updates and Tailscale connectivity; egress is not filtered in v1"
+  ip_protocol       = each.value.ip_protocol
+  cidr_ipv4         = each.value.cidr_ipv4
+  description       = each.value.description
 }
 
 resource "aws_vpc_security_group_ingress_rule" "bootstrap_ssh" {

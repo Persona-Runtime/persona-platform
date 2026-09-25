@@ -31,6 +31,40 @@ run "closed_ingress_baseline" {
     condition     = aws_instance.gpu.user_data == null
     error_message = "Do not place bootstrap tokens in user data."
   }
+  # A guest-side shutdown must stop, not terminate: the root volume carries the model
+  # cache and delete_on_termination is true, so a terminate would silently discard it.
+  assert {
+    condition     = aws_instance.gpu.instance_initiated_shutdown_behavior == "stop"
+    error_message = "A guest shutdown must stop the instance, not terminate it and destroy the model cache."
+  }
+  # Pins the current choice rather than endorsing it: the root volume is deleted on
+  # terminate, which is why the shutdown behaviour above and prevent_destroy both matter.
+  assert {
+    condition     = aws_instance.gpu.root_block_device[0].delete_on_termination
+    error_message = "Root volume deletion on terminate is the reviewed baseline; changing it needs a separate cost and recovery decision."
+  }
+  # IMDSv2 alone is not enough. A hop limit above 1 lets a container reach the instance
+  # metadata service, and metadata tags would expose instance tags to anything on the host.
+  assert {
+    condition     = aws_instance.gpu.metadata_options[0].http_put_response_hop_limit == 1 && aws_instance.gpu.metadata_options[0].instance_metadata_tags == "disabled"
+    error_message = "Keep the metadata hop limit at 1 and instance metadata tags disabled."
+  }
+  # Counts the egress rules declared through local.gpu_egress_rules. Adding an entry there
+  # fails this assertion, which is the point: egress is deliberately open (README) and that
+  # choice should not grow quietly.
+  #
+  # Limit worth stating: this counts the collection, not the security group. A separate
+  # `aws_vpc_security_group_egress_rule` resource declared under another name is invisible
+  # here, because a test cannot enumerate resources it was not given. Declaring egress only
+  # through the collection is a convention; this assertion checks the convention holds.
+  assert {
+    condition     = length(aws_vpc_security_group_egress_rule.outbound) == 1
+    error_message = "Egress must stay a single declared rule; add one only with a separate decision."
+  }
+  assert {
+    condition     = aws_vpc_security_group_egress_rule.outbound["all_outbound"].ip_protocol == "-1" && aws_vpc_security_group_egress_rule.outbound["all_outbound"].cidr_ipv4 == "0.0.0.0/0"
+    error_message = "The baseline outbound rule stays all-protocol to 0.0.0.0/0; narrowing it is a separate decision."
+  }
 }
 
 run "explicit_peer_access" {
