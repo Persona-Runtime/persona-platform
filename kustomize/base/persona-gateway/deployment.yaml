@@ -55,17 +55,25 @@ spec:
       containers:
         - name: gateway
           # 검증된 linux/amd64 child manifest. tag, latest, parent OCI index digest로 바꾸지 않는다.
-          # 소스 커밋 b59eb39(기능 릴리스: 0004_chat만 허용, PR #15 머지),
-          # 검증 기록은 docs/ghcr-publication-2026-09-24-feature-0004.md에 있다.
+          # 소스 커밋 6fe5200(bridge 릴리스: G-1 generation 소유권 lease, PR #19 머지),
+          # 게시·검증 기록은 docs/ghcr-publication-2026-09-25-bridge-g1.md에 있다.
           #
-          # 이 이미지는 0004_chat **하나만** 허용한다 — DB가 0004가 아닌 상태로 Sync하면
-          # readyz가 503이 되어 롤아웃이 멈춘다. 운영 DB는 2026-09-23에 0004를 적용·검증
-          # 했으므로 전제는 충족돼 있지만, Sync 전에 alembic revision을 한 번 더 확인한다.
+          # bridge 호환 창: 이 이미지는 0004_chat과 0005_generation_lease를 **둘 다** 허용한다.
+          # "허용 목록만 넓힌" 호환 이미지가 아니다 — 기동 시 전역 reconcile이 없고, lease
+          # 컬럼이 실제로 있을 때만 lease를 쓴다. 0004에서는 소유자 없는 행 규칙(240초 유예)만
+          # 쓰고, 0005가 적용되면 재시작 없이 lease로 바뀐다. Sync 전에 운영 DB의 alembic
+          # revision이 0004_chat(또는 0005_generation_lease)인지 확인한다.
           #
-          # 롤백 대상은 직전 호환 이미지 sha256:ce380717…d032da(소스 7bc9738,
-          # 0003·0004 둘 다 허용)다 — 되돌릴 수 있는지는 돌아갈 이미지가 현재 DB
-          # revision을 지원하는지가 정한다(persona-gateway/docs/migrations.md).
-          image: ghcr.io/persona-runtime/persona-minimal-api@sha256:001d3f57640535436f6db4db810341f92b7ac55d950dc48e6599cd5c912dccfe
+          # 롤백 대상은 돌아갈 이미지가 현재 DB revision을 지원하는지가 정한다
+          # (persona-gateway/docs/migrations.md). DB가 0004인 동안은 직전 기능 이미지
+          # sha256:001d3f57…dccfe(소스 b59eb39, 0004 전용)로 되돌릴 수 있지만, 그 이미지는
+          # 전역 기동 reconcile이 있어 교체 때 진행 중 SSE가 끊긴다. 0005 적용 뒤에는 이
+          # bridge 이미지만 롤백 목적지다. 0005 downgrade는 이 이미지 이후의 Gateway가 실행
+          # 중일 때 하지 않는다(persona-gateway api/generation-ownership-lease-design.md 3절).
+          #
+          # 이 변경은 배포 순서의 1단계만 담는다. 0005 migration Job, 0005 전용 기능 이미지,
+          # replica 2·PDB·topology spread는 이후 단계의 별도 PR이다 — 그래서 replicas는 1이다.
+          image: ghcr.io/persona-runtime/persona-minimal-api@sha256:26dcf9e0f2b64aa49c7683bab37ba6a937027b92b0ba2fa1f1f6ed21f53d311e
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
