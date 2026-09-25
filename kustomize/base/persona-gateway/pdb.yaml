@@ -1,0 +1,24 @@
+# Gateway 두 replica 중 최소 한 대는 자발적 중단 중에도 남긴다.
+#
+# 막는 것은 Eviction API를 거치는 자발적 중단(kubectl drain, 노드 유지보수, eviction 기반
+# 스케일 조정)뿐이다. 워커 노드 장애·커널 패닉·OOM kill 같은 비자발적 중단은 PDB와 무관하게
+# 일어나고, Deployment 롤링 업데이트도 PDB가 아니라 strategy(maxUnavailable 0)가 제어한다.
+# 한 대가 남아도 그 Pod로 가던 진행 중 SSE는 끊긴다 — PDB는 서비스가 계속 응답하는 것만 돕고,
+# 개별 스트림의 지속은 보장하지 않는다(끊긴 generation은 G-1 lease 규칙으로 회수된다).
+#
+# minAvailable 1은 replicas 2일 때만 의미가 있다. replica 1에 걸면 drain이 영원히 막히므로
+# validator가 replicas 2와 함께 검사한다. 대상은 Gateway Pod뿐이다 — 넓은 selector는 다른 앱의
+# Pod를 셈에 넣어 보호가 틀어진다.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: persona-gateway
+  labels:
+    app.kubernetes.io/name: persona-gateway
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: persona-platform
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: persona-gateway

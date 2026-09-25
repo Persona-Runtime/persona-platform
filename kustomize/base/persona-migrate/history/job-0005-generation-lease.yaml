@@ -30,7 +30,8 @@
 # 프로세스는 컬럼이 사라지면 채팅 요청이 실패한다(persona-gateway api/generation-ownership-lease-
 # design.md 3절).
 #
-# 적용·확인이 끝나면 이 파일을 history/로 옮기고 kustomization의 resources를 다시 비운다.
+# 이력(2026-09-25): 운영에 적용돼 Complete됐고, 이 파일을 history/로 옮겨 resources를 다시
+# 비웠다. 렌더되지 않으므로 클러스터에 영향이 없다 — 다시 연결하지 않는다.
 apiVersion: batch/v1
 kind: Job
 metadata:

@@ -11,9 +11,15 @@ metadata:
     app.kubernetes.io/component: api
     app.kubernetes.io/part-of: persona-platform
 spec:
-  # 한 대로 시작한다. 캐릭터 생성은 사용자 행 잠금으로 직렬화되므로 여러 대여도 정확하지만,
-  # 이번 단계에서 복제 수를 늘려 얻을 것이 없다.
-  replicas: 1
+  # 두 대로 운영한다. G-1 generation 소유권 lease(운영 DB 0005_generation_lease)가 들어간 뒤라,
+  # 새 Pod가 기동해도 살아 있는 다른 Pod의 generation은 lease가 만료되기 전까지 회수하지 않는다.
+  # G-1 이전에는 새 Pod 기동이 다른 Pod의 진행 중 SSE를 reconciling으로 바꿨으므로 replica를
+  # 늘리지 않았다. 캐릭터 생성은 사용자 행 잠금으로, 사용자당 활성 generation 1개는 DB 제약으로
+  # 직렬화되므로 여러 대여도 정확하다.
+  #
+  # 롤링 업데이트 중에는 maxSurge 1 때문에 잠깐 세 대가 된다. 그만큼의 메모리와 DB 연결
+  # 여유(Pod마다 연결 풀 하나)가 필요하다 — 이 여유는 아직 운영에서 측정하지 않았다.
+  replicas: 2
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -41,7 +47,33 @@ spec:
       securityContext:
         seccompProfile:
           type: RuntimeDefault
-      # CP와 향후 GPU 노드에는 배치하지 않는다.
+      # 정상 시에는 두 replica를 서로 다른 워커에 둔다. 워커 하나가 죽어도 두 Pod를 함께 잃지
+      # 않게 하려는 것이다. 대상은 Gateway Pod뿐이다 — part-of 같은 넓은 label로 고르면 Web 등
+      # 다른 앱의 Pod까지 셈에 들어가 분산이 틀어진다.
+      #
+      # 워커 하나가 cordon·drain·NotReady이거나 사라지면, 두 번째 Pod(와 롤링 중 surge Pod)는
+      # 남은 워커에 함께 배치될 수 있다. 분산보다 "한 대라도 더 서비스한다"를 우선한 선택이다.
+      # - nodeTaintsPolicy: Honor — 기본값(Ignore)이면 cordon(unschedulable)·NotReady(not-ready,
+      #   unreachable) taint가 붙은 노드도 분산 계산에 남는다. 그러면 남은 워커 쪽 skew가 2가 돼
+      #   두 번째 Pod가 Pending으로 남고, drain도 옮겨 갈 자리를 잃는다. Honor면 이 Pod가
+      #   tolerate하지 않는 NoSchedule taint가 있는 노드를 계산에서 뺀다.
+      # - minDomains는 두지 않는다(생략 = 1). 2로 두면 워커 하나만 남았을 때 두 번째 Pod가 항상
+      #   Pending이다.
+      # NotReady 노드의 기존 Pod는 기본 toleration(NoExecute 300초)이 끝나 eviction된 뒤에야
+      # 교체 Pod가 생긴다. 워커가 돌아와도 자동으로 다시 나뉘지 않는다 — 분산은 스케줄링
+      # 시점에만 적용되므로 다음 롤아웃·재생성 때까지 한 워커에 몰려 있을 수 있다.
+      # 위 동작은 Kubernetes 문서와 scheduler 규칙 기준이며 실제 클러스터에서는 아직 확인하지
+      # 않았다.
+      topologySpreadConstraints:
+        - topologyKey: kubernetes.io/hostname
+          maxSkew: 1
+          whenUnsatisfiable: DoNotSchedule
+          nodeTaintsPolicy: Honor
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: persona-gateway
+      # CP와 향후 GPU 노드에는 배치하지 않는다. 위 분산은 이 두 워커 안에서만 계산된다
+      # (nodeAffinity를 통과한 노드만 분산 대상 도메인이 된다).
       affinity:
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
@@ -60,19 +92,18 @@ spec:
           #
           # bridge 호환 창: 이 이미지는 0004_chat과 0005_generation_lease를 **둘 다** 허용한다.
           # "허용 목록만 넓힌" 호환 이미지가 아니다 — 기동 시 전역 reconcile이 없고, lease
-          # 컬럼이 실제로 있을 때만 lease를 쓴다. 0004에서는 소유자 없는 행 규칙(240초 유예)만
-          # 쓰고, 0005가 적용되면 재시작 없이 lease로 바뀐다. Sync 전에 운영 DB의 alembic
-          # revision이 0004_chat(또는 0005_generation_lease)인지 확인한다.
+          # 컬럼이 실제로 있을 때만 lease를 쓴다. 운영 DB는 이미 0005_generation_lease이므로
+          # (migration Job Complete) 지금은 lease 모드로만 동작한다.
           #
           # 롤백 대상은 돌아갈 이미지가 현재 DB revision을 지원하는지가 정한다
-          # (persona-gateway/docs/migrations.md). DB가 0004인 동안은 직전 기능 이미지
-          # sha256:001d3f57…dccfe(소스 b59eb39, 0004 전용)로 되돌릴 수 있지만, 그 이미지는
-          # 전역 기동 reconcile이 있어 교체 때 진행 중 SSE가 끊긴다. 0005 적용 뒤에는 이
-          # bridge 이미지만 롤백 목적지다. 0005 downgrade는 이 이미지 이후의 Gateway가 실행
-          # 중일 때 하지 않는다(persona-gateway api/generation-ownership-lease-design.md 3절).
+          # (persona-gateway/docs/migrations.md). 0005 적용 뒤에는 이 bridge 이미지가 롤백
+          # 목적지다 — 직전 기능 이미지 sha256:001d3f57…dccfe(0004 전용)는 0005에서 Ready가
+          # 되지 않는다. 0005 downgrade는 이 이미지 이후의 Gateway가 실행 중일 때 하지 않는다
+          # (persona-gateway api/generation-ownership-lease-design.md 3절).
           #
-          # 이 변경은 배포 순서의 1단계만 담는다. 0005 migration Job, 0005 전용 기능 이미지,
-          # replica 2·PDB·topology spread는 이후 단계의 별도 PR이다 — 그래서 replicas는 1이다.
+          # 0005만 허용하는 기능 이미지(persona-gateway release/gateway-0005-only)는 아직 게시되지
+          # 않았다. 게시·검증 뒤 이 digest와 scripts/validate-persona-app-manifests.sh의
+          # GATEWAY_IMAGE를 함께 바꾼다. 그 전까지 tag나 추측 digest를 넣지 않는다.
           image: ghcr.io/persona-runtime/persona-minimal-api@sha256:26dcf9e0f2b64aa49c7683bab37ba6a937027b92b0ba2fa1f1f6ed21f53d311e
           imagePullPolicy: IfNotPresent
           ports:

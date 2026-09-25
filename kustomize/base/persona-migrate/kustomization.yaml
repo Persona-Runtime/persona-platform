@@ -16,7 +16,12 @@ kind: Kustomization
 # 0003(2026-09-21)·0004(2026-09-23) Job은 적용·검증을 끝내고 history/로 옮겼다 —
 # 기록은 runbooks/gate3-4-apply-record-2026-09-19.md와 런북 §5.
 #
-# 0005(2026-09-25 연결): G-1 generation 소유권 lease 컬럼. 운영 Gateway가 bridge 이미지로
-# 롤아웃되고 백업이 끝난 뒤 적용한다. 적용·확인이 끝나면 history/로 옮기고 다시 비운다.
-resources:
-  - job-0005-generation-lease.yaml
+# 0005(2026-09-25): G-1 generation 소유권 lease 컬럼. 운영 Gateway가 bridge 이미지로 롤아웃된
+# 뒤 적용했고 Job이 Complete됐다(운영 DB revision 0005_generation_lease). 선언은 history/로 옮겼다.
+#
+# resources에서 빼는 것은 클러스터의 완료된 Job을 지우지도, 다시 실행하지도 않는다. CP는 이
+# 디렉터리를 `kubectl apply -k`로만 적용하고 --prune을 쓰지 않으므로, 렌더에서 사라진 Job은
+# 클러스터에 그대로 남는다(로그 보존 목적 — ttlSecondsAfterFinished도 두지 않았다). 비어 있는
+# 렌더를 apply해도 아무 일도 일어나지 않는다. history/의 파일을 여기에 다시 연결하는 것은
+# validator가 막는다.
+resources: []

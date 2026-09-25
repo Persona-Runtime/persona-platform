@@ -25,6 +25,11 @@ ruby -ryaml - "$test_dir" <<'RUBY'
 Encoding.default_external = Encoding::UTF_8
 
 root = ARGV.fetch(0)
+# 값 자리에 이 표식을 두면 값을 바꾸는 대신 그 키를 지운다. "빈 값"과 "선언 누락"은 validator가
+# 다르게 읽을 수 있으므로(nil·[] 처리) 누락 사례는 실제로 키를 지워 재현한다.
+DELETE_KEY = :delete_key
+GATEWAY_DEPLOYMENT = "kustomize/base/persona-gateway/deployment.yaml"
+GATEWAY_PDB = "kustomize/base/persona-gateway/pdb.yaml"
 # 각 사례는 원래 파일로 되돌린 뒤 다음 사례를 실행한다. 검증 실패뿐 아니라 의도한 오류도 확인한다.
 cases = [
   ["kustomize/base/persona-db/cluster.yaml", ["spec", "priorityClassName"], "persona-critical", "DB: 커스텀 PriorityClass"],
@@ -48,6 +53,29 @@ cases = [
   ["kustomize/base/persona-gateway/podmonitor.yaml", ["spec", "podMetricsEndpoints", 0, "interval"], "5s", "Gateway PodMonitor scrape interval이 기준선(30s)과 다르다"],
   ["kustomize/base/persona-gateway/podmonitor.yaml", ["spec", "selector"], { "matchExpressions" => [{ "key" => "app.kubernetes.io/part-of", "operator" => "In", "values" => ["persona-platform"] }] }, "matchExpressions로 대상을 넓히지 않는다"],
   ["kustomize/base/persona-gateway/podmonitor.yaml", ["spec", "podMetricsEndpoints", 0, "port"], 8080, "Gateway PodMonitor 포트는 숫자가 아니라 이름(http)이어야 한다"],
+  # Gateway HA(replica 2·PDB·hostname 분산) — G-1 이후 기준선이 조용히 약해지는 경로를 막는다.
+  # replica 1로 돌아가면 PDB minAvailable 1이 drain을 영원히 막는다.
+  [GATEWAY_DEPLOYMENT, ["spec", "replicas"], 1, "Gateway replica가 기준선(2)과 다르다"],
+  # PDB 파일은 남아도 kustomization에서 빠지면 렌더되지 않는다 — 실제로 흔한 누락 경로다.
+  ["kustomize/base/persona-gateway/kustomization.yaml", ["resources"], ["deployment.yaml", "service.yaml", "podmonitor.yaml"], "persona-app PDB가 정확히 1개(Gateway)여야 한다: 0개"],
+  [GATEWAY_PDB, ["spec", "minAvailable"], 2, "Gateway PDB minAvailable은 정수 1이다"],
+  [GATEWAY_PDB, ["spec", "minAvailable"], "50%", "Gateway PDB minAvailable은 정수 1이다"],
+  # 네임스페이스 전체(part-of) selector — Web Pod까지 묶어 보호 대상이 틀어진다.
+  [GATEWAY_PDB, ["spec", "selector"], { "matchLabels" => { "app.kubernetes.io/part-of" => "persona-platform" } }, "Gateway PDB selector는 app.kubernetes.io/name=persona-gateway 하나여야 한다"],
+  [GATEWAY_PDB, ["spec", "selector"], {}, "Gateway PDB selector는 app.kubernetes.io/name=persona-gateway 하나여야 한다"],
+  [GATEWAY_DEPLOYMENT, ["spec", "template", "spec", "topologySpreadConstraints"], DELETE_KEY, "Gateway topologySpreadConstraints가 정확히 1개여야 한다: 0개"],
+  [GATEWAY_DEPLOYMENT, ["spec", "template", "spec", "topologySpreadConstraints", 0, "labelSelector"], {}, "Gateway topology spread labelSelector는 app.kubernetes.io/name=persona-gateway 하나여야 한다"],
+  [GATEWAY_DEPLOYMENT, ["spec", "template", "spec", "topologySpreadConstraints", 0, "labelSelector"], { "matchLabels" => { "app.kubernetes.io/part-of" => "persona-platform" } }, "Gateway topology spread labelSelector는 app.kubernetes.io/name=persona-gateway 하나여야 한다"],
+  [GATEWAY_DEPLOYMENT, ["spec", "template", "spec", "topologySpreadConstraints", 0, "whenUnsatisfiable"], "ScheduleAnyway", "Gateway topology spread는 DoNotSchedule이다"],
+  [GATEWAY_DEPLOYMENT, ["spec", "template", "spec", "topologySpreadConstraints", 0, "maxSkew"], 2, "Gateway topology spread maxSkew는 1이다"],
+  [GATEWAY_DEPLOYMENT, ["spec", "template", "spec", "topologySpreadConstraints", 0, "topologyKey"], "topology.kubernetes.io/zone", "Gateway topology spread key는 kubernetes.io/hostname이다"],
+  # 워커 하나가 cordon·NotReady일 때 남은 워커로 옮기는 동작을 되돌리는 경로들.
+  [GATEWAY_DEPLOYMENT, ["spec", "template", "spec", "topologySpreadConstraints", 0, "nodeTaintsPolicy"], "Ignore", "Gateway topology spread nodeTaintsPolicy는 Honor다"],
+  [GATEWAY_DEPLOYMENT, ["spec", "template", "spec", "topologySpreadConstraints", 0, "nodeTaintsPolicy"], DELETE_KEY, "Gateway topology spread nodeTaintsPolicy는 Honor다"],
+  [GATEWAY_DEPLOYMENT, ["spec", "template", "spec", "topologySpreadConstraints", 0, "minDomains"], 2, "Gateway topology spread에 minDomains를 두지 않는다"],
+  # 적용이 끝나 history/로 옮긴 Job을 다시 연결하면 Job 수는 1이라 개수 검사를 통과한다.
+  # 경로 검사가 막는지 본다(완료된 0005 Job을 되살리는 경로).
+  ["kustomize/base/persona-migrate/kustomization.yaml", ["resources"], ["history/job-0005-generation-lease.yaml"], "history/의 과거 선언을 활성 렌더에 연결했다"],
 ]
 # migration Job 사례는 **활성 렌더에 연결된 파일**에서 뽑는다. 경로를 고정하면 다음 배포에서
 # 다른 Job이 활성화됐을 때 이 검사가 렌더되지 않는 파일을 건드리며 조용히 통과한다.
@@ -72,7 +100,11 @@ cases.each do |relative_path, keys, value, message|
   begin
     document = YAML.load(original)
     parent = keys[0...-1].reduce(document) { |node, key| node.fetch(key) }
-    parent[keys.last] = value
+    if value == DELETE_KEY
+      parent.delete(keys.last)
+    else
+      parent[keys.last] = value
+    end
     File.write(path, YAML.dump(document))
     output_path = File.join(root, "result.log")
     success = system("sh", File.join(root, "scripts/validate-persona-app-manifests.sh"), out: output_path, err: [:child, :out])
