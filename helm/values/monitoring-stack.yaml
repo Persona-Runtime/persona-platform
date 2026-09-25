@@ -46,47 +46,12 @@ grafana:
   # 이미지 태그를 chart 기본값에 맡기지 않고 여기서 고정한다. 값은 chart 89.2.0의
   # 기본값과 같다(grafana subchart 13.2.0, appVersion 13.2.1). 태그는 digest가 아니라
   # 같은 태그로 다른 이미지가 올 수 있다 — 완전한 불변 식별자는 아니다.
-  #
-  # 아래 plugins의 버전과 이 태그의 숫자가 같아야 하는 계약은 **없다**. 13.2의 Prometheus
-  # plugin은 Grafana 본체와 따로 배포되며, 실제로 이 13.2.1 이미지 안에는 bundled
-  # Prometheus 13.1.7이 들어 있다. 두 버전의 호환은 숫자로 단정하지 않고 기동 검증으로
-  # 확인한다.
   image:
     tag: 13.2.1-distroless
-  # Grafana 13.2부터 Prometheus datasource는 본체에 들어 있지 않은 별도 플러그인이다.
-  # 위 persistence가 꺼져 있어 /var/lib/grafana(= GF_PATHS_PLUGINS의 부모)가 emptyDir이라
-  # 플러그인은 Pod가 새로 뜰 때마다 사라진다. 그래서 기동할 때마다 다시 설치되도록
-  # 선언으로 남긴다 — Pod 안에서 수동 설치하거나 UI에서 datasource를 만들면 다음
-  # 재시작에 없어진다.
-  #
-  # chart는 이 값을 GF_PLUGINS_PREINSTALL_SYNC 환경변수로 바꾼다(grafana subchart의
-  # _pod.tpl과 _config.tpl). _SYNC는 설치가 끝날 때까지 기동을 막는 방식이라, 카탈로그를
-  # 받지 못하면 Grafana가 아예 뜨지 않는다. datasource 없이 떠서 조용히 빈 화면을 보여
-  # 주는 것보다 낫다고 보고 그 대가를 받아들인다.
-  #
-  # 한계: 기동할 때마다 외부 플러그인 카탈로그에서 내려받으므로 재현성이 네트워크에
-  # 달려 있다. 지금은 검증한 버전 하나를 명시적으로 고정해 흔들림만 막는다. 더 재현
-  # 가능한 길은 플러그인을 포함한 Grafana 이미지를 직접 빌드해 digest로 고정하는 것이며,
-  # 이번 범위에서는 하지 않는다.
-  plugins:
-    - prometheus@13.2.1
-  # as_external이 없으면 Grafana가 기동하지 못한다. 2026-09-25 Sync 뒤 실제로 CrashLoop에
-  # 빠졌고 로그가 이렇게 남았다:
-  #
-  #   Updating plugin pluginId=prometheus from=13.1.7 to=13.2.1
-  #   failed to install plugin prometheus@13.2.1:
-  #   unlinkat /usr/share/grafana/data/plugins-bundled/prometheus: read-only file system
-  #
-  # 이미지에 bundled 13.1.7이 들어 있어 preinstall이 그것을 "업데이트"하려 했고, 그러려면
-  # 읽기 전용인 /usr/share/grafana/data/plugins-bundled를 지워야 해서 설치가 실패했다.
-  # preinstall이 _SYNC라 설치 실패가 곧 기동 실패가 된다.
-  #
-  # as_external은 Prometheus datasource를 bundled가 아니라 외부 플러그인으로 다루게 한다.
-  # 그러면 설치 대상이 읽기 전용 경로가 아니라 위 GF_PATHS_PLUGINS(/var/lib/grafana/plugins,
-  # emptyDir)가 되어 지울 것이 없다.
-  grafana.ini:
-    plugin.prometheus:
-      as_external: true
+  # 플러그인 런타임 설치(grafana.plugins → GF_PLUGINS_PREINSTALL_SYNC)는 선언하지 않는다.
+  # 13.2.1-distroless에서 이 설치가 이미지 안의 bundled Prometheus 플러그인을 업데이트하려다
+  # 읽기 전용 bundled 경로와 충돌해 CrashLoop를 일으켰다(as_external 설정 후에도 같았다).
+  # 별도 검증 전에는 사용하지 않는다.
   ingress:
     enabled: false
   service:
