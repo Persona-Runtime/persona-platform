@@ -95,6 +95,9 @@ MIGRATION_IMAGES = {
   # 이미지를 먼저 등록해 둔다. 이 항목이 없으면 Job을 연결하는 커밋(백업 뒤 5단계)에서
   # "승인 이미지가 등록되지 않은 migration Job"으로 막힌다.
   "0004-chat" => "ghcr.io/persona-runtime/persona-minimal-api@sha256:ce380717fcf1d2db0ffd22e9d4726914a82006472f4ea725e4a2d889b2d032da",
+  # 0005 Job은 운영 Gateway와 같은 bridge 이미지(gateway 6fe5200)를 쓴다 — 0004·0005를 둘 다
+  # 허용하므로 migration 앞뒤로 같은 이미지가 Ready이고, migration 코드와 앱 코드가 갈라지지 않는다.
+  "0005-generation-lease" => "ghcr.io/persona-runtime/persona-minimal-api@sha256:26dcf9e0f2b64aa49c7683bab37ba6a937027b92b0ba2fa1f1f6ed21f53d311e",
 }
 WEB_IMAGE     = "ghcr.io/persona-runtime/persona-web@sha256:a8232f5a2541e044f4db0d7efa94003a880f0cf48bf390edce4f07540689a9ed"
 EMBEDDING_IMAGE = "ghcr.io/persona-runtime/persona-embedding-service@sha256:a0165c1c16c96c7525f36af013aee1fa635501aad9b7f2aab05cfee31be1e887"
@@ -263,7 +266,21 @@ jobs.each do |job|
   raise "[안전] 승인 이미지가 등록되지 않은 migration Job이다 — MIGRATION_IMAGES에 추가하라: #{jname}" if approved.nil?
   raise "[안전] migration Job 이미지가 그 revision의 승인 이미지가 아니다: #{jname}" unless jcontainer["image"] == approved
   raise "[안전] migration command가 alembic이 아니다: #{jname}" unless jcontainer["command"] == ["/app/.venv/bin/alembic"]
-  raise "[안전] migration args가 upgrade head가 아니다: #{jname}" unless jcontainer["args"] == ["upgrade", "head"]
+  # target revision은 Job 이름에서 파생한 revision이어야 한다(0005-generation-lease →
+  # 0005_generation_lease). `upgrade head`는 이미지가 담은 마지막 revision까지 조용히 올라가므로
+  # 더는 허용하지 않는다 — 다른 revision을 담은 이미지로 잘못 연결돼도 의도한 revision에서 멈추게
+  # 하려는 것이다. head를 썼던 0001·0003·0004 Job은 history/라 렌더되지 않아 이 검사를 받지 않는다.
+  target_revision = revision.tr("-", "_")
+  unless jcontainer["args"] == ["upgrade", target_revision]
+    raise "[안전] migration args가 Job 이름의 revision(upgrade #{target_revision})이 아니다: #{jname}"
+  end
+  unless job.dig("metadata", "labels", "persona.runtime/alembic-revision") == revision
+    raise "[안전] migration Job의 alembic-revision label이 Job 이름의 revision과 다르다: #{jname}"
+  end
+  # migrator는 Kubernetes API 권한이 필요 없다 — 별도 ServiceAccount로 권한을 얹지 않는다.
+  unless [nil, "default"].include?(jpod["serviceAccountName"])
+    raise "[안전] migration Job에 별도 ServiceAccount를 붙이지 않는다: #{jname}"
+  end
   check_hardened_container(jcontainer, "migration Job #{jname}", 10_001)
 
   job_secrets = (jcontainer["env"] || []).map { |e| e.dig("valueFrom", "secretKeyRef", "name") }.compact
