@@ -25,11 +25,14 @@ ruby -ryaml - "$test_dir" <<'RUBY'
 Encoding.default_external = Encoding::UTF_8
 
 root = ARGV.fetch(0)
+# 키 경로에 Hash를 두면 배열에서 그 필드들이 모두 같은 원소를 고른다(예: env를 name으로 찾기).
+# 배열 순서에 기대지 않으려는 것이다 — env 항목을 추가·재배치해도 사례가 엉뚱한 항목을 바꾸지 않는다.
 # 값 자리에 이 표식을 두면 값을 바꾸는 대신 그 키를 지운다. "빈 값"과 "선언 누락"은 validator가
 # 다르게 읽을 수 있으므로(nil·[] 처리) 누락 사례는 실제로 키를 지워 재현한다.
 DELETE_KEY = :delete_key
 GATEWAY_DEPLOYMENT = "kustomize/base/persona-gateway/deployment.yaml"
 GATEWAY_PDB = "kustomize/base/persona-gateway/pdb.yaml"
+GATEWAY_ENV = ["spec", "template", "spec", "containers", 0, "env"]
 # 각 사례는 원래 파일로 되돌린 뒤 다음 사례를 실행한다. 검증 실패뿐 아니라 의도한 오류도 확인한다.
 cases = [
   ["kustomize/base/persona-db/cluster.yaml", ["spec", "priorityClassName"], "persona-critical", "DB: 커스텀 PriorityClass"],
@@ -73,6 +76,11 @@ cases = [
   [GATEWAY_DEPLOYMENT, ["spec", "template", "spec", "topologySpreadConstraints", 0, "nodeTaintsPolicy"], "Ignore", "Gateway topology spread nodeTaintsPolicy는 Honor다"],
   [GATEWAY_DEPLOYMENT, ["spec", "template", "spec", "topologySpreadConstraints", 0, "nodeTaintsPolicy"], DELETE_KEY, "Gateway topology spread nodeTaintsPolicy는 Honor다"],
   [GATEWAY_DEPLOYMENT, ["spec", "template", "spec", "topologySpreadConstraints", 0, "minDomains"], 2, "Gateway topology spread에 minDomains를 두지 않는다"],
+  # 채팅 mode·mock profile은 함께 선언한다(ROLL-01B). 조용히 짧은 응답이나 llm 경로로 바뀌는 것을 막는다.
+  [GATEWAY_DEPLOYMENT, GATEWAY_ENV + [{ "name" => "PERSONA_CHAT_INFERENCE_MODE" }, "value"], "llm", "Gateway PERSONA_CHAT_INFERENCE_MODE는 mock으로 명시해야 한다"],
+  [GATEWAY_DEPLOYMENT, GATEWAY_ENV + [{ "name" => "PERSONA_CHAT_INFERENCE_MODE" }], DELETE_KEY, "Gateway PERSONA_CHAT_INFERENCE_MODE는 mock으로 명시해야 한다"],
+  [GATEWAY_DEPLOYMENT, GATEWAY_ENV + [{ "name" => "PERSONA_CHAT_MOCK_PROFILE" }, "value"], "short", "Gateway PERSONA_CHAT_MOCK_PROFILE은 long이어야 한다"],
+  [GATEWAY_DEPLOYMENT, GATEWAY_ENV + [{ "name" => "PERSONA_CHAT_MOCK_PROFILE" }], DELETE_KEY, "Gateway PERSONA_CHAT_MOCK_PROFILE은 long이어야 한다"],
   # 적용이 끝나 history/로 옮긴 Job을 다시 연결하면 Job 수는 1이라 개수 검사를 통과한다.
   # 경로 검사가 막는지 본다(완료된 0005 Job을 되살리는 경로).
   ["kustomize/base/persona-migrate/kustomization.yaml", ["resources"], ["history/job-0005-generation-lease.yaml"], "history/의 과거 선언을 활성 렌더에 연결했다"],
@@ -99,8 +107,15 @@ cases.each do |relative_path, keys, value, message|
   original = File.read(path)
   begin
     document = YAML.load(original)
-    parent = keys[0...-1].reduce(document) { |node, key| node.fetch(key) }
-    if value == DELETE_KEY
+    lookup = lambda do |node, key|
+      next node.fetch(key) unless key.is_a?(Hash)
+      node.find { |item| key.all? { |field, expected| item[field] == expected } } ||
+        raise("사례 경로의 배열 원소를 찾지 못했다: #{key}")
+    end
+    parent = keys[0...-1].reduce(document) { |node, key| lookup.call(node, key) }
+    if value == DELETE_KEY && keys.last.is_a?(Hash)
+      parent.delete(lookup.call(parent, keys.last))
+    elsif value == DELETE_KEY
       parent.delete(keys.last)
     else
       parent[keys.last] = value

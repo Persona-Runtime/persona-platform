@@ -128,6 +128,17 @@ spec:
             # port-forward 검증은 이 값을 켜도 Bearer로 그대로 된다.
             - name: PERSONA_FORWARD_AUTH_ENABLED
               value: "true"
+            # 채팅은 모델을 부르지 않는 mock 모드로 돈다. 기본값(mock)이나 runtime Secret에 기대지
+            # 않고 여기서 명시한다 — 명시 env는 envFrom보다 우선하므로 Secret에 같은 키가 있어도
+            # 이 값이 적용된다. llm으로 바꾸려면 vLLM 설정이 함께 필요하다(별도 변경).
+            - name: PERSONA_CHAT_INFERENCE_MODE
+              value: mock
+            # Hard Node Failure 실험(persona-ops-lab ROLL-01B)용 응답 모양. long은 80개 고정 합성
+            # 조각을 0.5초 간격으로 보내는 약 40초짜리 SSE다 — 노드가 죽는 순간에도 스트림이 열려
+            # 있게 하려는 값이며 LLM token·GPU 성능 수치가 아니다. 요청으로는 바꿀 수 없고, 이
+            # 값을 바꾸는 것 자체가 Gateway 롤아웃이다.
+            - name: PERSONA_CHAT_MOCK_PROFILE
+              value: long
           envFrom:
             # DATABASE_URL(runtime 계정)과 정적 토큰·서명 키가 들어 있다.
             # migrator 자격증명은 여기 없다 — migration Job만 그것을 본다.
