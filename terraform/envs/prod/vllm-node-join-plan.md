@@ -34,7 +34,7 @@ offering 조회와 quota 승인은 해당 시점의 실제 재고를 보장하�
 | GPU 메모리 | EC2 사양표 기준 22 GiB | L4 하드웨어 표기 24 GB와 EC2가 표시하는 가용 22 GiB를 같은 단위처럼 섞지 않는다. 실제 `nvidia-smi` 값은 실행 기록에 남긴다. |
 | OS | Canonical Ubuntu 24.04 amd64 AMI ID 고정 | 자동 `latest`를 쓰지 않는다. 현재 홈 클러스터와 같은 amd64 계열이다. |
 | 디스크 | 암호화 gp3 100 GiB, 3000 IOPS, 125 MiB/s | 이미지·모델 cache·실험 로그용이다. DB나 유일한 원본을 두지 않는다. terminate 시 삭제된다. |
-| Kubernetes | 현재 control plane과 같은 minor·patch 우선 | 실행 직전 실제 버전을 다시 읽는다. 현재 관측값 `v1.36.2`를 설치 명령에 영구 하드코딩하지 않는다. |
+| Kubernetes | API server와 같은 minor, kubelet patch는 API server patch 이하 | 실행 직전 API server·CP kubelet 버전을 다시 읽고, 설치할 package version은 GPU host의 `apt-cache madison` 값에서 골라 기록한다. 2026-09-26 관측값(API server `v1.36.4`, CP kubeadm·kubelet `v1.36.2`)을 설치 명령에 영구 하드코딩하지 않는다. |
 | CNI | 기존 Cilium VXLAN + kube-proxy | GPU Join 때문에 CNI 모드를 함께 바꾸지 않는다. underlay MTU 1280 기준도 유지한다. |
 | 모델 | `Qwen/Qwen3-4B-Instruct-2507`, BF16 | revision은 §4에 commit으로 적었다. 실행 직전 다시 읽어 대조한다. |
 | 실행 조합 | vLLM `v0.29.0-cu129-ubuntu2404`·CUDA 12.9.1·NVIDIA driver **570 LTS**·Container Toolkit 1.20.x | tag는 선택 기준이고 배포는 digest로 고정한다. driver를 580이 아니라 570으로 잡은 이유는 §4에 있다 — image 자신의 `NVIDIA_REQUIRE_CUDA`가 580을 허용하지 않는다. |
@@ -260,7 +260,9 @@ package로 낮은 driver를 우회하는 방식은 첫 기준선에 쓰지 않�
 3. 선택한 vLLM image의 CUDA 요구사항에 맞는 NVIDIA driver를 고정 설치하고 재부팅한다.
 4. `nvidia-smi`로 장치 1개·모델명·driver·가용 VRAM을 기록한다.
 5. 홈 Node와 맞는 containerd/cgroup 설정을 적용한다. Docker를 Kubernetes CRI로 가정하지 않는다.
-6. 현재 control plane과 같은 Kubernetes minor·patch의 `kubeadm`·`kubelet`을 설치하고 hold한다.
+6. API server와 같은 minor 저장소를 등록하고, `apt-cache madison`이 보여 준 package version 중
+   API server patch 이하인 값을 골라 `kubeadm`·`kubelet`·`kubectl`을 그 값으로 고정 설치하고 hold한다
+   (`ansible/gpu-node` `10-base`의 `gpu_kubernetes_package_version`).
 7. 일회용·tagged Tailscale auth key로 등록한다. key를 shell history·Terraform·Git에 남기지 않는다.
 8. tailnet 관리 접속과 route를 검증한 다음 공개 SSH `/32` 제거 plan을 별도로 검토한다.
 
@@ -292,7 +294,17 @@ Git에 붙여 넣지 않는다.
 
 Kubernetes 공식 정책상 새 Node의 `kubeadm join`은 클러스터를 마지막으로 생성/업그레이드한
 `kubeadm` minor와 맞추는 것이 원칙이며, kubelet은 API server보다 새 버전이면 안 된다.
-지원 범위가 넓더라도 첫 Join은 정확히 같은 patch를 우선한다.
+
+버전 비교의 기준은 **API server**다. 지금 클러스터는 API server(`v1.36.4`)와 control-plane
+kubeadm·kubelet(`v1.36.2`)의 patch가 이미 다르므로, "CP kubelet과 정확히 같은 patch"를 조건으로
+두면 기준 자체가 흔들린다. 그래서 Join 직전 판정(`40-join-preflight`)은 다음만 요구한다.
+
+- GPU kubeadm·kubelet의 major.minor = API server의 major.minor
+- GPU kubelet patch ≤ API server patch
+
+CP kubelet과 GPU 버전의 차이는 실패가 아니라 drift로 출력한다. 어느 patch를 골랐는지(설치한
+package version)와 판정 출력의 네 버전을 실행 기록에 남긴다. control plane 업그레이드는 이 계획의
+범위가 아니다.
 
 ### 5.2 성공 판정
 

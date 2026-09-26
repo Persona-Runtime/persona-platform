@@ -18,7 +18,7 @@ GPU runtime, Tailscale 패키지, Join 전 확인까지 자동화한다. EC2 생
 | `10-base.yml` | Kubernetes host 공통 전제(swap off, kernel module, sysctl)와 containerd·kubeadm·kubelet·kubectl 준비·hold | Tailscale 등록, Join, GPU driver 설치 |
 | `20-tailscale.yml` | Tailscale **패키지 설치와 서비스 활성화까지만** | `tailscale up`, auth key 전달, route 광고·수락, SNAT 설정 |
 | `30-gpu-runtime.yml` | NVIDIA driver와 Container Toolkit 설치, containerd runtime 등록, `nvidia-smi`로 GPU 1장·분기 확인 | container GPU 실행, device plugin 배포, taint 제거 |
-| `40-join-preflight.yml` | Join 직전 binary·버전·swap·containerd·API 포트·방화벽·token 존재 여부 **읽기** | `kubeadm join`, token·CA hash 수신·저장 |
+| `40-join-preflight.yml` | Join 직전 binary·버전(API server 기준 skew 판정)·swap·containerd·API 포트·방화벽·token 존재 여부 **읽기** | `kubeadm join`, token·CA hash 수신·저장 |
 
 ## 계층을 이렇게 나눈 이유
 
@@ -91,11 +91,41 @@ ansible-lint playbooks/
 
 | 넘길 값 | 어디서 읽는가 |
 | --- | --- |
-| `gpu_kubernetes_minor` (예: `1.36`) | control plane의 실제 kubelet minor |
-| `control_plane_kubelet_version` (예: `v1.36.2`) | 같은 곳의 patch까지 |
+| `gpu_kubernetes_minor` (예: `1.36`) | API server의 실제 minor(`10-base`) |
+| `gpu_kubernetes_package_version` (예: `1.36.2-1.1`) | GPU host에 저장소를 등록한 뒤 `apt-cache madison kubeadm kubelet kubectl`이 보여 준 값(`10-base`). 비워서 한 번 실행하면 목록을 출력한다 |
+| `api_server_version` (예: `v1.36.4`) | `kubectl version -o json`의 `serverVersion.gitVersion`(`40-join-preflight`, 필수) |
+| `control_plane_kubelet_version` (예: `v1.36.2`) | CP Node의 `status.nodeInfo.kubeletVersion`(`40-join-preflight`, 필수) |
 | `nvidia_driver_branch` (계획값 `570`) | `vllm-node-join-plan.md` §4의 근거 표 |
 | `nvidia_container_toolkit_version` | NVIDIA 저장소의 실제 패키지 버전(네 패키지 동일) |
 | `control_plane_api_host` | CP의 LAN 주소 |
+
+## 버전 입력의 의미와 Join 판정
+
+세 종류의 버전은 서로 다른 것을 가리킨다. 한 값으로 다른 값을 대신하지 않는다.
+
+| 이름 | 무엇인가 | 형식 | 판정에서의 역할 |
+| --- | --- | --- | --- |
+| API server version | 클러스터 kube-apiserver가 실제로 실행 중인 버전 | `v1.36.4` | **기준.** kubelet은 이보다 새 버전이면 안 되고, kubeadm·kubelet minor는 이와 같아야 한다 |
+| CP kubelet version | control-plane Node의 kubelet 버전 | `v1.36.2` | 기록만 한다. API server와 patch가 다를 수 있어(위 예시가 그 상태다) 비교 기준으로 쓰지 않는다 |
+| GPU package version | GPU host에 설치할 kubeadm·kubelet·kubectl deb version | `1.36.2-1.1` | 저장소 목록에 있는 값만 받아 세 패키지를 같은 값으로 고정 설치하고 hold한다 |
+
+`40-join-preflight`의 판정(`files/kube_version_gate.py join`):
+
+- **실패**: GPU kubeadm 또는 kubelet의 major.minor가 API server와 다르다. GPU kubelet patch가 API
+  server patch보다 크다. 입력 형식이 `vMAJOR.MINOR.PATCH`가 아니다(pre-release는 받지 않는다).
+- **drift(통과, 출력만)**: CP kubelet ≠ API server, GPU kubelet ≠ CP kubelet, GPU kubeadm ≠ GPU kubelet.
+- 통과·실패와 무관하게 네 버전(API server, CP kubelet, GPU kubeadm, GPU kubelet)과 patch를 모두
+  출력한다. 이전 판은 CP kubelet 문자열이 출력에 포함되는지만 봐서 기준이 틀렸고 `v1.36.2`가
+  `v1.36.21`에도 걸렸다.
+
+위 예시 값(API server v1.36.4, CP kubeadm·kubelet v1.36.2)은 2026-09-26 관측값이다. 실행할 때마다
+다시 읽는다. 이 playbook은 control plane을 업그레이드하지 않는다.
+
+판정 스크립트 테스트(표준 라이브러리만, 네트워크·클러스터 없음):
+
+```sh
+python3 -m unittest discover -s ansible/gpu-node/tests -v
+```
 
 ## 아직 만들지 않은 것
 
