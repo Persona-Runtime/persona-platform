@@ -67,8 +67,9 @@ spec:
           # 이 번들은 0004 채팅 API(대화 생성·messages·/v1/chat/completions SSE·
           # cancel·retry)에 더해 POST /draft의 base_version_id 경로와 409
           # draft_not_started를 쓴다 — 셋 다 gateway 기능 이미지 sha256:001d3f57…
-          # (소스 b59eb39, 0004 전용)에서 들어왔고, 현재 gateway bridge 이미지
-          # sha256:26dcf9e0…(소스 6fe5200)에도 그대로 있다.
+          # (소스 b59eb39)에서 들어와 이후 Gateway 이미지에도 그대로 있다. 현재 Gateway
+          # 이미지는 persona-gateway Deployment가 단일 기준점으로 관리한다(여기에 digest를
+          # 중복해 적지 않는다).
           # SSE 자체는 이 컨테이너를 거치지 않는다(파일 첫 줄 참고) — HTTPRoute가
           # /v1을 persona-gateway로 직접 보내므로 nginx 버퍼링과 무관하다.
           image: ghcr.io/persona-runtime/persona-web@sha256:a8232f5a2541e044f4db0d7efa94003a880f0cf48bf390edce4f07540689a9ed
