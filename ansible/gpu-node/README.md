@@ -43,6 +43,11 @@ GPU runtime, Tailscale 패키지, Join 전 확인까지 자동화한다. EC2 생
   `--check`에서는 "무엇이 바뀔지"가 실제 상태 기준으로 보인다.
 - **검증**: `command` 결과가 아니라 `assert`로 판정한다 → `--check`에서도 발동한다.
 
+예외로 `30-gpu-runtime.yml`의 NVIDIA Container Toolkit은 `--check`에서 설치를 보류한다.
+NVIDIA APT 저장소 선언도 check mode에서는 파일로 쓰이지 않으므로, 그 직후 apt가 패키지를
+찾지 못하는 오류를 설치 실패로 오해하지 않기 위해서다. 실제 실행은 저장소 등록·패키지
+설치·containerd runtime 확인·GPU 확인을 같은 playbook에서 연속으로 수행한다.
+
 ## 멱등성
 
 두 번째 실행에서 재부팅이나 driver 재설치가 일어나지 않는다.

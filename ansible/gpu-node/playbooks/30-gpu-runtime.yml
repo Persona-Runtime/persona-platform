@@ -98,6 +98,17 @@
         state: present
         update_cache: true
       register: gpu_toolkit_install
+      # check mode에서는 바로 앞의 NVIDIA 저장소 선언도 실제 파일로 쓰지 않는다. 이때
+      # apt가 패키지를 찾지 못하는 것은 host 결함이 아니라 dry-run의 순서 제약이다.
+      # 실제 실행에서 저장소를 만든 뒤 설치·검증한다.
+      when: not ansible_check_mode
+
+    - name: check mode에서 NVIDIA Toolkit 설치 검사를 보류한다
+      ansible.builtin.debug:
+        msg: >-
+          --check에서는 NVIDIA APT 저장소를 실제로 추가하지 않으므로 Toolkit 패키지
+          조회·설치를 보류한다. 실제 실행은 저장소 등록 뒤 같은 task에서 설치한다.
+      when: ansible_check_mode
 
     # containerd에 nvidia runtime을 등록한다. `--set-as-default`는 쓰지 않는다 — 모든
     # container가 GPU runtime을 거치게 하면 GPU를 요청하지 않은 Pod까지 영향을 받는다.
@@ -170,6 +181,9 @@
       changed_when: false
       check_mode: false
       register: gpu_driver_after
+      # driver 설치는 --check에서 실제로 일어나지 않는다. 없는 nvidia-smi를 실행해
+      # dry-run을 실패로 보이지 않게 하며, 실제 실행에서는 재부팅 뒤 반드시 확인한다.
+      when: not ansible_check_mode
 
     # GPU가 정확히 1장인지 확인한다. 0장이면 driver가 적재되지 않았거나 인스턴스가
     # 계획과 다르고, 2장 이상이면 기준선 전제가 깨진다.
@@ -181,17 +195,19 @@
         fail_msg: >-
           GPU가 1장이 아니거나 driver 분기가 요청값({{ nvidia_driver_branch }})과 다르다.
           실제 값: {{ gpu_driver_after.stdout | default('(없음)') }}
+      when: not ansible_check_mode
 
     - name: GPU runtime 증거 표시
       ansible.builtin.debug:
         msg:
           driver_before: "{{ gpu_driver_before.stdout | default('(없음)') | trim }}"
-          driver_after: "{{ gpu_driver_after.stdout_lines }}"
-          toolkit_changed: "{{ gpu_toolkit_install.changed }}"
+          driver_after: "{{ gpu_driver_after.stdout_lines | default([]) }}"
+          toolkit_changed: "{{ gpu_toolkit_install.changed | default(false) }}"
           nvidia_runtime_was_registered: "{{ gpu_nvidia_runtime_before.rc == 0 }}"
           note: >-
             container 안에서의 GPU 실행과 Kubernetes device plugin 배포는 이 playbook의
             범위가 아니다. `nvidia.com/gpu: 1` allocatable 확인은 Join 뒤 별도 단계다.
+      when: not ansible_check_mode
 
 # 실제 host에서 확인할 것 (개발 환경에 ansible이 없어 실행하지 못했다)
 #
