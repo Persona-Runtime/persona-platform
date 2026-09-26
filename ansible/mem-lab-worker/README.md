@@ -131,7 +131,7 @@ ansible-lint playbooks/
 | --- | --- |
 | `mem_kubernetes_minor` (예: `1.36`) | apt 저장소 등록용 minor |
 | `mem_kubernetes_package_version` (예: `1.36.4-1.1`) | `apt-cache madison kubelet`에서 API server patch를 넘지 않는 값 |
-| `mem_api_server_version` (예: `v1.36.4`) | CP에서 `kubectl version -o json`의 `serverVersion.gitVersion` — **버전 게이트의 기준값** |
+| `mem_api_server_version` (예: `v1.36.4`) | CP에서 `kubectl version -o json`의 `serverVersion.gitVersion` — **버전 게이트의 기준값. `10-base`와 `40-join-preflight`가 모두 쓴다** |
 | `mem_control_plane_tailnet_ip` | CP의 **tailnet** 주소(100.x). LAN 주소를 넣으면 tailnet 경로를 확인하는 의미가 없다 |
 | `mem_intended_node_ip` | 이 노드가 `--node-ip`로 쓸 tailnet 주소 |
 | `mem_control_plane_kubelet_version` (예: `v1.36.2`) | CP kubelet. **drift 기록용이며 판정 기준이 아니다** |
@@ -149,10 +149,21 @@ kubelet version skew 정책이 정하는 상한은 **API server** 버전이다. 
 2. 노드 `kubelet` patch가 API server patch **이하**다(kubelet은 API server보다 새로울 수 없다).
 3. CP kubelet과의 차이는 drift로 출력만 한다.
 
-`10-base`가 `mem_kubernetes_package_version`으로 patch까지 고정해 설치한다. 고정하지 않으면
-저장소의 최신 patch가 들어오고, 그것이 API server patch보다 새로우면 위 2번이 거부한다 —
-"설치는 성공하고 Join 전에 막히는" 함정이라 설치 쪽에서 막는다. 요청한 값이 저장소에 실제로
-있는지 `apt-cache madison`으로 먼저 확인한다.
+`10-base`가 `mem_kubernetes_package_version`으로 patch까지 고정해 설치하고, **설치 전에 같은
+기준으로 한 번 더 막는다.** 두 경로를 모두 닫아야 하기 때문이다.
+
+| 경로 | 무엇이 들어오는가 | 막는 곳 |
+| --- | --- | --- |
+| 고정하지 않음 | 저장소의 최신 patch(API server보다 새로울 수 있다) | `10-base`가 설치하지 않고 이유를 출력 |
+| 잘못된 값으로 고정 | 넘긴 값 그대로. 저장소에 있으니 설치는 성공한다 | `10-base`의 설치 전 skew 단정 |
+
+두 번째 경로를 설치 전에 막는 이유: API server가 `v1.36.4`인데 `1.36.5-1.1`을 넘기면 저장소에
+그 값이 있으니 설치가 성공하고, `40-join-preflight`에 가서야 거부된다. 그때는 이미 노드에 새
+kubelet이 깔려 있어 되돌리는 작업이 추가로 필요하다. 저장소가 조건에 맞는 patch를 내놓지
+않으면 설치하지 않고 멈춘다. `mem_api_server_version` 없이 patch를 고정하려 하면 그 자체로
+실패한다 — 대조 기준이 없으면 허용 범위인지 판단할 수 없다.
+
+요청한 값이 저장소에 실제로 있는지도 `apt-cache madison`으로 확인한다.
 
 **부분 문자열로 비교하지 않는다.** 이전 판은 `CP버전 in stdout` 형태였고 두 가지가 틀렸다 —
 `v1.36.2`가 `v1.36.21`에도 포함되어 patch가 19 앞선 kubelet이 통과했고, `kubeadm`과 `kubelet`

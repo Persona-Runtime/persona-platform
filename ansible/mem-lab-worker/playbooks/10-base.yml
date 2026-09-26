@@ -29,6 +29,12 @@
     # 설치할 apt 패키지 버전 (예: "1.36.4-1.1"). minor만으로는 patch가 저장소의 최신으로
     # 정해지므로, API server patch를 넘지 않는 값을 골라 여기에 넘긴다.
     mem_kubernetes_package_version: ""
+    # 위 값의 상한을 판정하는 기준. CP에서 `kubectl version -o json`의
+    # serverVersion.gitVersion으로 읽는다(예: v1.36.4). patch를 고정해 설치하려면 필수다 —
+    # 이 값이 없으면 넘긴 patch가 허용 범위인지 확인할 방법이 없다.
+    mem_api_server_version: ""
+    # x.y.z만 꺼내는 패턴. `v` 접두사와 `-1.1` 같은 데비안 리비전을 흘린다.
+    mem_semver_pattern: '[0-9]+\.[0-9]+\.[0-9]+'
 
   tasks:
     - name: Ubuntu 24.04 amd64 대상만 변경 허용
@@ -222,6 +228,64 @@
     # 새로우면 kubelet version skew 정책을 위반하고, 40-join-preflight의 버전 게이트가 바로
     # 그 상태를 거부한다. 즉 고정하지 않는 것은 "설치는 성공하고 Join 전에 막히는" 함정이다.
     #
+    # ── 설치 **전에** skew 상한을 판정한다 ─────────────────────────────────
+    #
+    # 고정하지 않는 것만 막으면 절반이다. 잘못된 값으로 고정하는 경로가 남는다 —
+    # API server가 v1.36.4인데 `1.36.5-1.1`을 넘기면 저장소에 그 값이 있으니 설치는 성공하고,
+    # 40-join-preflight에 가서야 거부된다. 그때는 이미 노드에 새 kubelet이 깔려 있어 되돌리는
+    # 작업이 추가로 필요하다. 그래서 설치 전에 같은 기준으로 막는다.
+    - name: patch 고정 설치에는 API server 버전이 함께 필요하다
+      ansible.builtin.assert:
+        that:
+          - mem_api_server_version | length > 0
+        fail_msg: >-
+          mem_kubernetes_package_version을 넘겼지만 mem_api_server_version이 비어 있다.
+          대조 없이 설치하지 않는다 — 넘긴 patch가 허용 범위인지 판단할 기준이 없다.
+          CP에서 `kubectl version -o json`의 serverVersion.gitVersion을 읽어 함께 넘긴다.
+      when:
+        - mem_kubernetes_minor | length > 0
+        - mem_kubernetes_package_version | length > 0
+
+    - name: 설치할 패키지 버전과 API server 버전을 분해
+      ansible.builtin.set_fact:
+        mem_package_semver: "{{ mem_kubernetes_package_version | regex_search(mem_semver_pattern) }}"
+        mem_base_api_semver: "{{ mem_api_server_version | regex_search(mem_semver_pattern) }}"
+      when:
+        - mem_kubernetes_minor | length > 0
+        - mem_kubernetes_package_version | length > 0
+
+    - name: 분해한 값에서 major.minor와 patch를 나눈다
+      ansible.builtin.set_fact:
+        mem_package_minor: "{{ mem_package_semver | regex_replace('^([0-9]+\\.[0-9]+).*$', '\\1') }}"
+        mem_base_api_minor: "{{ mem_base_api_semver | regex_replace('^([0-9]+\\.[0-9]+).*$', '\\1') }}"
+        mem_package_patch: "{{ mem_package_semver | regex_replace('^[0-9]+\\.[0-9]+\\.([0-9]+).*$', '\\1') }}"
+        mem_base_api_patch: "{{ mem_base_api_semver | regex_replace('^[0-9]+\\.[0-9]+\\.([0-9]+).*$', '\\1') }}"
+      when:
+        - mem_kubernetes_minor | length > 0
+        - mem_kubernetes_package_version | length > 0
+
+    # `| int`를 비교 시점에 붙이는 이유: set_fact는 템플릿 결과를 문자열로 저장한다
+    # (jinja2_native 기본 off). 문자열로 비교하면 "5" < "10"이 거짓이 되어, 이 검사가 막아야
+    # 할 경우를 통과시킨다. 40-join-preflight의 게이트와 같은 이유다.
+    - name: 설치 전에 패키지 버전이 API server skew 상한 안인지 확인
+      ansible.builtin.assert:
+        that:
+          - mem_package_semver | length > 0
+          - mem_base_api_semver | length > 0
+          - mem_package_minor == mem_base_api_minor
+          - (mem_package_patch | int) <= (mem_base_api_patch | int)
+        fail_msg: >-
+          설치하려는 kube 패키지({{ mem_kubernetes_package_version }})가 API server
+          ({{ mem_api_server_version }}) 기준을 벗어난다. major.minor는 같아야 하고 patch는
+          API server patch 이하여야 한다. `apt-cache madison kubelet`에서 조건에 맞는 값을
+          고른다. 저장소가 조건에 맞는 patch를 내놓지 않으면 **설치하지 않고 멈춘다** —
+          새 kubelet을 깔고 Join 단계에서 되돌리는 것보다 여기서 막는 편이 싸다.
+        success_msg: >-
+          설치 후보 {{ mem_package_semver }} <= API server {{ mem_base_api_semver }} (minor 일치)
+      when:
+        - mem_kubernetes_minor | length > 0
+        - mem_kubernetes_package_version | length > 0
+
     # 값을 추측하지 않는다. 요청한 버전이 저장소에 실제로 있는지 먼저 읽고, 없으면 apt의
     # 불투명한 오류 대신 어떤 값이 있는지 함께 보여 준다.
     - name: 요청한 kube 패키지 버전이 저장소에 있는지 읽기
