@@ -34,7 +34,12 @@
   any_errors_fatal: true
 
   vars:
-    # control plane에서 읽은 값을 넘긴다. 비어 있으면 해당 확인을 건너뛰고 그 사실을 남긴다.
+    # x.y.z만 꺼내는 패턴. `v` 접두사와 `Kubernetes ` 접두사, 빌드 메타데이터를 모두 흘린다.
+    mem_semver_pattern: '[0-9]+\.[0-9]+\.[0-9]+'
+    # **버전 게이트의 기준값**이다. CP에서
+    # `kubectl version -o json`의 serverVersion.gitVersion으로 읽는다(예: v1.36.4).
+    mem_api_server_version: ""
+    # drift 기록용이다. 판정 기준이 아니다 — 위 주석과 아래 게이트 설명 참고.
     mem_control_plane_kubelet_version: ""
     # CP의 tailnet 주소(100.x). LAN 주소를 넣으면 tailnet 경로를 확인하는 의미가 없다.
     mem_control_plane_tailnet_ip: ""
@@ -69,22 +74,92 @@
       check_mode: false
       register: mem_join_versions
 
-    # CP보다 새 minor를 설치했으면 Join이 거부되거나 이후 동작이 보장되지 않는다.
-    - name: control plane 버전과 대조
+    # ── 버전 게이트 ─────────────────────────────────────────────────────────
+    #
+    # 기준은 **API server**다. CP kubelet이 아니다. kubelet version skew 정책이 정하는 상한은
+    # API server 버전이고, 같은 클러스터에서도 CP kubelet과 API server의 patch는 다를 수 있다.
+    # CP kubelet을 기준으로 삼으면 실제로 허용되는 조합을 막거나 막아야 할 조합을 통과시킨다.
+    #
+    # 이전 판은 `mem_control_plane_kubelet_version in mem_join_versions.stdout`으로 **부분
+    # 문자열**을 봤다. 두 가지가 틀렸고 둘 다 재현했다.
+    #   1. `v1.36.2`가 `v1.36.21`에도 포함된다 — patch가 19 앞선 kubelet이 통과한다.
+    #   2. kubeadm과 kubelet 출력이 한 stdout에 붙어 있어, **둘 중 하나만** 맞아도 통과한다.
+    # 그래서 각각을 따로 꺼내 major.minor와 patch를 숫자로 비교한다.
+    - name: 노드와 API server 버전을 비교 가능한 형태로 분해
+      ansible.builtin.set_fact:
+        mem_node_kubeadm_semver: "{{ mem_join_versions.stdout_lines[0] | regex_search(mem_semver_pattern) }}"
+        mem_node_kubelet_semver: "{{ mem_join_versions.stdout_lines[1] | regex_search(mem_semver_pattern) }}"
+        mem_api_server_semver: "{{ mem_api_server_version | regex_search(mem_semver_pattern) }}"
+      when: mem_api_server_version | length > 0
+
+    - name: 분해한 값에서 major.minor와 patch를 나눈다
+      ansible.builtin.set_fact:
+        mem_node_kubeadm_minor: "{{ mem_node_kubeadm_semver | regex_replace('^([0-9]+\\.[0-9]+).*$', '\\1') }}"
+        mem_node_kubelet_minor: "{{ mem_node_kubelet_semver | regex_replace('^([0-9]+\\.[0-9]+).*$', '\\1') }}"
+        mem_api_server_minor: "{{ mem_api_server_semver | regex_replace('^([0-9]+\\.[0-9]+).*$', '\\1') }}"
+        mem_node_kubelet_patch: "{{ mem_node_kubelet_semver | regex_replace('^[0-9]+\\.[0-9]+\\.([0-9]+).*$', '\\1') }}"
+        mem_api_server_patch: "{{ mem_api_server_semver | regex_replace('^[0-9]+\\.[0-9]+\\.([0-9]+).*$', '\\1') }}"
+      when: mem_api_server_version | length > 0
+
+    - name: 버전을 읽지 못한 경우를 먼저 걸러낸다
       ansible.builtin.assert:
         that:
-          - mem_control_plane_kubelet_version in mem_join_versions.stdout
+          - mem_node_kubeadm_semver | length > 0
+          - mem_node_kubelet_semver | length > 0
+          - mem_api_server_semver | length > 0
         fail_msg: >-
-          host의 kube 버전이 control plane({{ mem_control_plane_kubelet_version }})과 다르다.
-          실제 값: {{ mem_join_versions.stdout_lines }}
-      when: mem_control_plane_kubelet_version | length > 0
+          버전 문자열에서 x.y.z를 찾지 못했다. kubeadm={{ mem_node_kubeadm_semver | default('(없음)') }},
+          kubelet={{ mem_node_kubelet_semver | default('(없음)') }},
+          api-server={{ mem_api_server_semver | default('(없음)') }}.
+          비교하지 못한 것을 통과로 남기지 않는다.
+      when: mem_api_server_version | length > 0
 
-    - name: control plane 버전이 주어지지 않은 경우를 기록
+    - name: kubeadm·kubelet의 major.minor가 API server와 같은지 확인
+      ansible.builtin.assert:
+        that:
+          - mem_node_kubelet_minor == mem_api_server_minor
+          - mem_node_kubeadm_minor == mem_api_server_minor
+        fail_msg: >-
+          노드의 kube minor가 API server({{ mem_api_server_minor }})와 다르다.
+          kubeadm={{ mem_node_kubeadm_minor }}, kubelet={{ mem_node_kubelet_minor }}.
+          10-base에 mem_kubernetes_package_version을 넘겨 patch까지 고정해 설치한다.
+      when: mem_api_server_version | length > 0
+
+    # kubelet은 API server보다 **새로울 수 없다**(skew 정책). 반대로 오래된 것은 허용 범위가
+    # 있으므로 여기서는 상한만 본다.
+    #
+    # `| int`를 비교 시점에 다시 붙이는 이유: set_fact가 템플릿 결과를 문자열로 저장한다
+    # (jinja2_native가 꺼진 기본 설정). 문자열로 비교하면 "4" > "21"이 되어 patch가 큰 쪽을
+    # 작다고 판정한다 — 이 게이트가 막아야 할 바로 그 경우를 통과시킨다.
+    - name: kubelet patch가 API server patch를 넘지 않는지 확인
+      ansible.builtin.assert:
+        that:
+          - (mem_node_kubelet_patch | int) <= (mem_api_server_patch | int)
+        fail_msg: >-
+          노드 kubelet patch({{ mem_node_kubelet_patch }})가 API server patch
+          ({{ mem_api_server_patch }})보다 새롭다. kubelet은 API server보다 새로울 수 없다.
+        success_msg: >-
+          kubelet {{ mem_node_kubelet_semver }} <= API server {{ mem_api_server_semver }} (minor 일치)
+      when: mem_api_server_version | length > 0
+
+    # CP kubelet과의 차이는 **출력만** 한다. 실패로 만들지 않는 이유는 그것이 skew 기준이
+    # 아니기 때문이다. 같은 클러스터에서 CP kubelet과 API server의 patch가 다른 것은 정상이다.
+    - name: control plane kubelet과의 drift 기록 (판정하지 않는다)
       ansible.builtin.debug:
         msg: >-
-          mem_control_plane_kubelet_version이 비어 있어 버전 대조를 건너뛴다. Join 전에 CP에서
-          실제 값을 읽어 넘겨 다시 실행한다. 대조 없이 Join하지 않는다.
-      when: mem_control_plane_kubelet_version | length == 0
+          노드 kubelet={{ mem_node_kubelet_semver | default('(읽지 못함)') }},
+          CP kubelet={{ mem_control_plane_kubelet_version }},
+          API server={{ mem_api_server_version | default('(주어지지 않음)') }}.
+          CP kubelet과의 차이는 drift 기록이며 Join 가능 여부의 기준이 아니다.
+      when: mem_control_plane_kubelet_version | length > 0
+
+    - name: API server 버전이 주어지지 않은 경우를 기록
+      ansible.builtin.debug:
+        msg: >-
+          mem_api_server_version이 비어 있어 버전 게이트를 건너뛴다. CP에서
+          `kubectl version -o json`의 serverVersion.gitVersion을 읽어 넘긴 뒤 다시 실행한다.
+          대조 없이 Join하지 않는다 — CP kubelet 버전은 이 게이트의 기준이 아니다.
+      when: mem_api_server_version | length == 0
 
     - name: swap이 꺼져 있는지 확인
       ansible.builtin.assert:

@@ -129,10 +129,36 @@ ansible-lint playbooks/
 
 | 넘길 값 | 어디서 읽는가 |
 | --- | --- |
-| `mem_kubernetes_minor` (예: `1.36`) | control plane의 실제 kubelet minor |
-| `mem_control_plane_kubelet_version` (예: `v1.36.2`) | 같은 곳의 patch까지 |
+| `mem_kubernetes_minor` (예: `1.36`) | apt 저장소 등록용 minor |
+| `mem_kubernetes_package_version` (예: `1.36.4-1.1`) | `apt-cache madison kubelet`에서 API server patch를 넘지 않는 값 |
+| `mem_api_server_version` (예: `v1.36.4`) | CP에서 `kubectl version -o json`의 `serverVersion.gitVersion` — **버전 게이트의 기준값** |
 | `mem_control_plane_tailnet_ip` | CP의 **tailnet** 주소(100.x). LAN 주소를 넣으면 tailnet 경로를 확인하는 의미가 없다 |
 | `mem_intended_node_ip` | 이 노드가 `--node-ip`로 쓸 tailnet 주소 |
+| `mem_control_plane_kubelet_version` (예: `v1.36.2`) | CP kubelet. **drift 기록용이며 판정 기준이 아니다** |
+
+## 버전 게이트의 기준은 API server다
+
+kubelet version skew 정책이 정하는 상한은 **API server** 버전이다. CP kubelet이 아니다. 같은
+클러스터에서도 CP kubelet과 API server의 patch는 다를 수 있어, CP kubelet을 기준으로 삼으면
+허용되는 조합을 막거나 막아야 할 조합을 통과시킨다. CP kubelet과의 차이는 출력만 하고 판정에
+쓰지 않는다.
+
+규칙 세 가지다.
+
+1. 노드 `kubeadm`·`kubelet`의 major.minor가 API server와 같다.
+2. 노드 `kubelet` patch가 API server patch **이하**다(kubelet은 API server보다 새로울 수 없다).
+3. CP kubelet과의 차이는 drift로 출력만 한다.
+
+`10-base`가 `mem_kubernetes_package_version`으로 patch까지 고정해 설치한다. 고정하지 않으면
+저장소의 최신 patch가 들어오고, 그것이 API server patch보다 새로우면 위 2번이 거부한다 —
+"설치는 성공하고 Join 전에 막히는" 함정이라 설치 쪽에서 막는다. 요청한 값이 저장소에 실제로
+있는지 `apt-cache madison`으로 먼저 확인한다.
+
+**부분 문자열로 비교하지 않는다.** 이전 판은 `CP버전 in stdout` 형태였고 두 가지가 틀렸다 —
+`v1.36.2`가 `v1.36.21`에도 포함되어 patch가 19 앞선 kubelet이 통과했고, `kubeadm`과 `kubelet`
+출력이 한 stdout에 붙어 있어 **둘 중 하나만** 맞아도 통과했다. 두 경우를 모두 재현한 뒤
+major.minor 문자열 일치와 patch 숫자 비교로 바꿨다. patch는 `| int`로 캐스팅해 비교한다 —
+문자열로 두면 `"4" > "21"`이 되어 게이트가 막아야 할 경우를 통과시킨다.
 
 ## 이 골격이 확인하지 못하는 것
 
