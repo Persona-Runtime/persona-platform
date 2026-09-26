@@ -6,8 +6,10 @@ Ansible controller에서 실행한다(playbook이 `delegate_to: localhost`로 �
 
 두 모드가 있다.
 
-- ``package``: 10-base가 설치할 deb package version(예: ``1.36.2-1.1``)의 형식과 minor를 검사한다.
-  저장소에 그 값이 실제로 있는지는 playbook이 ``apt-cache madison`` 출력으로 따로 확인한다.
+- ``package``: 10-base가 **설치하기 전에** deb package version(예: ``1.36.2-1.1``)을 검사한다.
+  형식, minor가 저장소 minor·API server minor와 같은지, patch가 API server patch 이하인지를 본다.
+  Join 직전에야 막으면 원하지 않는 kubelet이 이미 host에 설치된 뒤다. 저장소에 그 값이 실제로
+  있는지는 playbook이 ``apt-cache madison`` 출력으로 따로 확인한다.
 - ``join``: Join 직전에 GPU kubeadm·kubelet, API server, control-plane kubelet 버전을 받아
   API server 기준 skew를 판정하고 네 값의 patch를 모두 보고한다.
 
@@ -81,19 +83,34 @@ def parse_minor(value: str) -> tuple[int, int]:
     return int(match.group(1)), int(match.group(2))
 
 
-def check_package(minor: str, package_version: str) -> dict[str, object]:
-    """10-base 입력 검사. 형식이 맞고 major.minor가 저장소 minor와 같아야 한다."""
+def check_package(minor: str, package_version: str, api_server: str) -> dict[str, object]:
+    """10-base 설치 전 검사. join 모드와 같은 기준(API server)을 설치 시점에 미리 적용한다.
+
+    - package major.minor = gpu_kubernetes_minor(등록한 저장소) = API server major.minor
+    - package patch ≤ API server patch — 저장소가 더 새 patch만 내놓으면 설치하지 않고 멈춘다.
+    """
     wanted = parse_minor(minor)
     version = parse_package_version(package_version)
+    api = parse_kubernetes_version(api_server, "api_server_version")
     violations = []
     if (version.major, version.minor) != wanted:
         violations.append(
             f"package version {package_version}의 minor가 gpu_kubernetes_minor {minor}와 다르다"
         )
+    if not version.same_minor(api):
+        violations.append(
+            f"package version {package_version}의 minor가 API server {api.text()}와 다르다"
+        )
+    elif version.patch > api.patch:
+        violations.append(
+            f"package version {package_version}({version.text()})이 API server {api.text()}보다 새 "
+            "patch다 — 설치하면 kubelet이 API server보다 새 버전이 된다"
+        )
     return {
         "mode": "package",
         "package_version": package_version.strip(),
         "package_kubernetes_version": version.text(),
+        "api_server": api.text(),
         "violations": violations,
         "ok": not violations,
     }
@@ -154,6 +171,7 @@ def main(argv: list[str] | None = None) -> int:
     package = modes.add_parser("package", help="10-base 설치 package version 검사")
     package.add_argument("--minor", required=True)
     package.add_argument("--package-version", required=True)
+    package.add_argument("--api-server", required=True)
     join = modes.add_parser("join", help="Join 직전 API server 기준 skew 판정")
     join.add_argument("--api-server", required=True)
     join.add_argument("--cp-kubelet", required=True)
@@ -163,7 +181,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         if args.mode == "package":
-            report = check_package(args.minor, args.package_version)
+            report = check_package(args.minor, args.package_version, args.api_server)
         else:
             report = check_join(args.api_server, args.cp_kubelet, args.gpu_kubeadm, args.gpu_kubelet)
     except VersionParseError as error:

@@ -93,7 +93,7 @@ ansible-lint playbooks/
 | --- | --- |
 | `gpu_kubernetes_minor` (예: `1.36`) | API server의 실제 minor(`10-base`) |
 | `gpu_kubernetes_package_version` (예: `1.36.2-1.1`) | GPU host에 저장소를 등록한 뒤 `apt-cache madison kubeadm kubelet kubectl`이 보여 준 값(`10-base`). 비워서 한 번 실행하면 목록을 출력한다 |
-| `api_server_version` (예: `v1.36.4`) | `kubectl version -o json`의 `serverVersion.gitVersion`(`40-join-preflight`, 필수) |
+| `api_server_version` (예: `v1.36.4`) | `kubectl version -o json`의 `serverVersion.gitVersion`(`10-base`는 package version을 넘길 때 필수, `40-join-preflight`는 항상 필수) |
 | `control_plane_kubelet_version` (예: `v1.36.2`) | CP Node의 `status.nodeInfo.kubeletVersion`(`40-join-preflight`, 필수) |
 | `nvidia_driver_branch` (계획값 `570`) | `vllm-node-join-plan.md` §4의 근거 표 |
 | `nvidia_container_toolkit_version` | NVIDIA 저장소의 실제 패키지 버전(네 패키지 동일) |
@@ -107,7 +107,13 @@ ansible-lint playbooks/
 | --- | --- | --- | --- |
 | API server version | 클러스터 kube-apiserver가 실제로 실행 중인 버전 | `v1.36.4` | **기준.** kubelet은 이보다 새 버전이면 안 되고, kubeadm·kubelet minor는 이와 같아야 한다 |
 | CP kubelet version | control-plane Node의 kubelet 버전 | `v1.36.2` | 기록만 한다. API server와 patch가 다를 수 있어(위 예시가 그 상태다) 비교 기준으로 쓰지 않는다 |
-| GPU package version | GPU host에 설치할 kubeadm·kubelet·kubectl deb version | `1.36.2-1.1` | 저장소 목록에 있는 값만 받아 세 패키지를 같은 값으로 고정 설치하고 hold한다 |
+| GPU package version | GPU host에 설치할 kubeadm·kubelet·kubectl deb version | `1.36.2-1.1` | 설치 **전에** minor = API server, patch ≤ API server patch를 확인하고, 저장소 목록에 있는 값만 받아 세 패키지를 같은 값으로 고정 설치하고 hold한다 |
+
+`10-base`의 설치 전 판정(`files/kube_version_gate.py package`): package minor가 `gpu_kubernetes_minor`·
+API server와 같고 package patch가 API server patch 이하일 때만 설치한다. 예를 들어 API server가
+v1.36.4일 때 저장소에 `1.36.4-*`가 있으면 그것을, 없고 `1.36.2-*`만 있으면 그것을 고를 수 있다.
+`1.36.5` 이상만 있으면 설치하지 않고 멈춘다 — Join 직전 판정까지 가서 막으면 이미 host에 설치된
+뒤이기 때문이다.
 
 `40-join-preflight`의 판정(`files/kube_version_gate.py join`):
 

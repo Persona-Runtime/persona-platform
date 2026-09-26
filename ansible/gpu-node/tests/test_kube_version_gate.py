@@ -2,7 +2,8 @@
 
 규칙: Join 판정의 기준은 API server다. GPU kubeadm·kubelet은 API server와 minor가 같아야 하고,
 GPU kubelet은 API server보다 새 patch면 안 된다. control-plane kubelet과의 차이는 실패가 아니라
-drift로 보고한다. 형식이 약속과 다른 입력은 추측하지 않고 거부한다.
+drift로 보고한다. 10-base는 설치 **전에** 같은 기준을 적용한다 — package patch가 API server
+patch보다 새면 설치하지 않는다. 형식이 약속과 다른 입력은 추측하지 않고 거부한다.
 
 실행: python3 -m unittest discover -s ansible/gpu-node/tests -v
 """
@@ -46,22 +47,47 @@ class ParseKubernetesVersionTest(unittest.TestCase):
 
 
 class CheckPackageTest(unittest.TestCase):
-    def test_accepts_apt_style_version_with_matching_minor(self) -> None:
-        report = gate.check_package("1.36", "1.36.2-1.1")
+    def test_package_at_or_below_api_server_patch_passes_before_install(self) -> None:
+        # 설치 당일 선택지: API server와 같은 patch, 또는 CP kubelet과 같은 더 낮은 patch.
+        for package in ["1.36.4-1.1", "1.36.2-1.1"]:
+            with self.subTest(package=package):
+                report = gate.check_package("1.36", package, API_SERVER)
+                self.assertTrue(report["ok"], report)
+        self.assertEqual(
+            gate.check_package("1.36", "1.36.2-1.1", API_SERVER)["package_kubernetes_version"],
+            "v1.36.2",
+        )
 
-        self.assertTrue(report["ok"])
-        self.assertEqual(report["package_kubernetes_version"], "v1.36.2")
+    def test_package_newer_patch_than_api_server_fails_before_install(self) -> None:
+        # 저장소가 1.36.5만 내놓아도 설치 전에 멈춘다 — Join 직전에야 막으면 이미 설치된 뒤다.
+        report = gate.check_package("1.36", "1.36.5-1.1", API_SERVER)
+
+        self.assertFalse(report["ok"])
+        self.assertTrue(any("보다 새 patch" in v for v in report["violations"]))
 
     def test_rejects_version_from_another_minor(self) -> None:
-        report = gate.check_package("1.36", "1.37.0-1.1")
+        report = gate.check_package("1.36", "1.37.0-1.1", API_SERVER)
 
         self.assertFalse(report["ok"])
         self.assertIn("minor", report["violations"][0])
 
-    def test_rejects_malformed_package_or_minor(self) -> None:
-        for minor, package in [("1.36", "1.36.2"), ("1.36", "v1.36.2-1.1"), ("1.36", "latest"), ("v1.36", "1.36.2-1.1")]:
-            with self.subTest(minor=minor, package=package), self.assertRaises(gate.VersionParseError):
-                gate.check_package(minor, package)
+    def test_rejects_repository_minor_different_from_api_server(self) -> None:
+        report = gate.check_package("1.35", "1.35.9-1.1", API_SERVER)
+
+        self.assertFalse(report["ok"])
+        self.assertTrue(any("API server" in v for v in report["violations"]))
+
+    def test_rejects_malformed_package_minor_or_api_server(self) -> None:
+        cases = [
+            ("1.36", "1.36.2", API_SERVER),
+            ("1.36", "v1.36.2-1.1", API_SERVER),
+            ("1.36", "latest", API_SERVER),
+            ("v1.36", "1.36.2-1.1", API_SERVER),
+            ("1.36", "1.36.2-1.1", ""),
+        ]
+        for minor, package, api in cases:
+            with self.subTest(minor=minor, package=package, api=api), self.assertRaises(gate.VersionParseError):
+                gate.check_package(minor, package, api)
 
 
 class CheckJoinTest(unittest.TestCase):
@@ -124,13 +150,19 @@ class CommandLineTest(unittest.TestCase):
             "join", "--api-server", API_SERVER, "--cp-kubelet", CP_KUBELET,
             "--gpu-kubeadm", "v1.36.5", "--gpu-kubelet", "Kubernetes v1.36.5",
         )
-        malformed = self.run_gate("package", "--minor", "1.36", "--package-version", "1.36")
+        malformed = self.run_gate(
+            "package", "--minor", "1.36", "--package-version", "1.36", "--api-server", API_SERVER
+        )
+        package_newer = self.run_gate(
+            "package", "--minor", "1.36", "--package-version", "1.36.5-1.1", "--api-server", API_SERVER
+        )
 
         self.assertEqual(passing.returncode, gate.EXIT_OK)
         self.assertTrue(json.loads(passing.stdout)["ok"])
         self.assertEqual(newer.returncode, gate.EXIT_SKEW_VIOLATION)
         self.assertEqual(json.loads(newer.stdout)["patches"]["gpu_kubelet"], 5)
         self.assertEqual(malformed.returncode, gate.EXIT_PARSE_ERROR)
+        self.assertEqual(package_newer.returncode, gate.EXIT_SKEW_VIOLATION)
         self.assertIn("parse_error", json.loads(malformed.stdout))
 
 

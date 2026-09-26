@@ -61,7 +61,8 @@ prompt·모델 token을 로그에 남기지 않는다.
 | `40-join-preflight` | binary·kube 버전(API server 기준 skew: 같은 minor, kubelet patch ≤ API server)·swap·containerd socket/cgroup·API 6443 도달성·host 방화벽·token 환경변수 존재 여부의 **읽기 전용** 확인 | Join 전 네트워크 행렬을 실행할 수 있는 상태 |
 
 `10-base`와 `30-gpu-runtime`은 실제 값을 넘겨야 동작한다(`gpu_kubernetes_minor`,
-`gpu_kubernetes_package_version`, `nvidia_driver_branch`, `nvidia_container_toolkit_version`).
+`gpu_kubernetes_package_version`과 설치 전 patch 판정용 `api_server_version`, `nvidia_driver_branch`,
+`nvidia_container_toolkit_version`).
 `40-join-preflight`는 `api_server_version`과 `control_plane_kubelet_version`이 없으면 실패한다 —
 각 값의 의미는 `ansible/gpu-node/README.md` "버전 입력의 의미와 Join 판정"에 있다.
 비어 있으면 해당 단계를 건너뛰고 그 사실을 출력한다 — 추측한 패키지 버전으로 설치하지 않는다.

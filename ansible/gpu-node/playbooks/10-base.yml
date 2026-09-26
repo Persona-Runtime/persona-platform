@@ -27,9 +27,12 @@
     gpu_kubernetes_minor: ""
     # 설치할 kubeadm·kubelet·kubectl deb package version(예: 1.36.2-1.1). 이 GPU host에 저장소를
     # 등록한 뒤 `apt-cache madison`이 보여 준 값만 넘긴다 — 아래에서 그 목록에 있는지 다시 확인한다.
-    # patch는 API server patch 이하로 고른다(40-join-preflight가 최종 판정한다). 비어 있으면
-    # 목록만 보여 주고 설치하지 않는다.
+    # 비어 있으면 목록만 보여 주고 설치하지 않는다.
     gpu_kubernetes_package_version: ""
+    # `kubectl version -o json`의 serverVersion.gitVersion(예: v1.36.4). package version을 넘길 때
+    # 필수다 — 설치 **전에** package patch ≤ API server patch를 확인한다. 저장소가 더 새 patch만
+    # 내놓으면 설치하지 않고 멈춘다(40-join-preflight까지 가서 막으면 이미 설치된 뒤다).
+    api_server_version: ""
 
   tasks:
     - name: Ubuntu 24.04 amd64 대상만 변경 허용
@@ -199,7 +202,8 @@
           note: >-
             gpu_kubernetes_package_version이 비어 있어 kubeadm·kubelet·kubectl 설치를 건너뛴다.
             아래 목록에서 API server patch 이하인 값을 골라 `-e gpu_kubernetes_package_version=...`로
-            넘긴다. 이 목록에 없는 값은 받지 않는다.
+            넘긴다(api_server_version도 함께). 이 목록에 없는 값과 API server보다 새 patch는
+            받지 않는다.
           apt_cache_madison: "{{ gpu_kube_madison.stdout_lines }}"
       when:
         - gpu_kubernetes_minor | length > 0
@@ -207,7 +211,18 @@
 
     # 형식·minor 검사는 controller의 판정 스크립트가 한다(files/kube_version_gate.py, 테스트 있음).
     # 원격 host가 아니라 controller에서 돌리므로 become을 끈다 — 켜 두면 controller에서 sudo를 시도한다.
-    - name: package version 형식과 minor 검사
+    - name: package version을 넘기면 API server version도 필요하다
+      ansible.builtin.assert:
+        that:
+          - api_server_version | length > 0
+        fail_msg: >-
+          gpu_kubernetes_package_version을 넘길 때는 api_server_version도 넘긴다(예:
+          `-e api_server_version=v1.36.4`). API server보다 새 patch를 설치하지 않기 위해서다.
+      when:
+        - gpu_kubernetes_minor | length > 0
+        - gpu_kubernetes_package_version | length > 0
+
+    - name: package version 형식·minor와 API server 대비 patch 검사
       ansible.builtin.command:
         argv:
           - python3
@@ -217,6 +232,8 @@
           - "{{ gpu_kubernetes_minor }}"
           - --package-version
           - "{{ gpu_kubernetes_package_version }}"
+          - --api-server
+          - "{{ api_server_version }}"
       delegate_to: localhost
       become: false
       changed_when: false
