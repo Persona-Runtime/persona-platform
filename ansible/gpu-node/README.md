@@ -17,7 +17,7 @@ GPU runtime, Tailscale 패키지, Join 전 확인까지 자동화한다. EC2 생
 | `00-preflight.yml` | OS·architecture·디스크 여유·메모리·swap·시간 동기화·네트워크와 MTU·필수 binary 상태 **읽기** | 어떤 설정도 변경하지 않음 |
 | `10-base.yml` | Kubernetes host 공통 전제(swap off, kernel module, sysctl)와 containerd·kubeadm·kubelet·kubectl 준비·hold | Tailscale 등록, Join, GPU driver 설치 |
 | `20-tailscale.yml` | Tailscale **패키지 설치와 서비스 활성화까지만** | `tailscale up`, auth key 전달, route 광고·수락, SNAT 설정 |
-| `30-gpu-runtime.yml` | NVIDIA driver와 Container Toolkit 설치, containerd runtime 등록, `nvidia-smi`로 GPU 1장·분기 확인 | container GPU 실행, device plugin 배포, taint 제거 |
+| `30-gpu-runtime.yml` | R580 driver 판정(없으면 설치, 정상이면 건너뜀, 그 밖이면 중단)과 hold, Container Toolkit 설치, containerd runtime 등록, `nvidia-smi`로 GPU 1장·R580 기준선 확인 | container GPU 실행, device plugin 배포, taint 제거 |
 | `40-join-preflight.yml` | Join 직전 binary·버전(API server 기준 skew 판정)·swap·containerd·API 포트·방화벽·token 존재 여부 **읽기** | `kubeadm join`, token·CA hash 수신·저장 |
 
 ## 계층을 이렇게 나눈 이유
@@ -55,8 +55,10 @@ NVIDIA APT 저장소 선언도 check mode에서는 파일로 쓰이지 않으므
 - kernel module: `/proc/modules`를 읽어 **빠진 것만** `modprobe`
 - sysctl: 선언 파일이 **바뀐 경우에만** `sysctl --system`, 실효값은 `assert`로 확인
 - swap: `swaptotal_mb > 0`일 때만 `swapoff`
-- driver: `apt`가 이미 설치된 패키지에 변화를 만들지 않으므로 `changed`가 아니고, 재부팅은
-  **`changed`일 때만** 요청
+- driver: `files/nvidia_driver_gate.py`가 host 상태를 판정한다. R580이 이미 정상(요청 package
+  version 설치 + 같은 version 적재 + 실행 중 kernel용 DKMS installed)이면 설치·재부팅 task가
+  건너뛰어진다. driver가 없을 때만 설치하고 그때만 재부팅한다. 다른 branch·다른 patch·미적재·DKMS
+  불일치는 아무것도 바꾸지 않고 멈춘다(자동 전환·재설치 없음)
 - containerd 기본 설정: `creates:`로 이미 있으면 생성하지 않음
 
 ## 비밀 경계
@@ -100,7 +102,7 @@ ansible-lint playbooks/
 | `gpu_kubernetes_package_version` (예: `1.36.2-1.1`) | GPU host에 저장소를 등록한 뒤 `apt-cache madison kubeadm kubelet kubectl`이 보여 준 값(`10-base`). 비워서 한 번 실행하면 목록을 출력한다 |
 | `api_server_version` (예: `v1.36.4`) | `kubectl version -o json`의 `serverVersion.gitVersion`(`10-base`는 package version을 넘길 때 필수, `40-join-preflight`는 항상 필수) |
 | `control_plane_kubelet_version` (예: `v1.36.2`) | CP Node의 `status.nodeInfo.kubeletVersion`(`40-join-preflight`, 필수) |
-| `nvidia_driver_branch` (계획값 `570`) | `vllm-node-join-plan.md` §4의 근거 표 |
+| `nvidia_driver_package_version` (예: `580.95.05-0ubuntu0.24.04.2`) | GPU host의 `apt-cache madison nvidia-driver-580-server` 출력(`30-gpu-runtime`). 비우면 현재 상태와 후보만 출력하고 멈춘다. branch는 R580 고정이며 `nvidia_driver_branch=570` 같은 이전 입력은 거부한다 |
 | `nvidia_container_toolkit_version` | NVIDIA 저장소의 실제 패키지 버전(네 패키지 동일) |
 | `control_plane_api_host` | CP의 LAN 주소 |
 
@@ -132,7 +134,7 @@ v1.36.4일 때 저장소에 `1.36.4-*`가 있으면 그것을, 없고 `1.36.2-*`
 위 예시 값(API server v1.36.4, CP kubeadm·kubelet v1.36.2)은 2026-09-26 관측값이다. 실행할 때마다
 다시 읽는다. 이 playbook은 control plane을 업그레이드하지 않는다.
 
-판정 스크립트 테스트(표준 라이브러리만, 네트워크·클러스터 없음):
+판정 스크립트(`files/kube_version_gate.py`, `files/nvidia_driver_gate.py`) 테스트(표준 라이브러리만, 네트워크·클러스터·host 없음):
 
 ```sh
 python3 -m unittest discover -s ansible/gpu-node/tests -v
