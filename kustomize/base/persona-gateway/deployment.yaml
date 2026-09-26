@@ -60,8 +60,13 @@ spec:
       # - minDomains는 두지 않는다(생략 = 1). 2로 두면 워커 하나만 남았을 때 두 번째 Pod가 항상
       #   Pending이다.
       # NotReady 노드의 기존 Pod는 기본 toleration(NoExecute 300초)이 끝나 eviction된 뒤에야
-      # 교체 Pod가 생긴다. 워커가 돌아와도 자동으로 다시 나뉘지 않는다 — 분산은 스케줄링
-      # 시점에만 적용되므로 다음 롤아웃·재생성 때까지 한 워커에 몰려 있을 수 있다.
+      # 교체 Pod가 생긴다. 워커가 돌아와도 이미 떠 있는 Pod는 자동으로 다시 나뉘지 않는다 —
+      # 분산은 스케줄링 시점에만 적용되므로 노드 장애 뒤에는 한 워커에 몰려 있을 수 있고, 다음
+      # 롤아웃에서 새 revision Pod끼리 다시 나뉜다(아래 matchLabelKeys).
+      # - matchLabelKeys: pod-template-hash — 롤아웃 중(maxSurge 1)에는 이전 revision Pod도 떠
+      #   있어서, 이들을 함께 세면 새 Pod가 이전 Pod 반대편에 놓인다. 이전 Pod가 모두 내려가고
+      #   나면 새 Pod 둘이 한 워커에 남는(0/2) 일이 생긴다. Deployment가 revision마다 자동으로
+      #   붙이는 pod-template-hash가 같은 Pod끼리만 세게 해, 새 revision 두 개가 서로 나뉘게 한다.
       # 위 동작은 Kubernetes 문서와 scheduler 규칙 기준이며 실제 클러스터에서는 아직 확인하지
       # 않았다.
       topologySpreadConstraints:
@@ -69,6 +74,8 @@ spec:
           maxSkew: 1
           whenUnsatisfiable: DoNotSchedule
           nodeTaintsPolicy: Honor
+          matchLabelKeys:
+            - pod-template-hash
           labelSelector:
             matchLabels:
               app.kubernetes.io/name: persona-gateway

@@ -322,6 +322,8 @@ raise "[기준선] Gateway 종료 유예가 기준선(30초)과 다르다 — Uv
 # - nodeTaintsPolicy Honor: 빠지거나 Ignore면 cordon·NotReady 노드가 계산에 남아 두 번째 Pod가
 #   Pending이 된다. 워커 하나만 남았을 때는 그 워커에 함께 배치하는 것이 의도다.
 # - minDomains는 두지 않는다. 2 이상이면 워커 하나만 남았을 때 항상 Pending이다.
+# - matchLabelKeys는 pod-template-hash 하나다. 빠지면 롤아웃 중 이전 revision Pod까지 셈에 들어가
+#   롤아웃이 끝난 뒤 새 Pod 둘이 한 워커에 남을 수 있다. 다른 label을 쓰면 revision을 가르지 못한다.
 GATEWAY_POD_SELECTOR = { "matchLabels" => { "app.kubernetes.io/name" => "persona-gateway" } }
 spreads = gpod["topologySpreadConstraints"] || []
 raise "[안전] Gateway topologySpreadConstraints가 정확히 1개여야 한다: #{spreads.length}개" unless spreads.length == 1
@@ -331,6 +333,7 @@ raise "[안전] Gateway topology spread maxSkew는 1이다" unless spread["maxSk
 raise "[안전] Gateway topology spread는 DoNotSchedule이다 — ScheduleAnyway는 한 워커 몰림을 허용한다" unless spread["whenUnsatisfiable"] == "DoNotSchedule"
 raise "[안전] Gateway topology spread nodeTaintsPolicy는 Honor다 — Ignore면 cordon·NotReady 워커가 계산에 남아 두 번째 Pod가 Pending이 된다" unless spread["nodeTaintsPolicy"] == "Honor"
 raise "[안전] Gateway topology spread에 minDomains를 두지 않는다 — 워커 하나만 남으면 두 번째 Pod가 항상 Pending이다" if spread.key?("minDomains")
+raise "[안전] Gateway topology spread matchLabelKeys는 [pod-template-hash]다 — 없으면 롤아웃 뒤 새 Pod 둘이 한 워커에 남을 수 있다" unless spread["matchLabelKeys"] == ["pod-template-hash"]
 raise "[안전] Gateway topology spread labelSelector는 app.kubernetes.io/name=persona-gateway 하나여야 한다 — 비거나 넓은 selector는 다른 Pod를 셈에 넣는다" unless spread["labelSelector"] == GATEWAY_POD_SELECTOR
 # 분산이 셈하는 label이 실제 Gateway Pod label과 어긋나면 제약이 아무 Pod도 세지 않는다.
 raise "[안전] Gateway Pod label이 topology spread selector와 맞지 않는다" unless gspec.dig("template", "metadata", "labels", "app.kubernetes.io/name") == "persona-gateway"
