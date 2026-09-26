@@ -383,7 +383,8 @@
 #
 # 0. **R580 정상 host**: 이미 R580 + DKMS가 정상인 host에서 실행하면 판정이 healthy이고, driver
 #    설치·재부팅 task가 skipped여야 한다(hold만 적용). 570-server 전환 package가 남아 있으면 drift로
-#    보고된다.
+#    보고된다. 2026-09-27 관측 host의 입력: `nvidia_driver_package_version=580.178.04-0ubuntu0.24.04.1`,
+#    `nvidia_container_toolkit_version=1.20.1-1`(DKMS module 이름은 `nvidia-srv`).
 # 1. **재실행 수렴**: 연속으로 두 번 실행해 두 번째가 `changed=0`인지 본다. driver·toolkit이
 #    이미 맞고 nvidia runtime도 등록돼 있으면 재부팅도 등록도 일어나지 않아야 한다.
 # 2. **drift 복구**: `/etc/containerd/config.toml`에서 `runtimes.nvidia` 블록을 일부러 지운 뒤

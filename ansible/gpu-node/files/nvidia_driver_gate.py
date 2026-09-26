@@ -42,10 +42,13 @@ DRIVER_PACKAGE = f"nvidia-driver-{DRIVER_BRANCH}-server"
 PACKAGE_VERSION = re.compile(rf"^({DRIVER_BRANCH}\.\d+(?:\.\d+)?)-[0-9][0-9A-Za-z.+~]*$")
 # nvidia-driver-<branch>, -server, -open, -server-open 변형을 모두 driver package로 본다.
 DRIVER_PACKAGE_NAME = re.compile(r"^nvidia-driver-(\d+)(-server)?(-open)?$")
-# `dkms status` 두 형식: "nvidia/580.95.05, 6.8.0-1015-aws, x86_64: installed"(새 형식)와
-# "nvidia, 580.95.05, 6.8.0-1015-aws, x86_64: installed"(옛 형식).
+# `dkms status` 형식. module 이름은 package 계열마다 다르다 — Ubuntu `-server` driver는
+# `nvidia-srv`로 등록한다. 실제 R580 host 관측값(2026-09-27):
+#   "nvidia-srv/580.178.04, 7.0.0-1013-aws, x86_64: installed"
+# 일반 driver는 "nvidia/…", 옛 dkms는 "nvidia, <version>, …"(쉼표) 형식을 쓴다. 이름을 모르는
+# 형식으로 두면 DKMS 목록을 빈 것으로 읽어 정상 host를 blocked로 판정한다.
 DKMS_LINE = re.compile(
-    r"^nvidia(?:/|,\s*)(?P<version>[0-9.]+),\s*(?P<kernel>[^,]+),\s*[^:]+:\s*(?P<state>.+)$"
+    r"^nvidia(?:-srv)?(?:/|,\s*)(?P<version>[0-9.]+),\s*(?P<kernel>[^,]+),\s*[^:]+:\s*(?P<state>.+)$"
 )
 
 
@@ -144,7 +147,7 @@ def decide(
         ]
         if not built:
             reasons.append(
-                f"실행 중인 kernel {kernel}용 DKMS nvidia/{expected} module이 installed 상태가 아니다: {dkms}"
+                f"실행 중인 kernel {kernel}용 DKMS nvidia(-srv)/{expected} module이 installed 상태가 아니다: {dkms}"
             )
         state = "healthy" if not reasons else "blocked"
 

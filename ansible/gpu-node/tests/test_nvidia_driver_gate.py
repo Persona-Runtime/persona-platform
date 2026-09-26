@@ -5,7 +5,8 @@
 없으면 설치한다. 다른 branch·다른 patch·미적재·DKMS 불일치는 바꾸지 않고 멈춘다. 580을 가리키는
 Ubuntu 570-server 전환 package는 drift로만 보고한다.
 
-입력 예시는 형식을 보이기 위한 합성 값이다. 실제 host 출력 형식은 설치 당일 확인한다.
+합성 입력은 형식을 보이기 위한 값이다. RealR580HostTest는 2026-09-27 실제 GPU host에서 관측한
+dkms·package 값을 그대로 쓴다 — 합성 값만으로는 module 이름(`nvidia-srv`) 같은 차이를 놓친다.
 실행: python3 -m unittest discover -s ansible/gpu-node/tests -v
 """
 
@@ -61,6 +62,33 @@ class HealthyR580Test(unittest.TestCase):
 
         self.assertEqual(report["state"], "healthy")
         self.assertTrue(any("전환 package" in d for d in report["drift"]))
+
+
+# 2026-09-27 실제 R580 host 관측값(Ubuntu nvidia-driver-580-server, DKMS module 이름은 nvidia-srv).
+REAL_PACKAGE = "580.178.04-0ubuntu0.24.04.1"
+REAL_KERNEL = "7.0.0-1013-aws"
+REAL_DKMS = "nvidia-srv/580.178.04, 7.0.0-1013-aws, x86_64: installed\n"
+REAL_DPKG = f"nvidia-driver-580-server\tii \t{REAL_PACKAGE}\tnvidia-dkms-580-server\n"
+
+
+class RealR580HostTest(unittest.TestCase):
+    def test_observed_nvidia_srv_dkms_output_is_healthy(self) -> None:
+        report = decide(dpkg=REAL_DPKG, smi="580.178.04\n", dkms=REAL_DKMS, package=REAL_PACKAGE, kernel=REAL_KERNEL)
+
+        self.assertEqual(report["state"], "healthy", report["reasons"])
+        self.assertEqual(report["action"], "skip_install")
+        self.assertEqual(report["dkms_modules"], [{"version": "580.178.04", "kernel": REAL_KERNEL, "state": "installed"}])
+
+    def test_observed_dkms_for_another_kernel_is_still_blocked(self) -> None:
+        report = decide(dpkg=REAL_DPKG, smi="580.178.04\n", dkms=REAL_DKMS, package=REAL_PACKAGE, kernel="7.0.0-1014-aws")
+
+        self.assertEqual(report["state"], "blocked")
+
+    def test_nvidia_srv_leftover_without_package_is_blocked(self) -> None:
+        report = decide(dpkg="", smi_rc=127, smi="", dkms=REAL_DKMS, package=REAL_PACKAGE, kernel=REAL_KERNEL)
+
+        self.assertEqual(report["state"], "blocked")
+        self.assertTrue(any("DKMS" in r for r in report["reasons"]))
 
 
 class NotInstalledTest(unittest.TestCase):
