@@ -5,9 +5,10 @@ Sync 통제 원칙(`runbooks/public-ingress.md` Gate 3-7 상단, 2026-09-18): "A
 Application이 정확히 무엇을 반영하는지 이름만으로 헷갈리지 않게 하려는 것이다 — **한
 Application = 한 종류의 변경**을 목표로 2026-09-19에 `persona-app`·`persona-db`를 나눴다.
 
-모든 Application은 `targetRevision: develop`, `syncPolicy` 키 없음(자동 Sync·prune 없음,
-`scripts/validate-*.sh`가 assert)이 원칙이다. Sync 전에는 `scripts/argo-preflight.sh <app>`로
-승인 SHA·전체 diff·선행 조건을 확인한다.
+Git source를 쓰는 모든 Application은 `targetRevision: develop`, `syncPolicy.automated` 없음
+(자동 Sync·prune 없음, `scripts/validate-*.sh`가 assert)이 원칙이다. Helm chart source는 검토한
+chart version을 고정한다. Sync 전에는 `scripts/argo-preflight.sh <app>`로 승인 SHA·전체 diff·
+선행 조건을 확인한다.
 
 ## Application
 
@@ -26,6 +27,8 @@ Application = 한 종류의 변경**을 목표로 2026-09-19에 `persona-app`·`
 | `csi-driver-nfs` | (Helm) | `kube-system` | NFS CSI 드라이버 | 없음 |
 | `persona-nfs-storage` | `kustomize/overlays/prod/nfs-storage` | `default` | StorageClass | `csi-driver-nfs` 준비됨 |
 | `monitoring-stack` | (Helm `kube-prometheus-stack`) | `monitoring` | Prometheus·Grafana | 없음(유일하게 `syncOptions: [ServerSideApply=true]` — CRD가 커서, `automated`는 아님) |
+| `gpu-runtime` | `kustomize/overlays/prod/gpu-runtime` | `kube-system` | `RuntimeClass/nvidia`만 | `persona-gpu-01` Ready, `node-pool=gpu`, GPU 전용 taint 확인 |
+| `dcgm-exporter` | (Helm `dcgm-exporter`) | `monitoring` | GPU 전용 DCGM exporter DaemonSet·Service·ServiceMonitor | `gpu-runtime` Sync 뒤 `RuntimeClass/nvidia` 존재, monitoring Prometheus Available, ServiceMonitor CRD 존재 |
 
 ## Argo 밖(수동 `kubectl apply -k`/de-registered)
 
@@ -41,8 +44,8 @@ Argo Application이 없는 이유까지 같이 적는다 — "왜 여기 없는�
 ## 신규 Application 추가 시
 
 1. `kustomize/overlays/prod/<name>/`에 그 종류의 리소스만 넣는다(다른 종류를 섞지 않는다).
-2. `argocd/<name>.yaml`을 기존 단일 source Application 모양(`persona-app.yaml` 등)으로
-   만든다 — `syncPolicy` 키를 넣지 않는다.
+2. `argocd/<name>.yaml`을 기존 Application 모양으로 만든다. Helm chart와 Git values를 함께
+   쓸 때는 `monitoring-stack`처럼 multi-source로 두고, `syncPolicy.automated`를 넣지 않는다.
 3. 이 표에 행을 추가한다.
 4. `scripts/argo-preflight.sh`의 선행 조건 표에 그 Application의 조건을 추가한다.
 5. 관련 `scripts/validate-*.sh`가 새 경로를 렌더·검사하도록 확장한다.

@@ -11,7 +11,7 @@ set -eu
 #   scripts/argo-preflight.sh <app>     # persona-app, persona-app-ingress, persona-app-netpol,
 #                                        # persona-db, persona-db-netpol, persona-edge,
 #                                        # metallb, metallb-config, cert-manager,
-#                                        # cert-manager-issuers 중 하나
+#                                        # cert-manager-issuers, gpu-runtime, dcgm-exporter 중 하나
 #   scripts/argo-preflight.sh --self-test
 
 repo_dir=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
@@ -263,6 +263,44 @@ check_preconditions() {
     cert-manager-issuers)
       if ! kubectl get crd clusterissuers.cert-manager.io > /dev/null 2>&1; then
         echo "선행 조건 실패: cert-manager-issuers → CRD clusterissuers.cert-manager.io가 없다(cert-manager Sync 먼저)" >&2
+        return 1
+      fi
+      ;;
+    gpu-runtime)
+      gpu_ready=$(kubectl get node persona-gpu-01 \
+        -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2> /dev/null || true)
+      gpu_pool=$(kubectl get node persona-gpu-01 \
+        -o jsonpath='{.metadata.labels.personaruntime\.xyz/node-pool}' 2> /dev/null || true)
+      gpu_taint=$(kubectl get node persona-gpu-01 \
+        -o jsonpath='{range .spec.taints[?(@.key=="personaruntime.xyz/dedicated")]}{.value}:{.effect}{end}' 2> /dev/null || true)
+      if [ "$gpu_ready" != "True" ] || [ "$gpu_pool" != "gpu" ] || [ "$gpu_taint" != "gpu-serving:NoSchedule" ]; then
+        echo "선행 조건 실패: gpu-runtime → persona-gpu-01 Ready=True, node-pool=gpu, dedicated=gpu-serving:NoSchedule가 모두 필요하다(실제: Ready=${gpu_ready:-없음}, pool=${gpu_pool:-없음}, taint=${gpu_taint:-없음})" >&2
+        return 1
+      fi
+      ;;
+    dcgm-exporter)
+      if ! kubectl get runtimeclass nvidia > /dev/null 2>&1; then
+        echo "선행 조건 실패: dcgm-exporter → RuntimeClass/nvidia가 없다(gpu-runtime Sync 먼저)" >&2
+        return 1
+      fi
+      if ! kubectl get crd servicemonitors.monitoring.coreos.com > /dev/null 2>&1; then
+        echo "선행 조건 실패: dcgm-exporter → ServiceMonitor CRD가 없다(monitoring-stack Sync 먼저)" >&2
+        return 1
+      fi
+      prometheus_ready=$(kubectl -n monitoring get prometheus \
+        -o jsonpath='{.items[0].status.conditions[?(@.type=="Available")].status}' 2> /dev/null || true)
+      if [ "$prometheus_ready" != "True" ]; then
+        echo "선행 조건 실패: dcgm-exporter → monitoring Prometheus가 Available=True가 아니다(실제: ${prometheus_ready:-없음})" >&2
+        return 1
+      fi
+      # RuntimeClass가 GPU 전용 taint를 자동으로 합치지만, node 계약 자체가 깨졌다면
+      # exporter는 Pending으로만 남는다. gpu-runtime과 같은 조건을 다시 확인한다.
+      gpu_ready=$(kubectl get node persona-gpu-01 \
+        -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2> /dev/null || true)
+      gpu_pool=$(kubectl get node persona-gpu-01 \
+        -o jsonpath='{.metadata.labels.personaruntime\.xyz/node-pool}' 2> /dev/null || true)
+      if [ "$gpu_ready" != "True" ] || [ "$gpu_pool" != "gpu" ]; then
+        echo "선행 조건 실패: dcgm-exporter → persona-gpu-01 Ready=True, node-pool=gpu가 필요하다(실제: Ready=${gpu_ready:-없음}, pool=${gpu_pool:-없음})" >&2
         return 1
       fi
       ;;

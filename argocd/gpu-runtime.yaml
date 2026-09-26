@@ -1,0 +1,16 @@
+# GPU runtime 계약은 cluster-scoped RuntimeClass 하나만 관리한다. 최초 등록과 Sync는
+# 수동이다. DCGM exporter와 이후 vLLM은 이 Application이 Synced인 뒤에만 Sync한다.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: gpu-runtime
+  namespace: argocd
+spec:
+  project: default
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kube-system
+  source:
+    repoURL: https://github.com/Persona-Runtime/persona-platform.git
+    targetRevision: develop
+    path: kustomize/overlays/prod/gpu-runtime
