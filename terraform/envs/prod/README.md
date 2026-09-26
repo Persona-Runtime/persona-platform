@@ -99,8 +99,8 @@ API 주소·인증서 SAN·노드/터널 주소·반환 경로·MTU를 확인한
 서빙 기준 모델은 `Qwen/Qwen3-4B-Instruct-2507`, BF16, 입력+출력 최대 4096 토큰, 단일 GPU/vLLM이다.
 8192는 이 기준선이 통과한 뒤 별도로 비교한다. 둘을 한 실행의 자동 가변 상한으로 섞지 않는다.
 첫 실행 후보는 vLLM `v0.29.0-cu129-ubuntu2404`(linux/amd64 digest `sha256:51b10427…51b8`)·
-CUDA 12.9.1·NVIDIA driver **570 LTS**·Container Toolkit 1.20.x다. driver를 580이 아니라 570으로
-잡은 이유와 근거는 [Join 계획 §4](vllm-node-join-plan.md)에 있다.
+CUDA 12.9.1·NVIDIA driver **R580**(Ubuntu `nvidia-driver-580-server`, 정확한 patch 고정)·Container
+Toolkit 1.20.x다. R580 근거와 폐기된 선택(R570)은 [Join 계획 §4](vllm-node-join-plan.md)에 있다.
 모델 commit과 vLLM 이미지 digest, driver/toolkit patch는 실제 배포 전에 다시 확인한다. 한국어 품질·처리량·VRAM은 미측정이다.
 
 ## 준비 상태표 (2026-09-25)
@@ -123,7 +123,7 @@ CUDA 12.9.1·NVIDIA driver **570 LTS**·Container Toolkit 1.20.x다. driver를 5
 | 항목 | 현재 상태 | 다음 조치 |
 | --- | --- | --- |
 | Terraform 선언 | **확정(2026-09-19)**, 안전 단정 보강 **완료(2026-09-25)** — mock plan 6건 통과(단정 5 → 9개) | 실제 `plan`은 입력 7개 확정 후 |
-| driver/toolkit/vLLM 조합 | **확정(2026-09-25)** — image digest·CUDA 12.9.1·driver 570 LTS를 manifest로 확인 | 설치 직전 패키지 patch를 실제 저장소에서 읽어 기록 |
+| driver/toolkit/vLLM 조합 | image digest·CUDA 12.9.1은 manifest로 확인(2026-09-25). driver는 **R580으로 확정(2026-09-27)**, R570은 폐기 | 설치 직전 driver·toolkit patch를 실제 저장소에서 읽어 기록. R580에서 image 실행은 GPU smoke로 확인 전 |
 | GPU 노출 방식 | **확정(2026-09-25)** — NVIDIA device plugin(노드 1대 전제) | 조인 뒤 pinned device plugin 배포, taint toleration 확인 |
 | Ansible playbook 5계층 | **준비 완료(2026-09-25)** — 작성했으나 **한 번도 실행하지 않았다.** `ansible` 미설치로 syntax-check·lint 미실행 | ansible 설치 환경에서 `--syntax-check`·`ansible-lint` 먼저 통과 |
 | tailnet subnet router 결정 | **확정(2026-09-19)** — `k8s-cp`, SNAT off. 검증 행렬 7행 작성 완료 | 조인 전 행렬 실행(실제 route 승인은 사람이) |
@@ -139,7 +139,7 @@ CUDA 12.9.1·NVIDIA driver **570 LTS**·Container Toolkit 1.20.x다. driver를 5
 | 1 | EC2 apply와 SSH 도달 | 호스트 로그인. **이것은 tailnet·Pod 경로 성공이 아니다** |
 | 2 | Ansible `00`→`10`→`20` | swap 0, sysctl 실효값 1, containerd socket, Tailscale binary |
 | 3 | 사람이 `tailscale up` + route 승인 | tailnet 도달성만. Pod 통신과 무관 |
-| 4 | Ansible `30-gpu-runtime` | `nvidia-smi`로 GPU 정확히 1장 + driver 570 분기 |
+| 4 | Ansible `30-gpu-runtime` | `nvidia-smi`로 GPU 정확히 1장 + R580 기준선(요청 patch·DKMS) 판정 healthy |
 | 5 | Ansible `40-join-preflight` | 버전 대조 통과. **Join 성공이 아니다** |
 | 6 | §3 네트워크 행렬 7행 | 행마다 증명 계층을 구분해 기록. Pod↔Pod와 DNS까지 |
 | 7 | 사람이 `kubeadm join` | Node `Ready`, taint 등록 확인 |
