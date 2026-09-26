@@ -127,6 +127,10 @@ sh scripts/validate-persona-app-manifests.sh
 bash scripts/test-persona-scheduling.sh
 # monitoring-stack만 Helm chart를 네트워크로 받아 렌더한다. 오프라인에서는 돌지 않는다.
 sh scripts/validate-monitoring-manifests.sh
+# mem-lab 노드 선언: public Kubernetes port와 GPU runtime 유입을 막는다.
+sh scripts/validate-mem-lab-declarations.sh
+# 위 검사와 terraform test가 실제로 결함을 잡는지 복사본에 결함을 넣어 확인한다(terraform 필요).
+sh scripts/test-mem-lab-negative.sh
 ```
 
 렌더·정책 검사 성공은 실제 스케줄링, 무중단 배포, 메트릭 수집 성공의 증거가 아니다.
