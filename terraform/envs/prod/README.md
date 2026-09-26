@@ -7,7 +7,7 @@
 
 - 서울 전용 VPC, 퍼블릭 서브넷 하나(/16 VPC의 첫 /24), Internet Gateway, 기본 경로.
 - On-Demand `g6.xlarge` 한 대(4 vCPU·16 GiB RAM·NVIDIA L4 1장, EC2 사양표 기준 가용 GPU 메모리 22 GiB), 암호화 gp3 루트 디스크 100 GiB·3000 IOPS·125 MiB/s.
-- EC2에만 자동 할당 퍼블릭 IPv4. NAT Gateway, EIP, Load Balancer는 만들지 않는다.
+- EC2 primary network interface에 고정 Elastic IP(EIP) 하나. NAT Gateway, Load Balancer는 만들지 않는다.
 - IMDSv2 필수, hop limit 1. AWS API가 필요 없는 호스트이므로 instance IAM role/profile은 만들지 않는다.
 - 초기 SSH용 공개 키만 등록. 개인 키·AWS 키·Tailscale 인증 키·kubeadm 토큰은 코드/state/user-data에 넣지 않는다.
 - SSH는 기본 닫힘. 최초 접속용 관리자 공인 IPv4 `/32`를 명시하면 TCP 22만 임시 허용한다.
@@ -36,7 +36,7 @@ AWS 생성·Kubernetes Join·관측 리소스 Sync가 실행된 것은 아니다
 4. Canonical Ubuntu 24.04 amd64 일반 서버 AMI ID를 확인해 고정한다. data source는 ID·Canonical 소유자·이미지 이름·아키텍처·상태를 함께 검사한다. 자동 latest 선택은 하지 않는다.
 5. AWS VPC CIDR을 홈 LAN·Pod CIDR·Service CIDR·기존 VPN/VPC 경로와 비교한다. 예시 `10.80.0.0/16`은 확정값이 아니다. 코드의 RFC1918 검사는 실제 경로 중복을 판별하지 않는다.
 6. 초기 접속용 공개 키와 관리자 공인 `/32`를 준비한다. 예시 IP·키로 접속할 수 없다.
-7. EC2·EBS·public IPv4·전송 비용을 공식 콘솔에서 재확인하고 월 10~20만원 예산 안에서 실험 시간을 정한다. 예산 알림 설정, 종료 방법과 확인 책임도 생성 전에 정한다.
+7. EC2·EBS·EIP·전송 비용을 공식 콘솔에서 재확인하고 월 10~20만원 예산 안에서 실험 시간을 정한다. EIP는 stopped 상태에도 과금되므로, 중지 기간에도 유지할 이유를 확인한다.
 8. 이 검토와 생성 허가 후에만 `launch_review_confirmed=true`로 실제 plan을 실행한다. 이는 **수동 확인 표시**이며 할당량·가격 자동 검사가 아니다.
 
 ### plan 전에 실제 값이 필요한 입력
@@ -84,7 +84,7 @@ terraform test
 - `launch_review_confirmed=false`는 종료 스위치가 아니다. false로 되돌려도 EC2는 계속 실행된다.
 - `prevent_destroy=true`는 Terraform의 EC2 삭제·교체를 차단한다. 요금 차단이나 콘솔/CLI 삭제 방지가 아니며, 리소스 선언을 제거해도 보호가 유지되는 것은 아니다.
 - 일상 종료는 **EC2 Stop**이다. Pod 삭제·kubelet 중지·Terraform 코드 삭제로는 컴퓨팅 과금이 멈추지 않는다. AWS 상태가 `stopped`인지 확인한다. 이 코드에는 자동 종료 타이머·하드 예산 제한이 없다.
-- EBS는 중지 중에도 과금된다. 인스턴스의 자동 할당 public IPv4는 stop/start 시 바뀔 수 있다. Kubernetes 식별값에 이 주소를 쓰지 않는다.
+- EBS와 EIP는 중지 중에도 과금된다. EIP는 관리 편의를 위한 고정 SSH 목적지일 뿐이며, Kubernetes 식별값·vLLM endpoint에 쓰지 않는다. SSH 허용 범위는 계속 관리자 공인 `/32`다.
 - `delete_on_termination=true`: 실제 EC2 종료(terminate) 시 루트 디스크와 모델 캐시도 삭제된다. Terraform 보호를 해제하거나 콘솔에서 종료하기 전 정확한 대상·데이터 폐기 승인이 필요하다. 이 노드에는 유일한 원본·DB를 두지 않는다.
 - AMI·네트워크·키 변경은 재생성을 유발할 수 있다. plan에서 replacement가 보이면 멈추고 검토한다. `prevent_destroy=true`는 삭제뿐 아니라 **교체도 막으므로**, AMI를 바꾸면 plan이 재생성을 시도하다 하드 실패한다. 그때 보호를 임시로 끄는 것이 아니라 교체가 정말 필요한지부터 검토한다.
 - 루트 볼륨 암호화는 **AWS 관리 키**다(`kms_key_id` 미지정). 고객 관리 키(CMK)의 회전·접근 감사·삭제 통제가 필요해지면 별도 결정으로 추가한다. "암호화됨"과 "키를 우리가 통제함"은 다르다.

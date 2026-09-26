@@ -162,3 +162,16 @@ resource "aws_instance" "gpu" {
   depends_on = [aws_route.internet, aws_route_table_association.gpu]
   tags       = { Name = local.gpu_node_name }
 }
+
+# stop/start 뒤에도 운영자가 같은 SSH 목적지를 쓸 수 있게 한다. 자동 할당 public IPv4는
+# 재시작 때 바뀌지만 EIP는 primary network interface에 남는다. 주소가 고정돼도 인바운드
+# 규칙은 넓히지 않는다 — SSH는 bootstrap_ssh_cidr의 명시적 /32만 허용한다.
+resource "aws_eip" "gpu" {
+  domain = "vpc"
+  tags   = { Name = "${local.gpu_node_name}-management" }
+}
+
+resource "aws_eip_association" "gpu" {
+  allocation_id = aws_eip.gpu.id
+  instance_id   = aws_instance.gpu.id
+}

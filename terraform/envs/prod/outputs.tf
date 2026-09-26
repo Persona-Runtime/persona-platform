@@ -18,8 +18,8 @@ output "private_ip" {
 }
 
 output "public_ip" {
-  description = "Bootstrap address only; may change after stop/start. Not a vLLM endpoint."
-  value       = aws_instance.gpu.public_ip
+  description = "고정 관리 주소(EIP). vLLM endpoint가 아니며 SSH는 명시한 관리자 /32만 허용한다."
+  value       = aws_eip.gpu.public_ip
 }
 
 output "vpc_id" {

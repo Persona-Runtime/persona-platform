@@ -11,6 +11,11 @@ variables {
 
 run "closed_ingress_baseline" {
   command = plan
+  # 개발자의 실제 terraform.tfvars에 초기 SSH /32가 있어도, 이 사례는 명시적으로
+  # peer 접근을 주지 않은 기본 구성을 검증한다.
+  variables {
+    bootstrap_ssh_cidr = null
+  }
   assert {
     condition     = length(aws_vpc_security_group_ingress_rule.bootstrap_ssh) == 0 && length(aws_vpc_security_group_ingress_rule.tailscale) == 0
     error_message = "No inbound access is permitted without explicit peer configuration."
@@ -18,6 +23,15 @@ run "closed_ingress_baseline" {
   assert {
     condition     = aws_instance.gpu.instance_type == "g6.xlarge" && aws_instance.gpu.tags["Name"] == "persona-gpu-01" && aws_instance.gpu.associate_public_ip_address
     error_message = "Use the reviewed persona-gpu-01 g6.xlarge baseline with public IPv4."
+  }
+  # EIP가 management 목적지의 주소 안정성만 해결하게 한다. 이 단정은 보안 그룹을
+  # 완화하지 않으며, SSH /32 제한은 closed_ingress_baseline의 별도 규칙으로 유지된다.
+  assert {
+    # association의 instance ID는 plan 단계에서 아직 확정되지 않는다. EIP를 VPC에
+    # 만들겠다는 선언 자체는 이 단계에서 검증하고, 실제 대상은 apply 전 plan에서
+    # aws_eip_association.gpu.instance_id로 별도 검토한다.
+    condition     = aws_eip.gpu.domain == "vpc"
+    error_message = "Keep one VPC EIP associated with the GPU instance for stable management access."
   }
   assert {
     condition     = aws_instance.gpu.root_block_device[0].volume_type == "gp3" && aws_instance.gpu.root_block_device[0].volume_size == 100 && aws_instance.gpu.root_block_device[0].iops == 3000 && aws_instance.gpu.root_block_device[0].throughput == 125 && aws_instance.gpu.root_block_device[0].encrypted && aws_instance.gpu.metadata_options[0].http_tokens == "required"
