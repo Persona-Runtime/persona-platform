@@ -73,13 +73,12 @@ db_path, migrate_path, app_path, ingress_path,
   ns_data_path, ns_app_path, grants_path, traefik_values_path,
   migrate_base_path, argocd_dir = ARGV
 
-# bridge 릴리스(gateway 6fe5200, SUPPORTED=0004·0005, G-1 lease 인식). 0005 migration은
-# 적용·Complete됐다(Job은 history/). 0005 전용 기능 이미지(gateway release/gateway-0005-only)는
-# 아직 게시되지 않았다 — 게시·검증 뒤 이 값과 kustomize/base/persona-gateway/deployment.yaml의
-# image를 함께 바꾼다. 그 전까지 tag·자리표시자·추측 digest를 넣지 않는다.
+# 0005 전용 최종 Gateway 이미지(persona-gateway PR #20 머지 뒤 게시, SUPPORTED=0005). 0005
+# migration은 적용·Complete됐다(Job은 history/). 바꿀 때는 kustomize/base/persona-gateway/
+# deployment.yaml의 image를 함께 바꾼다.
 # 아래 MIGRATION_IMAGES["0004-chat"]은 이 값과 다르지만 그게 맞다 — 그쪽은 이미 만들어진
 # Job이 쓴 이미지라 바꿀 수 없다(다음 주석 참고).
-GATEWAY_IMAGE = "ghcr.io/persona-runtime/persona-minimal-api@sha256:26dcf9e0f2b64aa49c7683bab37ba6a937027b92b0ba2fa1f1f6ed21f53d311e"
+GATEWAY_IMAGE = "ghcr.io/persona-runtime/persona-minimal-api@sha256:5438d8a80acf414704242901a428c7ef3154bb5496709d3d2d7bea1e9e63f436"
 
 # migration Job의 승인 이미지는 revision별로 따로 적는다.
 #
