@@ -350,6 +350,17 @@ raise "[안전] DB timeout 예산을 명시해야 한다" unless (gcontainer["en
 # 켜도 안전한 근거(헤더 덮어쓰기·헤더 제거)는 deployment.yaml 주석에 있다.
 raise "[안전] ForwardAuth가 꺼지면 공개 경로가 정적 토큰 요구로 돌아간다" unless (gcontainer["env"] || []).any? { |e| e["name"] == "PERSONA_FORWARD_AUTH_ENABLED" && e["value"] == "true" }
 
+# 채팅 추론 모드와 mock profile은 **함께** 선언한다(ROLL-01B Hard Node Failure 실험 설정).
+# - profile만 있고 mode가 없으면 기본값·Secret에 따라 모드가 정해져 선언만 보고 동작을 알 수 없다.
+# - mode가 llm이면 profile은 읽히지 않는다 — 실험이 짧은 응답이나 GPU 경로로 조용히 바뀐다.
+# - 같은 이름이 두 번 있으면 뒤의 값이 이기므로 선언이 모호하다.
+gateway_env_names = (gcontainer["env"] || []).map { |e| e["name"] }
+duplicated_env = gateway_env_names.select { |name| gateway_env_names.count(name) > 1 }.uniq
+raise "[안전] Gateway env 이름이 중복됐다: #{duplicated_env.join(", ")}" unless duplicated_env.empty?
+gateway_env = (gcontainer["env"] || []).to_h { |e| [e["name"], e["value"]] }
+raise "[안전] Gateway PERSONA_CHAT_INFERENCE_MODE는 mock으로 명시해야 한다 — 없거나 llm이면 mock profile이 적용되지 않는다" unless gateway_env["PERSONA_CHAT_INFERENCE_MODE"] == "mock"
+raise "[기준선] Gateway PERSONA_CHAT_MOCK_PROFILE은 long이어야 한다(ROLL-01B 실험 설정)" unless gateway_env["PERSONA_CHAT_MOCK_PROFILE"] == "long"
+
 # DB 장애로 재시작되면 안 되므로 startup·liveness는 /healthz여야 한다.
 raise "[안전] Gateway startup probe는 /healthz다" unless gcontainer.dig("startupProbe", "httpGet", "path") == "/healthz"
 raise "[안전] Gateway liveness probe는 /healthz다" unless gcontainer.dig("livenessProbe", "httpGet", "path") == "/healthz"
