@@ -76,6 +76,9 @@ cases = [
   [GATEWAY_DEPLOYMENT, ["spec", "template", "spec", "topologySpreadConstraints", 0, "nodeTaintsPolicy"], "Ignore", "Gateway topology spread nodeTaintsPolicy는 Honor다"],
   [GATEWAY_DEPLOYMENT, ["spec", "template", "spec", "topologySpreadConstraints", 0, "nodeTaintsPolicy"], DELETE_KEY, "Gateway topology spread nodeTaintsPolicy는 Honor다"],
   [GATEWAY_DEPLOYMENT, ["spec", "template", "spec", "topologySpreadConstraints", 0, "minDomains"], 2, "Gateway topology spread에 minDomains를 두지 않는다"],
+  # revision 단위 분산이 사라지면 롤아웃 뒤 새 Pod 둘이 한 워커에 남을 수 있다.
+  [GATEWAY_DEPLOYMENT, ["spec", "template", "spec", "topologySpreadConstraints", 0, "matchLabelKeys"], DELETE_KEY, "Gateway topology spread matchLabelKeys는 [pod-template-hash]다"],
+  [GATEWAY_DEPLOYMENT, ["spec", "template", "spec", "topologySpreadConstraints", 0, "matchLabelKeys"], ["controller-revision-hash"], "Gateway topology spread matchLabelKeys는 [pod-template-hash]다"],
   # 채팅 mode·mock profile은 함께 선언한다(ROLL-01B). 조용히 짧은 응답이나 llm 경로로 바뀌는 것을 막는다.
   [GATEWAY_DEPLOYMENT, GATEWAY_ENV + [{ "name" => "PERSONA_CHAT_INFERENCE_MODE" }, "value"], "llm", "Gateway PERSONA_CHAT_INFERENCE_MODE는 mock으로 명시해야 한다"],
   [GATEWAY_DEPLOYMENT, GATEWAY_ENV + [{ "name" => "PERSONA_CHAT_INFERENCE_MODE" }], DELETE_KEY, "Gateway PERSONA_CHAT_INFERENCE_MODE는 mock으로 명시해야 한다"],
