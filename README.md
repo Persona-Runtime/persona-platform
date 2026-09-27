@@ -135,7 +135,7 @@ bash scripts/test-local-path-bootstrap.sh
 sh scripts/validate-model-cache-manifests.sh
 bash scripts/test-model-cache-manifests.sh
 python3 -m unittest discover -s tests/model-seed
-# vLLM 서빙(persona-inference, Argo 미등록, 클러스터 기동 미실행)
+# vLLM 서빙(persona-inference, Argo 미등록)
 sh scripts/validate-vllm-manifests.sh
 bash scripts/test-vllm-manifests.sh
 ```

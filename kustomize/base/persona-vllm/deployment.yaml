@@ -1,7 +1,8 @@
 # vLLM(Qwen/Qwen3-4B-Instruct-2507 @ cdbee75)을 GPU 노드에서 서빙한다.
 #
-# 상태: 선언·정적 검사 완료. 클러스터에서 기동한 적이 없다 — 아래 초기값(GPU memory 비율, CPU·메모리)은
-# 실측 전 값이며 성능을 보장하지 않는다.
+# 상태: 운영자 제공 결과로 기동·비스트리밍 추론·Service 경유 SSE·Prometheus Target UP을 확인했다
+# (2026-09-27). 성능·과부하는 측정하지 않았다 — 아래 초기값(GPU memory 비율, CPU·메모리)은 실측 전
+# 값이며 성능을 보장하지 않는다.
 #
 # 모델은 seed Job이 모델 cache PVC에 받아 둔 것을 read-only로 읽는다. 이 Pod는 모델을 내려받지 않는다
 # (offline env). initContainer가 seed 완료 marker·manifest·weight index를 확인하지 못하면 vLLM을
@@ -44,10 +45,8 @@ spec:
       automountServiceAccountToken: false
       enableServiceLinks: false
       terminationGracePeriodSeconds: 30
-      # image 기본 사용자는 root다. 지금까지 확인한 것은 두 가지로 서로 다르다:
-      # - seed Job 조건(non-root 10001, read-only rootfs, fsGroup)의 smoke 통과 — GPU를 쓰지 않았다.
-      # - GPU smoke 통과 — root(uid 0)로 실행했다.
-      # 이 Deployment 조건(non-root 10001 + read-only rootfs)의 GPU 추론은 아직 확인하지 않았다.
+      # image 기본 사용자는 root지만 이 Deployment는 non-root 10001 + read-only rootfs로 실행한다.
+      # 이 조건의 GPU 기동과 추론은 운영자 제공 결과로 확인했다(2026-09-27).
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001

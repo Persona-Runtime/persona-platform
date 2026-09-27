@@ -5,13 +5,17 @@
 # 선택 기준은 namespace label + Pod label뿐이다. IP·Pod 이름을 정책 기준으로 쓰지 않는다 —
 # Pod IP는 재시작마다 바뀌고 이름은 ReplicaSet 해시를 포함해 배포마다 달라진다.
 #
-# 적용 순서: allow를 먼저, default-deny를 마지막에 넣는다. default-deny가 먼저 들어가면 그
-# 사이에 Gateway 요청·Prometheus 수집·vLLM DNS가 모두 막히는 창이 생긴다.
+# allow 정책도 격리를 시작한다. 어떤 정책이 한 Pod의 한 방향(Ingress/Egress)을 고르면 그
+# 방향은 그 순간부터 정책들이 허용한 흐름만 남는다. 예: allow-vllm-gateway만 있으면 vLLM 인입은
+# Gateway뿐이라 Prometheus 수집도 막히고, allow-model-seed-dns만 있어도 seed의 외부 HTTPS가 막힌다.
+# default-deny는 그 격리를 모든 Pod·양방향으로 넓힐 뿐이다.
+#
+# 적용 순서: allow 4개를 먼저 넣어 확인하고, default-deny를 마지막에 넣는다.
 # - sync-wave(allow "0", default-deny "1")는 Argo가 Sync할 때만 쓰는 순서다. `kubectl apply`는
-#   이 annotation을 읽지 않고 한 번에 모두 적용한다.
-# - 그래서 수동 적용용으로 `persona.runtime/apply-phase` label(allow·deny)을 붙였다.
-#   `kubectl apply -k ... -l persona.runtime/apply-phase=allow`로 allow만 먼저 넣고, 확인한 뒤
-#   `=deny`로 default-deny를 넣는다.
+#   이 annotation을 읽지 않는다.
+# - 그래서 수동 적용용으로 `persona.runtime/apply-phase` label(allow·deny)을 붙였다. 이 label은
+#   `kubectl apply -l`로 적용 묶음을 나누는 표시일 뿐이다. 정책 엔진은 label을 보지 않고 정책 사이에
+#   평가 순서도 없다(허용의 합집합만 본다).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -153,9 +157,10 @@ spec:
 # seed Job을 vLLM 라벨로 만들면 위 ingress·metrics 정책이 seed Pod에도 걸리고, 반대로 seed용
 # egress가 vLLM에도 열린다. 둘의 라벨을 나누는 것이 그 사고를 구조적으로 막는다.
 #
-# 이 정책은 DNS만 연다. default-deny가 들어간 뒤에는 seed Job이 모델 호스트(HTTPS)에 닿지
-# 못하므로, seed를 다시 실행하려면 관측한 FQDN만 여는 별도 다운로드 허용 정책이 먼저
-# 필요하다(network-policy-fqdn.yaml.draft, 이 base에 배선하지 않았다).
+# 이 정책은 seed Pod의 Egress를 고르므로, default-deny 없이 이것만 적용돼도 seed의 송출은
+# CoreDNS 53으로 제한되고 모델 호스트(HTTPS)에 닿지 못한다. seed를 다시 실행하려면 관측한
+# FQDN만 여는 별도 다운로드 허용 정책이 먼저 필요하다(network-policy-fqdn.yaml.draft, 이 base에
+# 배선하지 않았다).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
