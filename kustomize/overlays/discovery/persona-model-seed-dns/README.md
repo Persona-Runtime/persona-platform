@@ -19,7 +19,8 @@
 | `ConfigMap/dns-discovery-persona-vllm-model-seed-script-<hash>` | seed 스크립트 사본(이 overlay를 지워도 seed Job용 ConfigMap은 남는다) |
 
 정책은 `app.kubernetes.io/name: persona-vllm-model-seed`와 `persona.runtime/purpose: dns-discovery`를
-**둘 다** 가진 Pod만 고른다. vLLM Pod와 실제 seed Job Pod에는 걸리지 않는다. 이 정책이 고른 Pod의
+**둘 다** 가진 Pod만 고른다. 정책 selector는 Cilium identity label을 고르므로 `k8s:` prefix를 붙인다
+(CoreDNS selector도 같다). vLLM Pod와 실제 seed Job Pod에는 걸리지 않는다. 이 정책이 고른 Pod의
 나머지 egress는 막힌다.
 
 ## 절차 (control-plane에서 사람이 수행)
@@ -28,15 +29,17 @@
    디스크에 약 10 GiB 여유가 있는지 확인한다.
 2. **렌더 검사**: `sh scripts/validate-model-seed-dns-discovery.sh`
 3. **적용**: `kubectl apply -k kustomize/overlays/discovery/persona-model-seed-dns` — 적용 시각을 적는다.
-4. **관측**(Job이 끝날 때까지):
+4. **관측**(Job이 끝날 때까지). label 필터 대신 실제 discovery Pod 이름으로 좁힌다:
    ```sh
-   # 질의된 이름(DNS L7). discovery label로만 좁힌다.
-   hubble observe --namespace persona-inference --label persona.runtime/purpose=dns-discovery \
-     --protocol dns --follow
+   DISCOVERY_POD="$(kubectl -n persona-inference get pod \
+     -l persona.runtime/purpose=dns-discovery \
+     -o jsonpath='{.items[0].metadata.name}')"
+   # 질의된 이름(DNS L7).
+   hubble observe --pod "persona-inference/$DISCOVERY_POD" --protocol dns --follow
    # 외부 443 접속(목적지 IP). 위 DNS 응답의 IP와 대조한다.
-   hubble observe --namespace persona-inference --label persona.runtime/purpose=dns-discovery \
-     --to-port 443 --follow
+   hubble observe --pod "persona-inference/$DISCOVERY_POD" --to-port 443 --follow
    ```
+   Pod가 아직 없으면 `DISCOVERY_POD`가 비므로, Job Pod가 생긴 뒤에 실행한다.
    GPU 노드의 Cilium agent에서 `cilium-dbg fqdn cache list`로 이름→IP 캐시를 함께 적는다.
 5. **완료 확인**: `kubectl -n persona-inference logs job/dns-discovery-persona-vllm-model-seed`의 마지막
    줄이 `"result": "seeded"`인지 본다. 실패면 원인(DNS 거부, 443 외 포트 필요, 용량)을 기록한다 —

@@ -24,8 +24,12 @@ seed = YAML.load_stream(File.read(seed_path)).compact
 NAMESPACE = "persona-inference"
 PREFIX = "dns-discovery-"
 SEED_LABEL = "persona-vllm-model-seed"
-DISCOVERY_SELECTOR = { "app.kubernetes.io/name" => SEED_LABEL, "persona.runtime/purpose" => "dns-discovery" }
-KUBE_DNS = { "k8s:io.kubernetes.pod.namespace" => "kube-system", "k8s-app" => "kube-dns" }
+# Job template에 붙는 Kubernetes Pod label(prefix 없음)과, CiliumNetworkPolicy selector가 고르는
+# Cilium identity label(`k8s:` source prefix)을 나눠 검사한다. 같은 표현으로 두 곳을 검사하면
+# selector가 Pod를 못 고르는 런타임 의미 오류를 validator가 놓친다.
+POD_LABELS = { "app.kubernetes.io/name" => SEED_LABEL, "persona.runtime/purpose" => "dns-discovery" }
+CILIUM_DISCOVERY_SELECTOR = POD_LABELS.transform_keys { |key| "k8s:#{key}" }
+KUBE_DNS = { "k8s:io.kubernetes.pod.namespace" => "kube-system", "k8s:k8s-app" => "kube-dns" }
 DNS_PORTS = [{ "port" => "53", "protocol" => "UDP" }, { "port" => "53", "protocol" => "TCP" }]
 HTTPS_PORTS = [{ "port" => "443", "protocol" => "TCP" }]
 
@@ -48,12 +52,12 @@ end
 policy = one(discovery, "CiliumNetworkPolicy", "discovery")
 pspec = policy.fetch("spec")
 raise "[안전] 임시 정책임을 annotation으로 표시한다" unless policy.dig("metadata", "annotations", "persona.runtime/lifecycle") == "temporary-remove-after-observation"
-raise "[안전] 임시 정책은 seed 전용 label과 discovery label을 모두 가진 Pod만 고른다" unless pspec["endpointSelector"] == { "matchLabels" => DISCOVERY_SELECTOR }
+raise "[안전] 임시 정책은 seed 전용 label과 discovery label을 모두 가진 Pod만 고른다(k8s: prefix 포함)" unless pspec["endpointSelector"] == { "matchLabels" => CILIUM_DISCOVERY_SELECTOR }
 raise "[안전] 임시 정책은 ingress를 열지 않는다" if pspec.key?("ingress") || pspec.key?("ingressDeny")
 egress = pspec["egress"] || []
 raise "[안전] 임시 정책 egress는 DNS·HTTPS 두 규칙뿐이다: #{egress.length}개" unless egress.length == 2
 dns = egress.find { |rule| rule.key?("toEndpoints") } || raise("[안전] CoreDNS DNS 규칙이 없다")
-raise "[안전] DNS 규칙 대상은 kube-system kube-dns뿐이다" unless dns["toEndpoints"] == [{ "matchLabels" => KUBE_DNS }]
+raise "[안전] DNS 규칙 대상은 kube-system kube-dns뿐이다(k8s: prefix 포함)" unless dns["toEndpoints"] == [{ "matchLabels" => KUBE_DNS }]
 dns_port_rules = dns["toPorts"] || []
 raise "[안전] DNS 규칙은 UDP/TCP 53 하나의 포트 묶음이다" unless dns_port_rules.length == 1 && dns_port_rules.first["ports"] == DNS_PORTS
 raise "[안전] DNS L7 matchPattern \"*\"가 있어야 질의 이름이 관측된다" unless dns_port_rules.first.dig("rules", "dns") == [{ "matchPattern" => "*" }]
@@ -68,7 +72,7 @@ job = one(discovery, "Job", "discovery")
 jspec = job.fetch("spec")
 template = jspec.fetch("template")
 pod = template.fetch("spec")
-raise "[안전] discovery Pod는 seed 전용 label과 discovery label을 모두 가진다" unless DISCOVERY_SELECTOR.all? { |k, v| template.dig("metadata", "labels", k) == v }
+raise "[안전] discovery Pod는 seed 전용 label과 discovery label을 모두 가진다" unless POD_LABELS.all? { |k, v| template.dig("metadata", "labels", k) == v }
 raise "[안전] discovery Job backoffLimit은 0이다" unless jspec["backoffLimit"] == 0
 raise "[안전] discovery Pod restartPolicy는 Never다" unless pod["restartPolicy"] == "Never"
 deadline = jspec["activeDeadlineSeconds"]

@@ -29,8 +29,11 @@ DNS_PORTS = ["spec", "egress", 0, "toPorts", 0]
 # [파일, 키 경로, 값, 기대 오류 문구]. 키 경로의 Hash는 배열에서 필드가 같은 원소를 고른다.
 cases = [
   # 정책 범위
-  [POLICY, ["spec", "endpointSelector", "matchLabels", "persona.runtime/purpose"], DELETE_KEY, "discovery label을 모두 가진 Pod만 고른다"],
-  [POLICY, ["spec", "endpointSelector", "matchLabels", "app.kubernetes.io/name"], "persona-vllm", "discovery label을 모두 가진 Pod만 고른다"],
+  [POLICY, ["spec", "endpointSelector", "matchLabels", "k8s:persona.runtime/purpose"], DELETE_KEY, "discovery label을 모두 가진 Pod만 고른다"],
+  [POLICY, ["spec", "endpointSelector", "matchLabels", "k8s:app.kubernetes.io/name"], "persona-vllm", "discovery label을 모두 가진 Pod만 고른다"],
+  # Cilium identity label prefix 누락: Kubernetes 원본 key 그대로 쓰는 사례.
+  [POLICY, ["spec", "endpointSelector", "matchLabels"], { "app.kubernetes.io/name" => "persona-vllm-model-seed", "persona.runtime/purpose" => "dns-discovery" }, "discovery label을 모두 가진 Pod만 고른다(k8s: prefix 포함)"],
+  [POLICY, ["spec", "egress", 0, "toEndpoints"], [{ "matchLabels" => { "k8s:io.kubernetes.pod.namespace" => "kube-system", "k8s-app" => "kube-dns" } }], "kube-dns뿐이다(k8s: prefix 포함)"],
   [POLICY, ["spec", "ingress"], [{ "fromEntities" => ["cluster"] }], "ingress를 열지 않는다"],
   [POLICY, DNS_PORTS + ["ports"], [{ "port" => "53", "protocol" => "ANY" }], "UDP/TCP 53"],
   [POLICY, DNS_PORTS + ["rules", "dns"], [{ "matchPattern" => "*.huggingface.co" }], "matchPattern \"*\""],

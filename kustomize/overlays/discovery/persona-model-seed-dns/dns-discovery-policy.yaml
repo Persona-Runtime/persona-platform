@@ -8,6 +8,10 @@
 #   CDN redirect 대상까지 관측된다. 이 규칙을 영구 정책으로 옮기지 않는다 — 영구 정책은 관측한
 #   이름만 toFQDNs matchName으로 적는다.
 # 이 정책이 Pod를 고르는 순간 그 Pod의 나머지 egress는 막힌다(Cilium egress 기본 거부).
+#
+# selector는 Kubernetes label이 아니라 Cilium identity label을 고른다. Pod label은 Cilium에서
+# `k8s:` source를 달고 identity가 되므로, 어느 출처의 label을 고르는지 `k8s:` prefix로 명시한다
+# (endpointSelector와 CoreDNS toEndpoints 모두). Job template의 Pod label 자체에는 prefix를 쓰지 않는다.
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:
@@ -21,13 +25,13 @@ metadata:
 spec:
   endpointSelector:
     matchLabels:
-      app.kubernetes.io/name: persona-vllm-model-seed
-      persona.runtime/purpose: dns-discovery
+      k8s:app.kubernetes.io/name: persona-vllm-model-seed
+      k8s:persona.runtime/purpose: dns-discovery
   egress:
     - toEndpoints:
         - matchLabels:
             k8s:io.kubernetes.pod.namespace: kube-system
-            k8s-app: kube-dns
+            k8s:k8s-app: kube-dns
       toPorts:
         - ports:
             - port: "53"
