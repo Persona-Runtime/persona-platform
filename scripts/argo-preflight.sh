@@ -11,7 +11,8 @@ set -eu
 #   scripts/argo-preflight.sh <app>     # persona-app, persona-app-ingress, persona-app-netpol,
 #                                        # persona-db, persona-db-netpol, persona-edge,
 #                                        # metallb, metallb-config, cert-manager,
-#                                        # cert-manager-issuers, gpu-runtime, dcgm-exporter 중 하나
+#                                        # cert-manager-issuers, gpu-runtime, dcgm-exporter,
+#                                        # nvidia-device-plugin 중 하나
 #   scripts/argo-preflight.sh --self-test
 
 repo_dir=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
@@ -304,6 +305,22 @@ check_preconditions() {
         return 1
       fi
       ;;
+    nvidia-device-plugin)
+      if ! kubectl get runtimeclass nvidia > /dev/null 2>&1; then
+        echo "선행 조건 실패: nvidia-device-plugin → RuntimeClass/nvidia가 없다(gpu-runtime Sync 먼저)" >&2
+        return 1
+      fi
+      gpu_ready=$(kubectl get node persona-gpu-01 \
+        -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2> /dev/null || true)
+      gpu_pool=$(kubectl get node persona-gpu-01 \
+        -o jsonpath='{.metadata.labels.personaruntime\.xyz/node-pool}' 2> /dev/null || true)
+      dcgm_ready=$(kubectl -n monitoring get daemonset dcgm-exporter \
+        -o jsonpath='{.status.numberAvailable}' 2> /dev/null || true)
+      if [ "$gpu_ready" != "True" ] || [ "$gpu_pool" != "gpu" ] || [ "$dcgm_ready" != "1" ]; then
+        echo "선행 조건 실패: nvidia-device-plugin → persona-gpu-01 Ready=True·node-pool=gpu, DCGM exporter available=1이 모두 필요하다(실제: Ready=${gpu_ready:-없음}, pool=${gpu_pool:-없음}, dcgm=${dcgm_ready:-없음})" >&2
+        return 1
+      fi
+      ;;
     *)
       echo "선행 조건 표에 없는 app이다: $app — scripts/argo-preflight.sh와 argocd/README.md에 함께 추가하라" >&2
       return 1
@@ -358,7 +375,8 @@ print_next_commands() {
 
 # --- self-test -----------------------------------------------------------------
 # 가짜 kubectl로 "선행 조건 실패 → exit 1"만 재현한다. 실제 클러스터·git 동작은
-# 손대지 않는다 — check_preconditions 함수 하나만 직접 부른다.
+# 손대지 않는다 — check_preconditions 함수 하나만 직접 부른다. persona-app의 Traefik
+# provider 누락과 nvidia-device-plugin의 RuntimeClass 누락을 함께 본다.
 #
 # metallb·cert-manager의 helm template 렌더 경로(render_at_sha의 다중 source 분기)는
 # 여기서 재현하지 않는다 — 실제 네트워크로 차트를 받아야 해서 가짜 kubectl 하나로
@@ -369,6 +387,8 @@ self_test() {
   cat > "$fake_bin/kubectl" << 'FAKE_KUBECTL'
 #!/bin/sh
 # persona-app 선행 조건만 재현한다: Traefik args에 --providers.kubernetescrd가 없는 상태.
+# RuntimeClass 조회는 의도적으로 실패시켜 device plugin이 GPU runtime 없이 Sync되지
+# 않는지도 확인한다.
 case "$*" in
   *"traefik get pods"*)
     echo '["--entrypoints.web.address=:8000"]'
@@ -389,8 +409,17 @@ FAKE_KUBECTL
     cat /tmp/argo-preflight-selftest.err >&2
     exit 1
   fi
+  if PATH="$fake_bin:$PATH" check_preconditions nvidia-device-plugin 2> /tmp/argo-preflight-selftest.err; then
+    echo "self-test 실패: RuntimeClass가 없는데도 device plugin 선행 조건을 통과했다" >&2
+    exit 1
+  fi
+  if ! grep -q "RuntimeClass/nvidia" /tmp/argo-preflight-selftest.err; then
+    echo "self-test 실패: device plugin RuntimeClass 실패 사유가 없다" >&2
+    cat /tmp/argo-preflight-selftest.err >&2
+    exit 1
+  fi
   rm -f /tmp/argo-preflight-selftest.err
-  echo "self-test 통과: 선행 조건 실패 시 exit 1과 사유 메시지를 확인했다"
+  echo "self-test 통과: App별 선행 조건 실패 시 exit 1과 사유 메시지를 확인했다"
 }
 
 # --- main ------------------------------------------------------------------

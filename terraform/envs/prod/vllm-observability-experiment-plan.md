@@ -87,14 +87,15 @@ Prometheus는 `monitoring` namespace의 기존 `monitoring-stack` Helm release�
 ### 3.1 새 리소스의 계획 경계
 
 아래 표는 GPU-00에서 선언한 리소스와 이후 vLLM 단계의 경계를 함께 적는다. `gpu-runtime`·
-`dcgm-exporter`·GPU node-exporter 확장은 저장소에 선언했지만 아직 Sync하지 않았다. 따라서
-Target `UP`이나 GPU 지표 수집 성공으로 읽지 않는다. vLLM의 이름·selector·port는 image와
-Deployment를 실제로 정한 P4-3에서 확정한다.
+`dcgm-exporter`·GPU node-exporter는 실제 Sync와 Target `UP`을 확인했다. device plugin은
+`nvidia.com/gpu: 1`이 Node에 보이는지까지 확인하기 전에는 완료로 읽지 않는다. vLLM의
+이름·selector·port는 image와 Deployment를 실제로 정한 P4-3에서 확정한다.
 
 | Application | namespace | 리소스 | 최소 선택 기준 | 수집 포트 |
 | --- | --- | --- | --- | --- |
 | `gpu-runtime` | cluster-scoped (`kube-system` destination) | `RuntimeClass/nvidia` | containerd의 `runtimes.nvidia` handler와 이름이 같고, GPU label·taint만 합친다 | 해당 없음 |
 | `dcgm-exporter` | `monitoring` | GPU node만 선택하는 DCGM Exporter DaemonSet, ClusterIP Service, ServiceMonitor | `personaruntime.xyz/node-pool=gpu`, GPU taint toleration, `RuntimeClass/nvidia`, `release=monitoring-stack` | TCP 9400 |
+| `nvidia-device-plugin` | `kube-system` | GPU capacity를 kubelet에 광고하는 NVIDIA device plugin DaemonSet | GPU node label·taint, `RuntimeClass/nvidia`, static image v0.20.1 | kubelet device-plugin socket |
 | `persona-inference` | `persona-inference` | Namespace, vLLM Deployment, ClusterIP Service, default-deny/allow 정책, vLLM PodMonitor | vLLM workload label 하나를 Deployment·Service·Policy·Monitor가 동일하게 사용 | TCP 8000 |
 | `persona-app-netpol` | `persona-app` | Gateway의 inference egress 정책 | Gateway label만 선택, inference Service의 TCP 8000만 허용 | TCP 8000 |
 | `monitoring-stack` values | `monitoring` | GPU Node까지 node-exporter 배치 범위 확장 | 기존의 명시 hostname 목록에 `persona-gpu-01`과 GPU taint toleration을 추가 | node-exporter 기본 포트 |
