@@ -123,7 +123,7 @@ Toolkit 1.20.x다. R580 근거와 폐기된 선택(R570)은 [Join 계획 §4](vl
 | 40Gi 모델 cache PVC·seed Job | **미완료** — 선언만 있다(`kustomize/overlays/prod/persona-model-cache`, Argo 미등록) | control-plane에서 적용해 첫 seed 실행, 완료 marker·manifest 확인 |
 | 다운로드 FQDN 관측·Cilium FQDN allowlist | **미완료** | 첫 seed에서 관측한 호스트만 allowlist로 확정 |
 | `persona-inference` NetworkPolicy Sync | **미완료** — Argo Application 없음 | FQDN allowlist 확정 뒤 |
-| vLLM Deployment·Gateway LLM mode 전환 | **미완료** | seed 완료·정책 Sync 뒤 |
+| vLLM Deployment·Gateway LLM mode 전환 | **미완료** — vLLM Deployment·Service·PodMonitor는 선언·정적 검사 완료(`kustomize/overlays/prod/persona-vllm`), **클러스터 기동 미실행**. Gateway는 mock 유지 | control-plane에서 vLLM 적용·`/health`·최소 생성 요청 확인 뒤 Gateway 전환 |
 
 ### 준비 완료·초안 — 선언이나 문서가 있는 것 (동작 확인 아님)
 
@@ -157,7 +157,7 @@ Toolkit 1.20.x다. R580 근거와 폐기된 선택(R570)은 [Join 계획 §4](vl
 | 12 | 40Gi 모델 cache PVC·seed Job 1회(inference NetworkPolicy보다 먼저) | Job `Complete` + 완료 marker·manifest, 다운로드 호스트 관측 기록. 실패면 vLLM 시작하지 않음 | 미완료 |
 | 13 | Cilium FQDN allowlist 확정 → `persona-inference` 정책 Sync | 관측한 호스트만 허용, 외부 namespace → vLLM 차단 확인 | 미완료 |
 | 14 | `persona-app` Gateway egress Sync | 기존 DB·embedding 경로 무변경 확인 | 미완료 |
-| 15 | vLLM Deployment Sync | ClusterIP 내부에서 `/health`와 최소 생성 요청 | 미완료 |
+| 15 | vLLM Deployment 적용(선언·정적 검사 완료) | ClusterIP 내부에서 `/health`와 최소 생성 요청 | 미완료(클러스터 기동 미실행) |
 | 16 | Gateway LLM mode 전환과 vLLM Prometheus Target | vLLM Target `UP`, LLM mode 요청 성공 | 미완료 |
 
 ## 근거

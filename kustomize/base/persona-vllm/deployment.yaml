@@ -1,0 +1,207 @@
+# vLLM(Qwen/Qwen3-4B-Instruct-2507 @ cdbee75)을 GPU 노드에서 서빙한다.
+#
+# 상태: 선언·정적 검사 완료. 클러스터에서 기동한 적이 없다 — 아래 초기값(GPU memory 비율, CPU·메모리)은
+# 실측 전 값이며 성능을 보장하지 않는다.
+#
+# 모델은 seed Job이 모델 cache PVC에 받아 둔 것을 read-only로 읽는다. 이 Pod는 모델을 내려받지 않는다
+# (offline env). initContainer가 seed 완료 marker·manifest·weight index를 확인하지 못하면 vLLM을
+# 시작하지 않는다.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: persona-vllm
+  labels:
+    app.kubernetes.io/name: persona-vllm
+    app.kubernetes.io/component: inference
+    app.kubernetes.io/part-of: persona-platform
+spec:
+  # GPU 1장과 RWO local-path PVC를 두 Pod가 동시에 쥘 수 없다. 롤링 업데이트는 새 Pod가 GPU·PVC를
+  # 기다리며 Pending으로 멈추므로, 기존 Pod를 먼저 내리는 Recreate를 쓴다(교체 중 서빙 중단을 받아들인다).
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: persona-vllm
+  template:
+    metadata:
+      labels:
+        # persona-inference NetworkPolicy(allow-vllm-gateway·metrics·dns)가 이 label을 고른다.
+        app.kubernetes.io/name: persona-vllm
+        app.kubernetes.io/component: inference
+        app.kubernetes.io/part-of: persona-platform
+    spec:
+      runtimeClassName: nvidia
+      nodeSelector:
+        personaruntime.xyz/node-pool: gpu
+      tolerations:
+        - key: personaruntime.xyz/dedicated
+          operator: Equal
+          value: gpu-serving
+          effect: NoSchedule
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 30
+      # image 기본 사용자는 root다. seed·GPU smoke에서 확인한 non-root 조건과 같게 둔다.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        # seed가 끝나지 않은 cache로 vLLM을 띄우지 않는다. 확인만 하고 GPU를 쓰지 않는다.
+        - name: verify-model-cache
+          image: vllm/vllm-openai@sha256:51b1042786c1bb7ab640fd05e4a2b19ae41662959387cc07e1c3106ae2a851b8
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              dir=/models/Qwen/Qwen3-4B-Instruct-2507/cdbee75f17c01a7cc42f958dc650907174af0554
+              for name in .persona-seed-complete.json .persona-seed-manifest.json model.safetensors.index.json; do
+                if [ ! -s "$dir/$name" ]; then
+                  echo "model cache not ready: missing $name" >&2
+                  exit 1
+                fi
+              done
+              if ! grep -q '"revision": "cdbee75f17c01a7cc42f958dc650907174af0554"' "$dir/.persona-seed-complete.json"; then
+                echo "model cache marker revision mismatch" >&2
+                exit 1
+              fi
+              echo "model cache verified"
+          env:
+            # CUDA image 기본 env는 NVIDIA_VISIBLE_DEVICES=all이다. nvidia RuntimeClass에서 이 값을
+            # 물려받으면 GPU를 요청하지 않은 initContainer에도 GPU가 노출될 수 있다. void로 막는다.
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: void
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: model-cache
+              mountPath: /models
+              readOnly: true
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai@sha256:51b1042786c1bb7ab640fd05e4a2b19ae41662959387cc07e1c3106ae2a851b8
+          imagePullPolicy: IfNotPresent
+          # 로컬 절대 경로만 쓴다. HF repo id를 주면 offline에서도 hub 조회를 시도할 수 있다.
+          command:
+            - vllm
+            - serve
+            - /models/Qwen/Qwen3-4B-Instruct-2507/cdbee75f17c01a7cc42f958dc650907174af0554
+          args:
+            - --host
+            - 0.0.0.0
+            - --port
+            - "8000"
+            # Gateway가 요청 body의 model 값으로 쓸 이름(PERSONA_VLLM_MODEL). 경로 대신 모델 id로 노출한다.
+            - --served-model-name
+            - Qwen/Qwen3-4B-Instruct-2507
+            # 서빙 기준선은 입력+출력 4096 토큰이다. 모델 기본 context(262144)로 두면 L4에서 KV cache가
+            # 부족해 기동이 실패할 수 있다.
+            - --max-model-len
+            - "4096"
+            # 초기값. 실측 전에는 처리량·동시성 보장이 아니다.
+            - --gpu-memory-utilization
+            - "0.85"
+            # 요청 내용을 로그에 남기지 않는다. vLLM v0.29.0에는 --disable-log-requests가 없고(모르는
+            # 인자는 기동 실패) --enable-log-requests(기본 off)만 있으므로, 꺼짐을 명시한다.
+            - --no-enable-log-requests
+          env:
+            # 재시작해도 외부 모델 다운로드·telemetry에 의존하지 않는다.
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: TRANSFORMERS_OFFLINE
+              value: "1"
+            - name: VLLM_NO_USAGE_STATS
+              value: "1"
+            - name: VLLM_DO_NOT_TRACK
+              value: "1"
+            # read-only rootfs에서 쓰기가 필요한 cache를 /tmp(emptyDir)로 보낸다.
+            - name: HOME
+              value: /tmp
+            - name: XDG_CACHE_HOME
+              value: /tmp/.cache
+            - name: VLLM_CACHE_ROOT
+              value: /tmp/vllm-cache
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          resources:
+            # CPU·메모리는 초기값이다(g6.xlarge: 4 vCPU, 16 GiB). 모델 적재 중 host 메모리 사용을 실측해 조정한다.
+            requests:
+              cpu: "2"
+              memory: 8Gi
+              nvidia.com/gpu: 1
+            limits:
+              memory: 14Gi
+              nvidia.com/gpu: 1
+          # 모델 적재·CUDA graph 준비가 끝나야 /health가 성공한다. 최대 10분(10초 × 60회)을 기다린다.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 60
+          # Ready인 동안만 Service endpoint에 들어간다.
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: model-cache
+              mountPath: /models
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+            - name: dshm
+              mountPath: /dev/shm
+      volumes:
+        # seed Job이 채운 cache. 서빙 중 쓰지 않는다.
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: persona-vllm-model-cache
+            readOnly: true
+        # torch·vLLM 컴파일 cache와 임시 파일.
+        - name: tmp
+          emptyDir:
+            sizeLimit: 8Gi
+        # PyTorch·vLLM 프로세스 간 공유 메모리. 컨테이너 기본 64Mi로는 부족할 수 있다.
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 2Gi
