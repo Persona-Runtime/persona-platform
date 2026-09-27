@@ -15,8 +15,10 @@ metadata:
     app.kubernetes.io/component: inference
     app.kubernetes.io/part-of: persona-platform
 spec:
-  # GPU 1장과 RWO local-path PVC를 두 Pod가 동시에 쥘 수 없다. 롤링 업데이트는 새 Pod가 GPU·PVC를
-  # 기다리며 Pending으로 멈추므로, 기존 Pod를 먼저 내리는 Recreate를 쓴다(교체 중 서빙 중단을 받아들인다).
+  # GPU 노드에는 GPU가 한 장뿐이고 기존 Pod가 그 한 장을 점유한다. RollingUpdate면 새 Pod가 같은 GPU를
+  # 요청하며 기존 Pod가 끝나기를 기다려 Pending으로 남을 수 있으므로, 기존 Pod를 먼저 내리는 Recreate를
+  # 쓴다. 교체 중 서빙 중단을 받아들인다. (RWO PVC 자체는 같은 노드의 여러 Pod가 함께 붙을 수 있어
+  # Recreate의 이유가 아니다.)
   replicas: 1
   strategy:
     type: Recreate
@@ -42,7 +44,10 @@ spec:
       automountServiceAccountToken: false
       enableServiceLinks: false
       terminationGracePeriodSeconds: 30
-      # image 기본 사용자는 root다. seed·GPU smoke에서 확인한 non-root 조건과 같게 둔다.
+      # image 기본 사용자는 root다. 지금까지 확인한 것은 두 가지로 서로 다르다:
+      # - seed Job 조건(non-root 10001, read-only rootfs, fsGroup)의 smoke 통과 — GPU를 쓰지 않았다.
+      # - GPU smoke 통과 — root(uid 0)로 실행했다.
+      # 이 Deployment 조건(non-root 10001 + read-only rootfs)의 GPU 추론은 아직 확인하지 않았다.
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001

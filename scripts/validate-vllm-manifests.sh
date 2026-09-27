@@ -60,8 +60,8 @@ vllm.each { |r| raise "[안전] #{r["kind"]}는 #{NAMESPACE} namespace다" unles
 # --- Deployment ----------------------------------------------------------
 deploy = one(vllm, "Deployment")
 dspec = deploy.fetch("spec")
-raise "[안전] vLLM replicas는 1이다 — GPU 1장·RWO PVC를 두 Pod가 쥐지 않는다" unless dspec["replicas"] == 1
-raise "[안전] vLLM strategy는 Recreate다 — 롤링 중 두 Pod가 GPU·PVC를 동시에 요구하지 않는다" unless dspec.dig("strategy", "type") == "Recreate" && !dspec["strategy"].key?("rollingUpdate")
+raise "[안전] vLLM replicas는 1이다 — GPU 노드의 GPU는 한 장이다" unless dspec["replicas"] == 1
+raise "[안전] vLLM strategy는 Recreate다 — RollingUpdate면 새 Pod가 기존 Pod의 GPU 한 장을 기다리며 Pending될 수 있다" unless dspec.dig("strategy", "type") == "Recreate" && !dspec["strategy"].key?("rollingUpdate")
 raise "[안전] Deployment selector는 persona-vllm name label이다" unless dspec.dig("selector", "matchLabels") == POD_LABEL
 template = dspec.fetch("template")
 pod = template.fetch("spec")

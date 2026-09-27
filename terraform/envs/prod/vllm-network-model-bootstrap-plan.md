@@ -155,7 +155,10 @@ redirect·artifact host를 합성 seed run에서 먼저 기록한 뒤 허용 목
      `--max-model-len 4096`, `--gpu-memory-utilization 0.85`(초기값, 실측 전), `--no-enable-log-requests`.
      vLLM v0.29.0에는 `--disable-log-requests`가 없어 쓰면 기동이 실패한다.
    - `HF_HUB_OFFLINE`·`TRANSFORMERS_OFFLINE`·`VLLM_NO_USAGE_STATS`로 재시작 때 외부에 기대지 않는다.
-   - replicas 1·Recreate(GPU 1장·RWO PVC), non-root 10001·read-only rootfs, `/tmp`·`/dev/shm` emptyDir.
+   - replicas 1·Recreate(GPU 한 장을 기존 Pod가 점유해 RollingUpdate의 새 Pod가 Pending될 수 있다),
+     non-root 10001·read-only rootfs, `/tmp`·`/dev/shm` emptyDir.
+   - 확인 범위: seed 조건의 non-root·read-only smoke(GPU 미사용)와 root(uid 0) GPU smoke는 통과했지만,
+     이 Deployment 조건의 non-root GPU 추론은 아직 확인하지 않았다.
 8. Prometheus Target `UP`, Gateway→vLLM 허용, 외부 namespace→vLLM 차단을 각각 확인한다.
 
 ### 모델 seed 명령과 무결성 기준 (2026-09-27)
