@@ -1,8 +1,9 @@
 # vLLM 네트워크·모델 cache 실행 계획
 
 상태: 2026-09-25 결정, **2026-09-27 모델 cache seed 선언 완성**(`kustomize/overlays/prod/persona-model-cache`,
-Argo Application 없음, 클러스터 미적용). NetworkPolicy·FQDN allowlist·Gateway egress·vLLM Deployment는
-아직 만들거나 Sync하지 않는다.
+Argo Application 없음). **vLLM Deployment·Service·PodMonitor는 선언·정적 검사까지 완료**
+(`kustomize/overlays/prod/persona-vllm`, Argo Application 없음) — **클러스터에서 vLLM을 기동한 적은 없다.**
+NetworkPolicy·FQDN allowlist·Gateway egress·Gateway LLM mode는 아직 만들거나 Sync하지 않는다.
 
 ## 한 문장 결론
 
@@ -146,7 +147,18 @@ redirect·artifact host를 합성 seed run에서 먼저 기록한 뒤 허용 목
    `persona-inference`의 allow 정책을 sync-wave 0, default-deny를 wave 1로 Sync한다.
 6. `persona-app-netpol`의 Gateway egress를 수동 Sync한다. 대상 Service가 없어도 기존
    DB·embedding 경로를 바꾸지 않는다.
-7. seed 완료를 확인한 뒤 local model path를 쓰는 vLLM Deployment·Service·PodMonitor를 Sync한다.
+7. seed 완료를 확인한 뒤 local model path를 쓰는 vLLM Deployment·Service·PodMonitor를 적용한다
+   (`kustomize/overlays/prod/persona-vllm`, 선언·정적 검사 완료, 클러스터 기동 미실행).
+   - 모델 cache PVC를 read-only로 붙이고, initContainer가 seed marker·manifest·weight index를 확인하지
+     못하면 vLLM을 시작하지 않는다.
+   - `vllm serve <로컬 절대 경로>`, `--served-model-name Qwen/Qwen3-4B-Instruct-2507`,
+     `--max-model-len 4096`, `--gpu-memory-utilization 0.85`(초기값, 실측 전), `--no-enable-log-requests`.
+     vLLM v0.29.0에는 `--disable-log-requests`가 없어 쓰면 기동이 실패한다.
+   - `HF_HUB_OFFLINE`·`TRANSFORMERS_OFFLINE`·`VLLM_NO_USAGE_STATS`로 재시작 때 외부에 기대지 않는다.
+   - replicas 1·Recreate(GPU 한 장을 기존 Pod가 점유해 RollingUpdate의 새 Pod가 Pending될 수 있다),
+     non-root 10001·read-only rootfs, `/tmp`·`/dev/shm` emptyDir.
+   - 확인 범위: seed 조건의 non-root·read-only smoke(GPU 미사용)와 root(uid 0) GPU smoke는 통과했지만,
+     이 Deployment 조건의 non-root GPU 추론은 아직 확인하지 않았다.
 8. Prometheus Target `UP`, Gateway→vLLM 허용, 외부 namespace→vLLM 차단을 각각 확인한다.
 
 ### 모델 seed 명령과 무결성 기준 (2026-09-27)
@@ -181,4 +193,5 @@ vLLM이 Ready여도 Gateway 설정을 LLM mode로 바꾸지 않는다.
 - vLLM·DCGM Target이 `UP`이며, 허용하지 않은 namespace/port 흐름은 Hubble에서 차단된다.
 
 seed Job image·명령·model revision은 선언에 고정했다(위 절). 아직 확정하지 않은 항목은 실제 model
-FQDN 목록(첫 seed에서 관측), Prometheus Pod label, vLLM Deployment의 writable path다.
+FQDN 목록(첫 seed에서 관측), Prometheus Pod label, 그리고 vLLM이 read-only rootfs·`/tmp` cache로
+실제 기동하는지다(선언은 있으나 클러스터에서 확인하지 않았다).

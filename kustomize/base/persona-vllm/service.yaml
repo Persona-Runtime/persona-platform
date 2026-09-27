@@ -1,0 +1,20 @@
+# vLLM OpenAI 호환 API와 /metrics. ClusterIP만 쓴다 — 외부에 열지 않는다.
+# Gateway 계획의 URL은 persona-vllm.persona-inference.svc.cluster.local:8000이다(Gateway는 아직 mock).
+# Ready인 Pod만 endpoint에 들어간다(readinessProbe). 모델 적재 중에는 요청을 받지 않는다.
+apiVersion: v1
+kind: Service
+metadata:
+  name: persona-vllm
+  labels:
+    app.kubernetes.io/name: persona-vllm
+    app.kubernetes.io/component: inference
+    app.kubernetes.io/part-of: persona-platform
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: persona-vllm
+  ports:
+    - name: http
+      protocol: TCP
+      port: 8000
+      targetPort: http
