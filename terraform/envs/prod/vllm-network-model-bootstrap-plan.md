@@ -13,7 +13,7 @@ Argo Application 없음). 모델 cache seed는 운영자 보고로 완료됐다(
 | 확인(운영자 제공, 2026-09-27) | control-plane → vLLM Service 경유 SSE 스트리밍, 마지막 `[DONE]` 수신 |
 | 확인(운영자 제공, 2026-09-27) | vLLM Prometheus Target `UP` |
 | 미확인 | NetworkPolicy 적용 뒤 허용·차단 동작(아래 "첫 적용·복구 절차") |
-| 미확인 | Gateway 애플리케이션의 LLM mode 전환(Gateway는 mock 유지) |
+| 미확인 | Gateway 애플리케이션의 LLM mode 전환(선언은 llm·새 image로 완료, 적용 전. 아래 "Gateway LLM 전환") |
 | 미확인 | 성능·과부하 실험(처리량·지연·동시성) |
 
 **NetworkPolicy(2026-09-27)**: `persona-inference` 정책과 Gateway → vLLM egress를 첫 적용 가능한
@@ -288,6 +288,33 @@ a·b·d는 allow 단계와 deny 단계에서 각각 확인한다. c는 allow 단
 
 vLLM Deployment보다 정책과 cache seed가 먼저다. cache가 비어 있거나 PodMonitor가 `DOWN`이면
 vLLM이 Ready여도 Gateway 설정을 LLM mode로 바꾸지 않는다.
+
+### Gateway LLM 전환 (선언 완료, 적용하지 않음)
+
+`kustomize/base/persona-gateway/deployment.yaml`을 `PERSONA_CHAT_INFERENCE_MODE=llm`,
+`PERSONA_VLLM_BASE_URL=http://persona-vllm.persona-inference.svc.cluster.local:8000`,
+`PERSONA_VLLM_MODEL=Qwen/Qwen3-4B-Instruct-2507`로 바꾼다. NetworkPolicy·vLLM 설정·모델 PVC는 바꾸지 않는다.
+
+- **이미지와 함께 바꾼다.** vLLM은 `--max-model-len 4096`인데 이전 Gateway 이미지(`sha256:5438d8a8…`)는
+  mode와 무관하게 BUDGET_8192로 prompt를 조립한다. 그래서 llm 모드에서 BUDGET_4096을 고르는 이미지
+  (persona-gateway PR #21 머지 `16caa0c`, amd64 child `sha256:0ac1ac2a…89ef`)로 image를 함께 바꿨다.
+  `validate-persona-app-manifests.sh`가 llm 모드 + 이전 digest 조합을 막는다.
+- BUDGET_4096은 글자 수 상한이라 4096 토큰을 보장하지 않는다. 입력 + 출력 512가 넘으면 그 생성은
+  `upstream_status_400`으로 실패한다. 자동 재시도하지 않는다.
+
+머지 뒤 실행 순서(사람이 수행, live patch 없음):
+
+1. Argo `persona-app`을 수동 Sync한다.
+2. Gateway Pod 2개가 Ready인지 확인한다.
+3. 외부 클라이언트에서 Cookie를 준비하고 캐릭터 `setup`을 실행한다(persona-ops-lab SVC-01). 이미
+   준비된 캐릭터가 있으면 재사용한다.
+4. SVC-01을 `--warmup 1 --rounds 0`으로 실행한다.
+5. 그 warmup 샘플이 `mode=llm`, `outcome=success`인지 확인한다.
+6. 통과하면 `--warmup 2 --rounds 2`로 질문 8개를 두 번 측정한다.
+
+첫 실행에서 `upstream_status_400`이 나오면 반복 실행하지 말고 길이 초과인지 먼저 확인한다(vLLM 로그의
+길이 오류 여부). 이를 피하려고 vLLM 문맥 한도를 바로 늘리지 않는다. 되돌릴 때는 전환 커밋을 revert해
+머지하고 `persona-app`을 다시 Sync한다(mock·long profile·이전 image 복원).
 
 ## 6. 완료 판정과 미결 값
 

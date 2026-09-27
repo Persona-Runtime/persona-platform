@@ -176,10 +176,15 @@ pvc = model_cache.find { |r| r["kind"] == "PersistentVolumeClaim" } || {}
 raise "[안전] 모델 cache overlay에 #{PVC} PVC가 없다" unless pvc.dig("metadata", "name") == PVC && pvc.dig("metadata", "namespace") == NAMESPACE
 raise "[안전] vLLM overlay는 Namespace를 만들지 않는다 — 모델 cache overlay가 소유한다" unless model_cache.any? { |r| r["kind"] == "Namespace" && r.dig("metadata", "name") == NAMESPACE }
 
-# 이번 변경은 Gateway를 건드리지 않는다 — 계속 mock이어야 한다.
+# Gateway는 llm 모드로 이 vLLM을 부른다. 연결값이 vLLM 선언과 어긋나면 모든 채팅이 실패하므로
+# Service 이름·namespace·포트와 --served-model-name을 여기서 대조한다.
 gateway = app.find { |r| r["kind"] == "Deployment" && r.dig("metadata", "name") == "persona-gateway" } || raise("[안전] persona-gateway Deployment가 없다")
 gateway_env = env_map(gateway.dig("spec", "template", "spec", "containers").first)
-raise "[안전] Gateway PERSONA_CHAT_INFERENCE_MODE는 mock 그대로다 — LLM mode 전환은 별도 단계다" unless gateway_env["PERSONA_CHAT_INFERENCE_MODE"] == "mock"
+raise "[안전] Gateway PERSONA_CHAT_INFERENCE_MODE는 llm이다" unless gateway_env["PERSONA_CHAT_INFERENCE_MODE"] == "llm"
+expected_base_url = "http://#{service.dig("metadata", "name")}.#{NAMESPACE}.svc.cluster.local:#{service.dig("spec", "ports", 0, "port")}"
+raise "[안전] Gateway PERSONA_VLLM_BASE_URL이 vLLM Service와 다르다(기대: #{expected_base_url})" unless gateway_env["PERSONA_VLLM_BASE_URL"] == expected_base_url
+served_model = args[args.index("--served-model-name") + 1]
+raise "[안전] Gateway PERSONA_VLLM_MODEL이 vLLM --served-model-name(#{served_model})과 다르다" unless gateway_env["PERSONA_VLLM_MODEL"] == served_model
 
 Dir.glob(File.join(argocd_dir, "**", "*.{yaml,yml}")).sort.each do |path|
   raise "[안전] Argo 선언이 persona-vllm overlay를 참조한다: #{File.basename(path)}" if File.read(path).include?("overlays/prod/persona-vllm")

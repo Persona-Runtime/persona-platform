@@ -73,12 +73,20 @@ db_path, migrate_path, app_path, ingress_path,
   ns_data_path, ns_app_path, grants_path, traefik_values_path,
   migrate_base_path, argocd_dir = ARGV
 
-# 0005 전용 최종 Gateway 이미지(persona-gateway PR #20 머지 뒤 게시, SUPPORTED=0005). 0005
-# migration은 적용·Complete됐다(Job은 history/). 바꿀 때는 kustomize/base/persona-gateway/
+# 0005 전용 + llm 모드 prompt 예산(BUDGET_4096) Gateway 이미지(persona-gateway PR #21 머지
+# 16caa0c 뒤 게시, SUPPORTED=0005). 0005 migration은 적용·Complete됐다(Job은 history/). 바꿀 때는 kustomize/base/persona-gateway/
 # deployment.yaml의 image를 함께 바꾼다.
 # 아래 MIGRATION_IMAGES["0004-chat"]은 이 값과 다르지만 그게 맞다 — 그쪽은 이미 만들어진
 # Job이 쓴 이미지라 바꿀 수 없다(다음 주석 참고).
-GATEWAY_IMAGE = "ghcr.io/persona-runtime/persona-minimal-api@sha256:5438d8a80acf414704242901a428c7ef3154bb5496709d3d2d7bea1e9e63f436"
+GATEWAY_IMAGE = "ghcr.io/persona-runtime/persona-minimal-api@sha256:0ac1ac2aa432c9fdcfb6cb516e5863ed7d21ece3895dd3070ecb985c76ff89ef"
+# llm 모드 prompt 예산(BUDGET_4096)이 들어가기 전 이미지들. 이 이미지는 mode와 무관하게
+# BUDGET_8192로 prompt를 조립해 vLLM --max-model-len 4096을 넘기 쉽다. llm 모드 선언이 이
+# 이미지를 쓰면 막는다 — 모드 전환만 먼저 배포되는 것을 막는 가드다.
+GATEWAY_IMAGES_WITHOUT_LLM_BUDGET = [
+  "ghcr.io/persona-runtime/persona-minimal-api@sha256:5438d8a80acf414704242901a428c7ef3154bb5496709d3d2d7bea1e9e63f436",
+].freeze
+VLLM_BASE_URL = "http://persona-vllm.persona-inference.svc.cluster.local:8000"
+VLLM_MODEL = "Qwen/Qwen3-4B-Instruct-2507"
 
 # migration Job의 승인 이미지는 revision별로 따로 적는다.
 #
@@ -353,16 +361,20 @@ raise "[안전] DB timeout 예산을 명시해야 한다" unless (gcontainer["en
 # 켜도 안전한 근거(헤더 덮어쓰기·헤더 제거)는 deployment.yaml 주석에 있다.
 raise "[안전] ForwardAuth가 꺼지면 공개 경로가 정적 토큰 요구로 돌아간다" unless (gcontainer["env"] || []).any? { |e| e["name"] == "PERSONA_FORWARD_AUTH_ENABLED" && e["value"] == "true" }
 
-# 채팅 추론 모드와 mock profile은 **함께** 선언한다(ROLL-01B Hard Node Failure 실험 설정).
-# - profile만 있고 mode가 없으면 기본값·Secret에 따라 모드가 정해져 선언만 보고 동작을 알 수 없다.
-# - mode가 llm이면 profile은 읽히지 않는다 — 실험이 짧은 응답이나 GPU 경로로 조용히 바뀐다.
+# 채팅 추론 모드는 llm이다. 모드와 vLLM 연결값을 **함께** 선언한다.
+# - mode가 없으면 기본값·Secret에 따라 모드가 정해져 선언만 보고 동작을 알 수 없다.
+# - llm인데 BASE_URL·MODEL이 없으면 앱이 기동하지 못하고, 값이 틀리면 모든 채팅이 실패한다.
+# - llm에서는 mock profile을 읽지 않는다. 남겨 두면 적용되는 것처럼 보여 선언이 모호하다.
 # - 같은 이름이 두 번 있으면 뒤의 값이 이기므로 선언이 모호하다.
 gateway_env_names = (gcontainer["env"] || []).map { |e| e["name"] }
 duplicated_env = gateway_env_names.select { |name| gateway_env_names.count(name) > 1 }.uniq
 raise "[안전] Gateway env 이름이 중복됐다: #{duplicated_env.join(", ")}" unless duplicated_env.empty?
 gateway_env = (gcontainer["env"] || []).to_h { |e| [e["name"], e["value"]] }
-raise "[안전] Gateway PERSONA_CHAT_INFERENCE_MODE는 mock으로 명시해야 한다 — 없거나 llm이면 mock profile이 적용되지 않는다" unless gateway_env["PERSONA_CHAT_INFERENCE_MODE"] == "mock"
-raise "[기준선] Gateway PERSONA_CHAT_MOCK_PROFILE은 long이어야 한다(ROLL-01B 실험 설정)" unless gateway_env["PERSONA_CHAT_MOCK_PROFILE"] == "long"
+raise "[안전] Gateway PERSONA_CHAT_INFERENCE_MODE는 llm으로 명시해야 한다" unless gateway_env["PERSONA_CHAT_INFERENCE_MODE"] == "llm"
+raise "[안전] Gateway PERSONA_VLLM_BASE_URL은 persona-vllm Service(/v1 앞까지)여야 한다: #{VLLM_BASE_URL}" unless gateway_env["PERSONA_VLLM_BASE_URL"] == VLLM_BASE_URL
+raise "[안전] Gateway PERSONA_VLLM_MODEL은 vLLM --served-model-name과 같아야 한다: #{VLLM_MODEL}" unless gateway_env["PERSONA_VLLM_MODEL"] == VLLM_MODEL
+raise "[안전] llm 모드에서 PERSONA_CHAT_MOCK_PROFILE을 두지 않는다 — 읽히지 않는 값이다" if gateway_env.key?("PERSONA_CHAT_MOCK_PROFILE")
+raise "[안전] llm 모드 Gateway가 BUDGET_4096 반영 전 이미지를 쓴다 — 예산 수정(persona-gateway PR #21) 이미지 digest로 바꾼다" if GATEWAY_IMAGES_WITHOUT_LLM_BUDGET.include?(gcontainer["image"])
 
 # DB 장애로 재시작되면 안 되므로 startup·liveness는 /healthz여야 한다.
 raise "[안전] Gateway startup probe는 /healthz다" unless gcontainer.dig("startupProbe", "httpGet", "path") == "/healthz"
