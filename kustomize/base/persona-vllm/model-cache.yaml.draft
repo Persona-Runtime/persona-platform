@@ -12,11 +12,12 @@
 #
 # ── 선행 조건 (닫히지 않으면 적용하지 않는다) ─────────────────────────────────
 #
-# 1. **local-path가 GPU 노드를 모른다.** `bootstrap/local-path/configmap.yaml`의
-#    `nodePathMap`에 `k8s-worker1`·`k8s-worker2`만 있고 `DEFAULT_PATH_FOR_NON_LISTED_NODES`가
-#    **일부러 없다**. 그래서 GPU 노드에 스케줄된 PVC는 **의도적으로 provisioning 실패한다**.
-#    `persona-gpu-01` + `/opt/local-path-provisioner`를 더하는 별도 변경이 먼저 필요하다.
-#    그 ConfigMap은 Argo 밖(bootstrap)이라 적용 경로도 GitOps가 아니다.
+# 1. **local-path의 GPU 노드 허용이 클러스터에 반영됐는지 확인한다.**
+#    `bootstrap/local-path/configmap.yaml`의 `nodePathMap`에 `persona-gpu-01` +
+#    `/opt/local-path-provisioner`를 Git 선언으로 추가했다(`DEFAULT_PATH_FOR_NON_LISTED_NODES`는
+#    여전히 일부러 없다). 그 ConfigMap은 Argo 밖(bootstrap)이므로 Git 선언만으로는 반영되지
+#    않는다 — control-plane에서 반영하고 GPU 노드에 고정한 PVC가 `Bound`되는 것을 실측하기
+#    전까지 이 조건은 닫히지 않았다.
 #    **hostPath를 Pod에 직접 mount해 우회하지 않는다** — 그러면 PVC가 주는 노드 고정·정리
 #    경로를 잃고, provisioner가 막아 주던 "엉뚱한 노드에 볼륨 생성"도 다시 열린다.
 # 2. seed image가 결정되지 않았다. 아래 `REPLACE_WITH_SEED_IMAGE_DIGEST` 자리다.

@@ -116,7 +116,7 @@ Toolkit 1.20.x다. R580 근거와 폐기된 선택(R570)은 [Join 계획 §4](vl
 | AWS 리소스 | **미수행** — state 파일이 없고 apply한 적이 없다 | 8항목 검토와 입력 7개 확정 후 사용자가 saved plan으로 apply |
 | GPU quota(서울 G/VT) | **미확인** — 실제 계정에서 읽지 않았다 | 계정에서 현재값 조회, 부족하면 별도 승인으로 증설 |
 | GPU 노드 Kubernetes 조인 | **미수행** | §3 네트워크 행렬 전부 통과 후 사람이 `kubeadm join` |
-| local-path GPU 노드 등록 | **미구성** — `nodePathMap`에 `persona-gpu-01`이 없어 PVC가 의도적으로 실패한다. 초안조차 없다(변경 자체를 만들지 않았다) | 조인 뒤 `bootstrap/local-path/configmap.yaml` 별도 변경(Argo 밖) |
+| local-path GPU 노드 등록 | **Git 선언 추가, 클러스터 미반영** — `bootstrap/local-path/configmap.yaml`의 `nodePathMap`에 `persona-gpu-01` 추가. Git 선언에는 추가됐지만, bootstrap은 Argo 밖이므로 실제 클러스터 반영과 GPU PVC `Bound` 실측 전까지 완료가 아니다 | control-plane에서 ConfigMap 반영 후 GPU 노드에 고정한 PVC `Bound` 확인 |
 
 ### 준비 완료·초안 — 선언이나 문서가 있는 것 (동작 확인 아님)
 
@@ -144,7 +144,7 @@ Toolkit 1.20.x다. R580 근거와 폐기된 선택(R570)은 [Join 계획 §4](vl
 | 6 | §3 네트워크 행렬 7행 | 행마다 증명 계층을 구분해 기록. Pod↔Pod와 DNS까지 |
 | 7 | 사람이 `kubeadm join` | Node `Ready`, taint 등록 확인 |
 | 8 | device plugin 배포 | Node `allocatable`에 `nvidia.com/gpu: 1` |
-| 9 | local-path nodePathMap 변경 | GPU 노드에서 PVC `Bound` |
+| 9 | local-path nodePathMap 반영(Git 선언은 추가됨, 적용은 control-plane에서 사람이) | GPU 노드에 고정한 PVC `Bound` |
 | 10 | seed Job 1회 | Job `Complete` + 파일 무결성. 실패면 vLLM 시작하지 않음 |
 | 11 | `persona-inference` 정책 Sync | 외부 namespace → vLLM 차단 확인 |
 | 12 | `persona-app` Gateway egress Sync | 기존 DB·embedding 경로 무변경 확인 |
