@@ -50,10 +50,13 @@ spec:
           value: gpu-serving
           effect: NoSchedule
       # image 기본 사용자는 root다. 10001로 실행해도 동작함을 실측했다(2026-09-27).
+      # fsGroup 10001: 그 non-root·read-only smoke가 통과한 조건과 같게 둔다. seed는 UID/GID 10001로
+      # /tmp/hf-home에 Hugging Face cache를 만들므로, 볼륨의 group 소유를 실행 group과 맞춘다.
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
         runAsGroup: 10001
+        fsGroup: 10001
         seccompProfile:
           type: RuntimeDefault
       containers:

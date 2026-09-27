@@ -38,6 +38,8 @@ cases = [
   [JOB, C + ["env", { "name" => "MODEL_REVISION" }, "value"], "main", "MODEL_REVISION은 고정 commit"],
   [JOB, C + ["securityContext", "readOnlyRootFilesystem"], false, "root filesystem은 read-only다"],
   [JOB, POD + ["securityContext", "runAsUser"], 0, "runAsUser 10001"],
+  [JOB, POD + ["securityContext", "fsGroup"], DELETE_KEY, "fsGroup은 10001이다"],
+  [JOB, POD + ["securityContext", "fsGroup"], 0, "fsGroup은 10001이다"],
   [JOB, C + ["volumeMounts", { "name" => "tmp" }], DELETE_KEY, "seed mount는 /models·/tmp·/opt/persona-seed 셋뿐이다"],
   [JOB, C + ["volumeMounts", { "name" => "seed-script" }, "readOnly"], false, "read-only ConfigMap이다"],
   [JOB, ["spec", "template", "metadata", "labels", "app.kubernetes.io/name"], "persona-vllm", "seed Pod label은 persona-vllm-model-seed"],

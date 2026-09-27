@@ -70,6 +70,8 @@ raise "[안전] seed Pod는 RuntimeClass(nvidia)를 쓰지 않는다 — GPU가 
 psec = pod["securityContext"] || {}
 raise "[안전] seed Pod는 runAsNonRoot·runAsUser 10001·runAsGroup 10001로 실행한다" unless psec["runAsNonRoot"] == true && psec["runAsUser"] == 10_001 && psec["runAsGroup"] == 10_001
 raise "[안전] seed Pod는 RuntimeDefault seccomp가 필요하다" unless psec.dig("seccompProfile", "type") == "RuntimeDefault"
+# non-root·read-only smoke가 통과한 권한 조건과 같게 둔다(/tmp/hf-home 등 볼륨 group 소유).
+raise "[안전] seed Pod fsGroup은 10001이다 — 실측 smoke와 같은 권한 조건이어야 한다" unless psec["fsGroup"] == 10_001
 
 containers = pod.fetch("containers")
 raise "[안전] seed Pod container는 하나다" unless containers.length == 1 && !pod.key?("initContainers")
