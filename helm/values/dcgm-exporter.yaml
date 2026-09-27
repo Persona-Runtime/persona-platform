@@ -1,0 +1,66 @@
+# GPU-00 관측 기준선. GPU Operator는 설치하지 않고, host에 준비된 NVIDIA containerd
+# handler를 RuntimeClass/nvidia로 선택한다. image tag는 chart 4.8.4가 검증한 조합으로
+# 고정한다. digest를 확인하기 전에는 비어 둔다 — 확인하지 않은 digest를 적지 않는다.
+image:
+  repository: nvcr.io/nvidia/k8s/dcgm-exporter
+  tag: 4.6.1-4.8.4-distroless
+  pullPolicy: IfNotPresent
+
+# 일반 시스템 DaemonSet보다 높은 우선순위를 주지 않는다. exporter가 죽어도 inference
+# 요청 자체는 계속 처리되어야 하며, 관측 실패는 Target Down으로 드러나야 한다.
+priorityClassName: ""
+runtimeClassName: nvidia
+hostPID: false
+hostNetwork: false
+
+# chart 기본값의 control-plane toleration을 대체한다. GPU 전용 taint를 허용한 Pod만
+# persona-gpu-01에 올라가므로 홈 워커·control-plane에서는 exporter가 실행되지 않는다.
+nodeSelector:
+  personaruntime.xyz/node-pool: gpu
+tolerations:
+  - key: personaruntime.xyz/dedicated
+    operator: Equal
+    value: gpu-serving
+    effect: NoSchedule
+
+# 기본 counters는 profiling metric을 포함할 수 있어 DCGM이 SYS_ADMIN을 요구한다. 이
+# capability는 exporter 컨테이너에만 남기고, GPU 전용 노드·NoSchedule taint로 범위를
+# 한정한다. collectors를 비-profiling으로 좁혀 실측 검증하기 전에는 임의로 제거하지 않는다.
+securityContext:
+  runAsNonRoot: false
+  runAsUser: 0
+  capabilities:
+    add:
+      - SYS_ADMIN
+    drop:
+      - ALL
+  allowPrivilegeEscalation: false
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 200m
+    memory: 512Mi
+
+# Prometheus Operator가 release label로 ServiceMonitor를 선택한다. Pod label·UID
+# 수집은 시계열 cardinality를 불필요하게 늘리므로 이 기준선에서는 끈다.
+kubernetes:
+  enablePodLabels: false
+  enablePodUID: false
+serviceAccount:
+  automountServiceAccountToken: false
+service:
+  enable: true
+  type: ClusterIP
+  internalTrafficPolicy: Cluster
+  port: 9400
+  webReadTimeout: 10s
+  webWriteTimeout: 30s
+serviceMonitor:
+  enabled: true
+  interval: 30s
+  scrapeTimeout: 10s
+  additionalLabels:
+    release: monitoring-stack

@@ -1,0 +1,7 @@
+# GPU containerd의 `nvidia` handler를 Kubernetes가 이름으로 선택할 수 있게 하는
+# cluster-scoped 선언만 둔다. device plugin·vLLM처럼 GPU가 필요한 Pod는 이 RuntimeClass를
+# 명시해야 기본 runc에서 조용히 실행되어 GPU를 못 보는 일을 피할 수 있다.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - runtimeclass.yaml

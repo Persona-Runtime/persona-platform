@@ -57,18 +57,19 @@ prompt·모델 token을 로그에 남기지 않는다.
 | `00-preflight` | OS·architecture·디스크 여유·메모리·swap·clock sync·인터페이스와 MTU·binary 존재의 **읽기 전용** 확인 | 루트 여유 20 GiB 이상, RAM 14 GiB 이상, 현재 MTU와 미설치 binary 목록 |
 | `10-base` | swap 비활성화, kernel module·sysctl 준비, containerd 설치와 `SystemdCgroup=true`, 저장소 목록(`apt-cache madison`)에서 확인한 version으로 kubeadm/kubelet/kubectl 고정 설치·hold | swap 0, sysctl 실효값 1, containerd socket, 넘긴 package version이 저장소에 있음 |
 | `20-tailscale` | Tailscale 패키지 설치와 `tailscaled` 활성화 | binary 존재. **등록 상태는 미등록이 정상** |
-| `30-gpu-runtime` | 검토한 driver branch 설치, 필요 시에만 재부팅, Container Toolkit 네 패키지 설치, containerd runtime 등록 | `nvidia-smi`로 GPU **정확히 1장**과 요청한 driver 분기 확인 |
+| `30-gpu-runtime` | R580(`nvidia-driver-580-server`) 정확한 patch 판정 — 없으면 설치·재부팅, 이미 정상이면 건너뜀, 그 밖이면 중단 — 과 hold, Container Toolkit 네 패키지 설치, containerd runtime 등록 | `nvidia-smi`로 GPU **정확히 1장**과 R580 기준선 판정 healthy |
 | `40-join-preflight` | binary·kube 버전(API server 기준 skew: 같은 minor, kubelet patch ≤ API server)·swap·containerd socket/cgroup·API 6443 도달성·host 방화벽·token 환경변수 존재 여부의 **읽기 전용** 확인 | Join 전 네트워크 행렬을 실행할 수 있는 상태 |
 
 `10-base`와 `30-gpu-runtime`은 실제 값을 넘겨야 동작한다(`gpu_kubernetes_minor`,
-`gpu_kubernetes_package_version`과 설치 전 patch 판정용 `api_server_version`, `nvidia_driver_branch`,
-`nvidia_container_toolkit_version`).
+`gpu_kubernetes_package_version`과 설치 전 patch 판정용 `api_server_version`,
+`nvidia_driver_package_version`, `nvidia_container_toolkit_version`).
 `40-join-preflight`는 `api_server_version`과 `control_plane_kubelet_version`이 없으면 실패한다 —
 각 값의 의미는 `ansible/gpu-node/README.md` "버전 입력의 의미와 Join 판정"에 있다.
 비어 있으면 해당 단계를 건너뛰고 그 사실을 출력한다 — 추측한 패키지 버전으로 설치하지 않는다.
 
-driver 분기는 **570 LTS**다. 580이 아닌 이유는 vLLM image 자신의 `NVIDIA_REQUIRE_CUDA`가
-580을 허용 분기로 열거하지 않기 때문이며 근거는 [Join 계획 §4](vllm-node-join-plan.md)에 있다.
+driver 기준선은 **R580**(Ubuntu `nvidia-driver-580-server`, 정확한 patch)이다. R570은 폐기했다 —
+`NVIDIA_REQUIRE_CUDA`의 열거 목록을 허용 목록으로 잘못 읽은 근거였고, Ubuntu의 570-server는 580
+전환 package다. 근거는 [Join 계획 §4](vllm-node-join-plan.md)에 있다.
 
 ### `--check`가 실제로 검사하게 만든 것
 

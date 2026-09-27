@@ -37,7 +37,7 @@ offering 조회와 quota 승인은 해당 시점의 실제 재고를 보장하�
 | Kubernetes | API server와 같은 minor, kubelet patch는 API server patch 이하 | 실행 직전 API server·CP kubelet 버전을 다시 읽고, 설치할 package version은 GPU host의 `apt-cache madison` 값에서 골라 기록한다. 2026-09-26 관측값(API server `v1.36.4`, CP kubeadm·kubelet `v1.36.2`)을 설치 명령에 영구 하드코딩하지 않는다. |
 | CNI | 기존 Cilium VXLAN + kube-proxy | GPU Join 때문에 CNI 모드를 함께 바꾸지 않는다. underlay MTU 1280 기준도 유지한다. |
 | 모델 | `Qwen/Qwen3-4B-Instruct-2507`, BF16 | revision은 §4에 commit으로 적었다. 실행 직전 다시 읽어 대조한다. |
-| 실행 조합 | vLLM `v0.29.0-cu129-ubuntu2404`·CUDA 12.9.1·NVIDIA driver **570 LTS**·Container Toolkit 1.20.x | tag는 선택 기준이고 배포는 digest로 고정한다. driver를 580이 아니라 570으로 잡은 이유는 §4에 있다 — image 자신의 `NVIDIA_REQUIRE_CUDA`가 580을 허용하지 않는다. |
+| 실행 조합 | vLLM `v0.29.0-cu129-ubuntu2404`·CUDA 12.9.1·NVIDIA driver **R580(`nvidia-driver-580-server`, 정확한 patch)**·Container Toolkit 1.20.x | tag는 선택 기준이고 배포는 digest로 고정한다. R580 근거와 **폐기된 선택 R570**은 §4에 있다. |
 | 문맥 조건 | 4096 기준선, 8192 후속 비교 조건 | VRAM·TTFT·처리량을 각각 측정한다. 8192 성공을 사전 가정하지 않는다. |
 | vLLM 노출 | ClusterIP 내부 전용 | public SG에 8000·6443·10250·8472·NodePort를 열지 않는다. |
 
@@ -205,30 +205,45 @@ tag 숫자에서 CUDA·driver를 추정한 값이 아니다.
 | CUDA runtime | **12.9.1** (`NV_CUDA_CUDART_VERSION=12.9.79-1`) | image config `Env` |
 | 지원 GPU arch | `TORCH_CUDA_ARCH_LIST`에 **8.9 포함** → L4(Ada)용 kernel이 미리 빌드돼 있다 | image config `Env` |
 | forward-compat layer | `VLLM_ENABLE_CUDA_COMPATIBILITY=0` — 꺼져 있다 | image config `Env` |
-| image가 허용하는 driver 분기 | `NVIDIA_REQUIRE_CUDA=cuda>=12.9`, 열거된 분기는 **535·550·560·565·570** | image config `Env` |
-| **NVIDIA driver** | **570 LTS** | 위 열거 목록 안에서 가장 높은 분기 |
+| image의 driver 조건 | `NVIDIA_REQUIRE_CUDA`: `cuda>=12.9`와 535·550·560·565·570 brand·driver 범위가 공백으로 나열(OR) | image config `Env` |
+| **NVIDIA driver** | **R580** — Ubuntu `nvidia-driver-580-server`, patch는 설치 당일 저장소 값 | `cuda>=12.9`를 만족(아래 절). R570은 폐기 |
 | NVIDIA Container Toolkit | 1.20.x (최신 안정 1.20.1, 2026-09-19) | GitHub releases |
 | 모델 revision | `Qwen/Qwen3-4B-Instruct-2507` @ `cdbee75f17c01a7cc42f958dc650907174af0554` | HF model API(2026-09-25 조회) |
 | vLLM build commit | `98dff2a81d747d1dba01a47f939f48c3526d4206` | image config `Env` |
 
-### driver를 580이 아니라 570으로 잡은 이유
+### driver 기준선: R580 (`nvidia-driver-580-server`, 정확한 patch)
 
-이전 초안은 580.x를 적었다. 근거로 삼은 숫자(CUDA 12.9 Update 1 최소 575.57.08)는
-**틀리지 않았지만 다른 질문에 대한 답**이었다. 두 숫자는 서로 다른 것을 말한다.
+GPU host 기준선은 Ubuntu `nvidia-driver-580-server`다(2026-09-27 확정). patch는 설치 당일 GPU
+host의 `apt-cache madison nvidia-driver-580-server`에서 읽은 package version 하나로 고정하고
+hold한다. 이미 R580 + DKMS가 정상인 host는 driver를 재설치하거나 재부팅하지 않고 Container
+Toolkit과 containerd nvidia runtime만 검증한다(`ansible/gpu-node` `30-gpu-runtime`).
 
-- CUDA Toolkit release notes: **CUDA 12.9 Update 1 → driver ≥ 575.57.08**, 12.9 GA →
-  ≥ 575.51.03. 이것은 **12.9 toolkit의 기능을 쓰기 위한** 최소값이다.
-- 같은 문서의 toolkit↔driver branch 표: **CUDA 13.0 → R580**. 즉 580은 CUDA 13 계열 분기다.
-- 이 image는 **CUDA 12.x minor version compatibility**에 기대어 동작한다. 그래서 image 자신의
-  `NVIDIA_REQUIRE_CUDA`가 535·550·560·565·570을 허용 분기로 열거한다. 12.x로 빌드된 앱은
-  12.0 최소 driver 이상에서 돌기 때문이다.
-- **580은 그 열거 목록에 없다.** Container Toolkit은 container 시작 시 `NVIDIA_REQUIRE_*`
-  조건을 검사하므로, 580 host에서 이 image를 띄우면 조건 불충족으로 거부될 수 있다.
-- `NVIDIA_DISABLE_REQUIRE=1`이 그 검사를 모두 끄는 공식 스위치지만 **쓰지 않는다.** 검사를
-  끄는 것은 호환을 만드는 것이 아니라 확인을 없애는 것이다.
+- CUDA 12.9 Update 1이 요구하는 driver ≥ 575.57.08을 R580은 그대로 만족한다. 새 driver는 이전
+  CUDA runtime을 실행하므로(driver 하위 호환) CUDA 12.9.1 image가 minor version compatibility에
+  기댈 필요가 없다.
+- image의 `NVIDIA_REQUIRE_CUDA`는 `cuda>=12.9`와 brand·driver 범위 조건을 **공백으로 나열**한다.
+  NVIDIA Container Toolkit 문서의 `NVIDIA_REQUIRE_*` 규칙에서 공백으로 나눈 조건은 OR, 쉼표로
+  묶은 조건은 AND다. 그래서 R580(CUDA 13.0 지원)은 `cuda>=12.9` 하나로 조건을 만족한다 — 열거된
+  535~570 범위는 그 조건을 만족하지 못하는 오래된 driver를 위한 대안이지 허용 목록이 아니다.
+  **이 해석은 문서 기준이다.** GPU host에서 이 image digest로 container GPU smoke를 실행해 거부되지
+  않는지 확인하기 전까지 검증된 사실로 쓰지 않는다.
+- `NVIDIA_DISABLE_REQUIRE=1`로 검사를 끄지 않는다. 검사를 끄는 것은 호환을 만드는 것이 아니라
+  확인을 없애는 것이다.
+- vLLM image digest는 이번에 바꾸지 않는다.
 
-그래서 열거된 분기 안에서 가장 높은 **570 LTS**를 고른다. 이것은 "575 이상이어야 한다"와
-모순이 아니다 — 575는 toolkit 기능 기준, 570은 이 image가 실제로 요구하는 실행 기준이다.
+### 폐기된 선택: R570
+
+이전 판은 R570 LTS를 골랐다. 두 가지 이유로 폐기한다.
+
+1. **근거가 틀렸다.** "580은 `NVIDIA_REQUIRE_CUDA`의 열거 목록에 없으므로 거부될 수 있다"고 적었지만,
+   공백으로 나열된 조건은 OR이다(위 절). 열거 목록을 허용 목록으로 읽은 것이 잘못이었다.
+2. **Ubuntu에서 R570을 설치할 수 없다.** 2026-09-26 실제 host에서 Ubuntu 24.04의
+   `nvidia-driver-570-server`가 `nvidia-driver-580-server`를 의존하는 전환 package임을 확인했다.
+   R570을 지키려면 NVIDIA CUDA repository의 `cuda-drivers-570`으로 갈아타야 했고(검토 중이던 전환
+   경로), 이는 580 제거·재부팅을 동반한다. 근거가 틀린 선택을 위해 그 비용을 쓰지 않는다.
+
+`30-gpu-runtime`은 R570 입력(`nvidia_driver_branch=570`)과 `cuda-drivers-570` 경로를 받지 않는다.
+570-server 전환 package가 host에 남아 있어도 580을 가리키면 driver 불일치가 아니라 drift로 보고한다.
 
 참고로 **vLLM 기본 tag는 CUDA 13 계열이다.** 최신 `v0.30.0`(2026-09-22)의 기본 tag를 읽어
 보니 `CUDA_VERSION=13.0.2`였고, 허용 분기는 535~575로 `cuda>=13.0`을 요구했다 — 그 조합은
@@ -257,7 +272,8 @@ package로 낮은 driver를 우회하는 방식은 첫 기준선에 쓰지 않�
 
 1. AWS 콘솔/CLI에서 instance ID·AZ·type·volume·SG·public IP를 Terraform plan과 대조한다.
 2. 임시 `/32` SSH로 접속해 OS·kernel·clock sync·disk를 확인한다.
-3. 선택한 vLLM image의 CUDA 요구사항에 맞는 NVIDIA driver를 고정 설치하고 재부팅한다.
+3. `nvidia-driver-580-server`를 저장소에서 확인한 정확한 package version으로 설치·hold하고 재부팅한다.
+   이미 R580 + DKMS가 정상이면 재설치·재부팅하지 않는다(`30-gpu-runtime` 판정).
 4. `nvidia-smi`로 장치 1개·모델명·driver·가용 VRAM을 기록한다.
 5. 홈 Node와 맞는 containerd/cgroup 설정을 적용한다. Docker를 Kubernetes CRI로 가정하지 않는다.
 6. API server와 같은 minor 저장소를 등록하고, `apt-cache madison`이 보여 준 package version 중
