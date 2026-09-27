@@ -1,7 +1,8 @@
 # vLLM 네트워크·모델 cache 실행 계획
 
-상태: **2026-09-25 구현 전 결정**. 이 문서는 GPU 인스턴스, Kubernetes Node, PVC,
-NetworkPolicy, 모델 다운로드 Job을 아직 만들거나 Sync하지 않는다.
+상태: 2026-09-25 결정, **2026-09-27 모델 cache seed 선언 완성**(`kustomize/overlays/prod/persona-model-cache`,
+Argo Application 없음, 클러스터 미적용). NetworkPolicy·FQDN allowlist·Gateway egress·vLLM Deployment는
+아직 만들거나 Sync하지 않는다.
 
 ## 한 문장 결론
 
@@ -84,7 +85,7 @@ redirect·artifact host를 합성 seed run에서 먼저 기록한 뒤 허용 목
 
 | 파일 | 상태 |
 | --- | --- |
-| `bootstrap/namespaces/persona-inference.yaml` | 작성. 이 파일을 가리키는 Application 없음 |
+| `kustomize/overlays/prod/persona-model-cache/` | Namespace·model cache PVC·seed Job(2026-09-27). **Argo Application 없음** — 첫 seed는 사람이 적용. 예전 `bootstrap/namespaces/persona-inference.yaml`은 소유를 옮기며 지웠다 |
 | `kustomize/base/networkpolicy/persona-inference/network-policy.yaml` | 작성. 정책 5개 |
 | `kustomize/overlays/prod/persona-inference-netpol/` | 작성. **Argo Application 없음** |
 | `kustomize/base/networkpolicy/persona-inference/network-policy-fqdn.yaml.draft` | 배선하지 않음 — 확장자와 `resources` 둘 다에서 제외 |
@@ -135,17 +136,37 @@ redirect·artifact host를 합성 seed run에서 먼저 기록한 뒤 허용 목
 1. GPU Node 조인 후 Cilium·kube-proxy가 custom taint를 tolerate하는지 확인한다.
 2. `persona-gpu-01`용 local-path nodePathMap 변경(Git 선언은 추가됨)을 control-plane에서 반영하고,
    GPU 노드에 고정한 PVC가 `Bound`되는지 확인한다. bootstrap이라 Argo Sync 대상이 아니다.
-3. `persona-inference` Namespace(PSA `restricted`), inference NetworkPolicy, model cache PVC,
-   seed Job 선언을 렌더한다. 이 단계에서 vLLM image의 securityContext를 server dry-run으로
-   검증한다.
-4. `persona-inference`의 allow 정책을 sync-wave 0, default-deny를 wave 1로 둔다. 아직
-   대상 Pod가 없으므로 서비스 통신에는 영향이 없다.
-5. `persona-app-netpol`의 Gateway egress를 수동 Sync한다. 대상 Service가 없어도 기존
+3. control-plane에서 `kubectl apply -k kustomize/overlays/prod/persona-model-cache`로 Namespace·
+   model cache PVC·seed Job을 적용한다(Argo 아님). **inference NetworkPolicy보다 먼저다** — 다운로드
+   호스트를 아직 모르므로, default-deny가 없는 상태의 첫 seed에서 실제 호스트를 관측한다.
+4. 첫 seed 결과를 기록한다: Job `Complete`, 완료 marker(`.persona-seed-complete.json`)와 manifest,
+   PVC bound Node, 그리고 Hubble·DNS 로그로 seed Pod가 질의·접속한 호스트 목록. token·원문은
+   로그에 남기지 않는다. seed가 실패하면 재시도로 덮지 않고 원인(네트워크·용량·무결성)부터 본다.
+5. 관측한 호스트만 `network-policy-fqdn.yaml.draft`의 matchName으로 채우고 배선한다. 그 뒤
+   `persona-inference`의 allow 정책을 sync-wave 0, default-deny를 wave 1로 Sync한다.
+6. `persona-app-netpol`의 Gateway egress를 수동 Sync한다. 대상 Service가 없어도 기존
    DB·embedding 경로를 바꾸지 않는다.
-6. GPU Node에서 seed Job을 한 번 실행한다. 고정 model revision, download 결과 파일 목록,
-   PVC bound Node를 기록한다. token·원문은 로그에 남기지 않는다.
-7. seed Job이 성공한 뒤 local model path를 쓰는 vLLM Deployment·Service·PodMonitor를 Sync한다.
+7. seed 완료를 확인한 뒤 local model path를 쓰는 vLLM Deployment·Service·PodMonitor를 Sync한다.
 8. Prometheus Target `UP`, Gateway→vLLM 허용, 외부 namespace→vLLM 차단을 각각 확인한다.
+
+### 모델 seed 명령과 무결성 기준 (2026-09-27)
+
+- 명령: vLLM image(`vllm/vllm-openai@sha256:51b10427…51b8`, huggingface_hub 1.30.0)에서
+  `python3 /opt/persona-seed/seed_model.py`. 스크립트는 ConfigMap으로 싣는다
+  (`kustomize/base/persona-model-cache/seed_model.py`). GPU·RuntimeClass를 쓰지 않는다.
+- 대상: `Qwen/Qwen3-4B-Instruct-2507` @ `cdbee75f17c01a7cc42f958dc650907174af0554` →
+  `/models/Qwen/Qwen3-4B-Instruct-2507/cdbee75f17c01a7cc42f958dc650907174af0554`.
+- 완료 판정(종료 코드가 아니라 upstream metadata 대조):
+  1. `model_info(files_metadata=True)`의 commit이 고정 revision과 같다.
+  2. staging에 받은 파일 목록이 upstream과 정확히 같다(빠진 파일·남는 파일 모두 실패).
+  3. 파일마다 크기가 같고, LFS 파일은 sha256, 나머지는 git blob sha1이 같다.
+  4. 필수 파일(config·generation_config·tokenizer·tokenizer_config·weight index)이 있고 index가
+     가리키는 shard가 모두 있다.
+  5. 통과한 경우에만 manifest·완료 marker를 쓰고 최종 경로로 rename한다. 이미 완료된 cache는
+     다시 받지 않고 재검증만 하며, 재검증이 실패하면 덮어쓰지 않는다.
+- 2026-09-27 upstream metadata 확인: 파일 13개(LFS 4, 일반 9), 약 7.5 GiB, 필수 파일 모두 존재.
+  작은 파일 두 개(config.json, generation_config.json)로 git blob sha1 대조가 upstream blob id와
+  같음을 확인했다. 전체 다운로드와 실제 Pod 실행은 하지 않았다.
 
 vLLM Deployment보다 정책과 cache seed가 먼저다. cache가 비어 있거나 PodMonitor가 `DOWN`이면
 vLLM이 Ready여도 Gateway 설정을 LLM mode로 바꾸지 않는다.
@@ -159,6 +180,5 @@ vLLM이 Ready여도 Gateway 설정을 LLM mode로 바꾸지 않는다.
 - Gateway와 Prometheus만 vLLM TCP 8000에 성공한다.
 - vLLM·DCGM Target이 `UP`이며, 허용하지 않은 namespace/port 흐름은 Hubble에서 차단된다.
 
-아직 실제값으로 확정하지 않은 항목은 seed Job image·명령, model revision commit, 실제 model
-FQDN 목록, Prometheus Pod label, vLLM image의 writable path·non-root 호환성이다. 이 값은
-render/server dry-run과 첫 합성 seed run으로 확인한 뒤 매니페스트에 고정한다.
+seed Job image·명령·model revision은 선언에 고정했다(위 절). 아직 확정하지 않은 항목은 실제 model
+FQDN 목록(첫 seed에서 관측), Prometheus Pod label, vLLM Deployment의 writable path다.

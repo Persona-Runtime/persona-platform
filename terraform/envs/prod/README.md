@@ -103,53 +103,62 @@ CUDA 12.9.1·NVIDIA driver **R580**(Ubuntu `nvidia-driver-580-server`, 정확한
 Toolkit 1.20.x다. R580 근거와 폐기된 선택(R570)은 [Join 계획 §4](vllm-node-join-plan.md)에 있다.
 모델 commit과 vLLM 이미지 digest, driver/toolkit patch는 실제 배포 전에 다시 확인한다. 한국어 품질·처리량·VRAM은 미측정이다.
 
-## 준비 상태표 (2026-09-25)
+## 준비 상태표 (2026-09-27)
 
 세 구간으로 나눈다. **"준비 완료"·"배포 전 선언 초안"은 선언이나 문서가 있다는 뜻이고 동작
 확인이 아니다.** 특히 "배포 전 선언 초안"은 렌더되지 않거나 미결값이 남은 상태이므로
 기능이 있다고 읽지 않는다.
 
-### 현재 클러스터·계정에 적용된 것
+### 현재 클러스터·계정에 적용된 것 (2026-09-27 실측)
 
 | 항목 | 현재 상태 | 다음 조치 |
 | --- | --- | --- |
-| AWS 리소스 | **미수행** — state 파일이 없고 apply한 적이 없다 | 8항목 검토와 입력 7개 확정 후 사용자가 saved plan으로 apply |
-| GPU quota(서울 G/VT) | **미확인** — 실제 계정에서 읽지 않았다 | 계정에서 현재값 조회, 부족하면 별도 승인으로 증설 |
-| GPU 노드 Kubernetes 조인 | **미수행** | §3 네트워크 행렬 전부 통과 후 사람이 `kubeadm join` |
-| local-path GPU 노드 등록 | **Git 선언 추가, 클러스터 미반영** — `bootstrap/local-path/configmap.yaml`의 `nodePathMap`에 `persona-gpu-01` 추가. Git 선언에는 추가됐지만, bootstrap은 Argo 밖이므로 실제 클러스터 반영과 GPU PVC `Bound` 실측 전까지 완료가 아니다 | control-plane에서 ConfigMap 반영 후 GPU 노드에 고정한 PVC `Bound` 확인 |
+| AWS GPU EC2 | **완료** — `g6.xlarge` 생성, SSH 도달 | — |
+| GPU 노드 Kubernetes 조인 | **완료** — `persona-gpu-01` 조인, `Ready` | — |
+| Tailscale + Cilium Pod 간 통신 | **완료** — 구성, Pod 간 통신 확인. subnet router(`k8s-cp`)는 **현재 SNAT을 켠 상태**다 | SNAT 상태를 바꾸면 행렬을 다시 확인 |
+| NVIDIA RuntimeClass·device plugin | **완료** — `RuntimeClass/nvidia`, device plugin, Node `allocatable`에 `nvidia.com/gpu: 1` | — |
+| CUDA·vLLM image GPU smoke | **완료** — CUDA smoke와 vLLM image(`sha256:51b10427…51b8`) GPU smoke 성공 | — |
+| GPU 관측 | **완료** — DCGM exporter·node-exporter Prometheus Target `UP` | vLLM Target은 vLLM 배포 뒤 |
+| local-path GPU 노드 | **완료** — `persona-gpu-01` nodePathMap 반영, GPU 노드 고정 PVC `Bound`, 쓰기/읽기, Retain 정리 확인 | — |
+| 40Gi 모델 cache PVC·seed Job | **미완료** — 선언만 있다(`kustomize/overlays/prod/persona-model-cache`, Argo 미등록) | control-plane에서 적용해 첫 seed 실행, 완료 marker·manifest 확인 |
+| 다운로드 FQDN 관측·Cilium FQDN allowlist | **미완료** | 첫 seed에서 관측한 호스트만 allowlist로 확정 |
+| `persona-inference` NetworkPolicy Sync | **미완료** — Argo Application 없음 | FQDN allowlist 확정 뒤 |
+| vLLM Deployment·Gateway LLM mode 전환 | **미완료** | seed 완료·정책 Sync 뒤 |
 
 ### 준비 완료·초안 — 선언이나 문서가 있는 것 (동작 확인 아님)
 
 | 항목 | 현재 상태 | 다음 조치 |
 | --- | --- | --- |
 | Terraform 선언 | **확정(2026-09-19)**, 안전 단정 보강 **완료(2026-09-25)** — mock plan 6건 통과(단정 5 → 9개) | 실제 `plan`은 입력 7개 확정 후 |
-| driver/toolkit/vLLM 조합 | image digest·CUDA 12.9.1은 manifest로 확인(2026-09-25). driver는 **R580으로 확정(2026-09-27)**, R570은 폐기 | 설치 직전 driver·toolkit patch를 실제 저장소에서 읽어 기록. R580에서 image 실행은 GPU smoke로 확인 전 |
-| GPU 노출 방식 | **확정(2026-09-25)** — NVIDIA device plugin(노드 1대 전제) | 조인 뒤 pinned device plugin 배포, taint toleration 확인 |
+| driver/toolkit/vLLM 조합 | image digest·CUDA 12.9.1은 manifest로 확인(2026-09-25). driver는 **R580으로 확정(2026-09-27)**, R570은 폐기. R580에서 vLLM image GPU smoke 성공(2026-09-27) | driver·toolkit patch를 바꾸면 조합 smoke를 다시 실행 |
+| GPU 노출 방식 | **확정(2026-09-25)·적용 완료** — NVIDIA device plugin(노드 1대 전제), `nvidia.com/gpu: 1` 확인 | — |
 | Ansible playbook 5계층 | **준비 완료(2026-09-25)** — 작성했으나 **한 번도 실행하지 않았다.** `ansible` 미설치로 syntax-check·lint 미실행 | ansible 설치 환경에서 `--syntax-check`·`ansible-lint` 먼저 통과 |
-| tailnet subnet router 결정 | **확정(2026-09-19)** — `k8s-cp`, SNAT off. 검증 행렬 7행 작성 완료 | 조인 전 행렬 실행(실제 route 승인은 사람이) |
+| tailnet subnet router | `k8s-cp`. 2026-09-19 결정은 SNAT off였지만 **현재 운영 상태는 SNAT on**이다. 검증 행렬 7행 | SNAT 설정을 바꿀 때 행렬을 다시 실행 |
 | `persona-inference` NetworkPolicy | **배포 전 선언 초안(2026-09-25)** — 미적용(Argo Application 없음). 렌더와 validator 검사는 통과 | vLLM 배포 승인 시 Application 추가(`argocd/README.md` 5단계) |
-| model cache PVC·seed Job | **배포 전 선언 초안(2026-09-25)** — `.yaml.draft`로만 존재하고 렌더 대상이 아니다. seed image와 다운로드 명령이 없어 **실제 Job 기능이 아직 없다** | seed image digest와 다운로드·무결성 확인 명령을 정한 뒤 배선 |
-| model 다운로드 FQDN 정책 | **열림** — 배포 전 선언 초안이며 실제 호스트를 관측한 적이 없다. placeholder가 들어 있어 배선하지 않았다 | 격리 환경에서 seed 1회 실행해 호스트 기록 후 allowlist 확정 |
+| model cache PVC·seed Job | **렌더 가능한 선언 완성(2026-09-27)** — `kustomize/overlays/prod/persona-model-cache`(Namespace·40Gi PVC·seed Job). vLLM image로 `snapshot_download` 후 upstream metadata(파일 목록·크기·sha256·git blob sha1) 대조. **Argo Application 없음, 클러스터 미적용** | control-plane에서 적용해 첫 seed 실행, 완료 marker와 다운로드 호스트 기록 |
+| model 다운로드 FQDN 정책 | **열림** — 배포 전 선언 초안이며 실제 호스트를 관측한 적이 없다. placeholder가 들어 있어 배선하지 않았다 | NetworkPolicy 적용 전 첫 seed에서 호스트 기록 후 allowlist 확정 |
 | 0002·0003 복원 재검증 절차 | **준비 완료(2026-09-25)** — `runbooks/material-chunks-restore-verify.md`. 실행하지 않았다 | 사용자가 CP에서 dump·격리 복원 1회 실행 |
 
-### 실제 GPU 생성 뒤에 실행할 것
+### GPU 실행 순서와 상태 (2026-09-27)
 
-| 순서 | 항목 | 성공 판정 |
-| --- | --- | --- |
-| 1 | EC2 apply와 SSH 도달 | 호스트 로그인. **이것은 tailnet·Pod 경로 성공이 아니다** |
-| 2 | Ansible `00`→`10`→`20` | swap 0, sysctl 실효값 1, containerd socket, Tailscale binary |
-| 3 | 사람이 `tailscale up` + route 승인 | tailnet 도달성만. Pod 통신과 무관 |
-| 4 | Ansible `30-gpu-runtime` | `nvidia-smi`로 GPU 정확히 1장 + R580 기준선(요청 patch·DKMS) 판정 healthy |
-| 5 | Ansible `40-join-preflight` | 버전 대조 통과. **Join 성공이 아니다** |
-| 6 | §3 네트워크 행렬 7행 | 행마다 증명 계층을 구분해 기록. Pod↔Pod와 DNS까지 |
-| 7 | 사람이 `kubeadm join` | Node `Ready`, taint 등록 확인 |
-| 8 | device plugin 배포 | Node `allocatable`에 `nvidia.com/gpu: 1` |
-| 9 | local-path nodePathMap 반영(Git 선언은 추가됨, 적용은 control-plane에서 사람이) | GPU 노드에 고정한 PVC `Bound` |
-| 10 | seed Job 1회 | Job `Complete` + 파일 무결성. 실패면 vLLM 시작하지 않음 |
-| 11 | `persona-inference` 정책 Sync | 외부 namespace → vLLM 차단 확인 |
-| 12 | `persona-app` Gateway egress Sync | 기존 DB·embedding 경로 무변경 확인 |
-| 13 | vLLM Deployment Sync | ClusterIP 내부에서 `/health`와 최소 생성 요청 |
-| 14 | Prometheus Target | vLLM·DCGM 각각 `UP` |
+| 순서 | 항목 | 성공 판정 | 상태 |
+| --- | --- | --- | --- |
+| 1 | EC2 apply와 SSH 도달 | 호스트 로그인. **이것은 tailnet·Pod 경로 성공이 아니다** | 완료 |
+| 2 | Ansible `00`→`10`→`20` | swap 0, sysctl 실효값 1, containerd socket, Tailscale binary | 이 문서에 실행 결과 미기록 |
+| 3 | 사람이 `tailscale up` + route 승인 | tailnet 도달성만. Pod 통신과 무관 | 완료(subnet router SNAT on) |
+| 4 | Ansible `30-gpu-runtime` | `nvidia-smi`로 GPU 정확히 1장 + R580 기준선(요청 patch·DKMS) 판정 healthy | 이 문서에 실행 결과 미기록 |
+| 5 | Ansible `40-join-preflight` | 버전 대조 통과. **Join 성공이 아니다** | 이 문서에 실행 결과 미기록 |
+| 6 | §3 네트워크 행렬 | 행마다 증명 계층을 구분해 기록. Pod↔Pod와 DNS까지 | 완료(Tailscale+Cilium Pod 간 통신) |
+| 7 | 사람이 `kubeadm join` | Node `Ready`, taint 등록 확인 | 완료 |
+| 8 | RuntimeClass·device plugin 배포 | Node `allocatable`에 `nvidia.com/gpu: 1` | 완료 |
+| 9 | CUDA·vLLM image GPU smoke | container 안에서 GPU 접근 | 완료 |
+| 10 | DCGM exporter·node-exporter | Prometheus Target `UP` | 완료 |
+| 11 | local-path nodePathMap 반영 | GPU 노드에 고정한 PVC `Bound`, 쓰기/읽기, Retain 정리 | 완료 |
+| 12 | 40Gi 모델 cache PVC·seed Job 1회(inference NetworkPolicy보다 먼저) | Job `Complete` + 완료 marker·manifest, 다운로드 호스트 관측 기록. 실패면 vLLM 시작하지 않음 | 미완료 |
+| 13 | Cilium FQDN allowlist 확정 → `persona-inference` 정책 Sync | 관측한 호스트만 허용, 외부 namespace → vLLM 차단 확인 | 미완료 |
+| 14 | `persona-app` Gateway egress Sync | 기존 DB·embedding 경로 무변경 확인 | 미완료 |
+| 15 | vLLM Deployment Sync | ClusterIP 내부에서 `/health`와 최소 생성 요청 | 미완료 |
+| 16 | Gateway LLM mode 전환과 vLLM Prometheus Target | vLLM Target `UP`, LLM mode 요청 성공 | 미완료 |
 
 ## 근거
 
