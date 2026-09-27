@@ -10,14 +10,5 @@ resources:
   - namespace.yaml
   - model-cache-pvc.yaml
   - model-seed-job.yaml
-# seed 스크립트를 ConfigMap으로 싣는다. 이름 뒤에 내용 hash가 붙어, 스크립트를 고치면 Job이
-# 새 ConfigMap을 가리키게 된다(Job은 불변이라 다시 실행하려면 Job을 지우고 적용한다).
-configMapGenerator:
-  - name: persona-vllm-model-seed-script
-    files:
-      - seed_model.py
-    options:
-      labels:
-        app.kubernetes.io/name: persona-vllm-model-seed
-        app.kubernetes.io/component: model-cache-seed
-        app.kubernetes.io/part-of: persona-platform
+  # seed 스크립트 ConfigMap. 임시 DNS discovery Job과 같은 스크립트를 쓰려고 공용 base로 뺐다.
+  - ../persona-model-seed-script

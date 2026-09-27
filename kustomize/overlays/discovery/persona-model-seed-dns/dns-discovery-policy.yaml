@@ -1,0 +1,46 @@
+# 임시 discovery 정책 — seed discovery Pod의 DNS를 Cilium DNS 프록시로 보이게 하고 외부 HTTPS를 잠깐 연다.
+#
+# 대상은 seed 전용 label(app.kubernetes.io/name: persona-vllm-model-seed)에 discovery label까지 붙은
+# Pod뿐이다. vLLM Pod와 실제 seed Job Pod는 고르지 않는다.
+# - DNS: CoreDNS UDP/TCP 53에 L7 dns matchPattern "*"를 둬야 Cilium DNS 프록시가 질의를 보고
+#   Hubble에 이름이 남는다. 일반 NetworkPolicy DNS 허용만으로는 질의 이름이 기록되지 않는다.
+# - HTTPS: world 443을 **임시로** 허용한다. 호스트를 모르는 상태에서 다운로드 흐름을 끝까지 재현해야
+#   CDN redirect 대상까지 관측된다. 이 규칙을 영구 정책으로 옮기지 않는다 — 영구 정책은 관측한
+#   이름만 toFQDNs matchName으로 적는다.
+# 이 정책이 Pod를 고르는 순간 그 Pod의 나머지 egress는 막힌다(Cilium egress 기본 거부).
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: persona-vllm-model-seed
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: networkpolicy
+    persona.runtime/purpose: dns-discovery
+  annotations:
+    persona.runtime/lifecycle: temporary-remove-after-observation
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: persona-vllm-model-seed
+      persona.runtime/purpose: dns-discovery
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+          rules:
+            dns:
+              - matchPattern: "*"
+    # 임시 외부 HTTPS. 영구 정책으로 승격하지 않는다.
+    - toEntities:
+        - world
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP

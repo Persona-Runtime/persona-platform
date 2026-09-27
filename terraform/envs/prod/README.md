@@ -121,7 +121,7 @@ Toolkit 1.20.x다. R580 근거와 폐기된 선택(R570)은 [Join 계획 §4](vl
 | GPU 관측 | **완료** — DCGM exporter·node-exporter Prometheus Target `UP` | vLLM Target은 vLLM 배포 뒤 |
 | local-path GPU 노드 | **완료** — `persona-gpu-01` nodePathMap 반영, GPU 노드 고정 PVC `Bound`, 쓰기/읽기, Retain 정리 확인 | — |
 | 40Gi 모델 cache PVC·seed Job | **미완료** — 선언만 있다(`kustomize/overlays/prod/persona-model-cache`, Argo 미등록) | control-plane에서 적용해 첫 seed 실행, 완료 marker·manifest 확인 |
-| 다운로드 FQDN 관측·Cilium FQDN allowlist | **미완료** | 첫 seed에서 관측한 호스트만 allowlist로 확정 |
+| 다운로드 FQDN 관측·Cilium FQDN allowlist | **미완료** — 임시 DNS discovery overlay(`kustomize/overlays/discovery/persona-model-seed-dns`) 선언만 있다(미적용) | discovery 적용·관측·제거 후 443 접속으로 이어진 이름만 별도 PR에서 allowlist로 확정 |
 | `persona-inference` NetworkPolicy Sync | **미완료** — Argo Application 없음 | FQDN allowlist 확정 뒤 |
 | vLLM Deployment·Gateway LLM mode 전환 | **미완료** | seed 완료·정책 Sync 뒤 |
 
@@ -136,7 +136,7 @@ Toolkit 1.20.x다. R580 근거와 폐기된 선택(R570)은 [Join 계획 §4](vl
 | tailnet subnet router | `k8s-cp`. 2026-09-19 결정은 SNAT off였지만 **현재 운영 상태는 SNAT on**이다. 검증 행렬 7행 | SNAT 설정을 바꿀 때 행렬을 다시 실행 |
 | `persona-inference` NetworkPolicy | **배포 전 선언 초안(2026-09-25)** — 미적용(Argo Application 없음). 렌더와 validator 검사는 통과 | vLLM 배포 승인 시 Application 추가(`argocd/README.md` 5단계) |
 | model cache PVC·seed Job | **렌더 가능한 선언 완성(2026-09-27)** — `kustomize/overlays/prod/persona-model-cache`(Namespace·40Gi PVC·seed Job). vLLM image로 `snapshot_download` 후 upstream metadata(파일 목록·크기·sha256·git blob sha1) 대조. **Argo Application 없음, 클러스터 미적용** | control-plane에서 적용해 첫 seed 실행, 완료 marker와 다운로드 호스트 기록 |
-| model 다운로드 FQDN 정책 | **열림** — 배포 전 선언 초안이며 실제 호스트를 관측한 적이 없다. placeholder가 들어 있어 배선하지 않았다 | NetworkPolicy 적용 전 첫 seed에서 호스트 기록 후 allowlist 확정 |
+| model 다운로드 FQDN 정책 | **열림** — 배포 전 선언 초안이며 실제 호스트를 관측한 적이 없다. placeholder가 들어 있어 배선하지 않았다 | 임시 DNS discovery로 호스트 기록 후 별도 PR에서 allowlist·default-deny 확정 |
 | 0002·0003 복원 재검증 절차 | **준비 완료(2026-09-25)** — `runbooks/material-chunks-restore-verify.md`. 실행하지 않았다 | 사용자가 CP에서 dump·격리 복원 1회 실행 |
 
 ### GPU 실행 순서와 상태 (2026-09-27)

@@ -142,12 +142,17 @@ redirect·artifact host를 합성 seed run에서 먼저 기록한 뒤 허용 목
 4. 첫 seed 결과를 기록한다: Job `Complete`, 완료 marker(`.persona-seed-complete.json`)와 manifest,
    PVC bound Node, 그리고 Hubble·DNS 로그로 seed Pod가 질의·접속한 호스트 목록. token·원문은
    로그에 남기지 않는다. seed가 실패하면 재시도로 덮지 않고 원인(네트워크·용량·무결성)부터 본다.
-5. 관측한 호스트만 `network-policy-fqdn.yaml.draft`의 matchName으로 채우고 배선한다. 그 뒤
-   `persona-inference`의 allow 정책을 sync-wave 0, default-deny를 wave 1로 Sync한다.
-6. `persona-app-netpol`의 Gateway egress를 수동 Sync한다. 대상 Service가 없어도 기존
+5. 질의 이름을 확실히 남기려고 임시 DNS discovery overlay(`kustomize/overlays/discovery/persona-model-seed-dns`)를 적용한다.
+   seed 전용 label + discovery label Pod에만 CoreDNS UDP/TCP 53 DNS L7 `matchPattern: "*"`와
+   임시 world 443을 주고, 같은 다운로드 흐름을 emptyDir로 다시 실행해 Hubble로 관측한다. 현재 cache를
+   지우거나 seed Job을 다시 실행하지 않는다. 기록 뒤 overlay 전체를 지운다.
+6. 443 접속으로 이어진 질의 이름만 `network-policy-fqdn.yaml.draft`의 matchName 후보로 옮기고, 최소
+   FQDN allowlist와 default-deny를 **별도 PR**로 만든다. 그 뒤 `persona-inference`의 allow 정책을
+   sync-wave 0, default-deny를 wave 1로 Sync한다. 임시 world 443은 영구 정책으로 승격하지 않는다.
+7. `persona-app-netpol`의 Gateway egress를 수동 Sync한다. 대상 Service가 없어도 기존
    DB·embedding 경로를 바꾸지 않는다.
-7. seed 완료를 확인한 뒤 local model path를 쓰는 vLLM Deployment·Service·PodMonitor를 Sync한다.
-8. Prometheus Target `UP`, Gateway→vLLM 허용, 외부 namespace→vLLM 차단을 각각 확인한다.
+8. seed 완료를 확인한 뒤 local model path를 쓰는 vLLM Deployment·Service·PodMonitor를 Sync한다.
+9. Prometheus Target `UP`, Gateway→vLLM 허용, 외부 namespace→vLLM 차단을 각각 확인한다.
 
 ### 모델 seed 명령과 무결성 기준 (2026-09-27)
 

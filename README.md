@@ -135,6 +135,9 @@ bash scripts/test-local-path-bootstrap.sh
 sh scripts/validate-model-cache-manifests.sh
 bash scripts/test-model-cache-manifests.sh
 python3 -m unittest discover -s tests/model-seed
+# 임시 모델 seed DNS discovery(적용 후 관측·제거하는 overlay)
+sh scripts/validate-model-seed-dns-discovery.sh
+bash scripts/test-model-seed-dns-discovery.sh
 ```
 
 렌더·정책 검사 성공은 실제 스케줄링, 무중단 배포, 메트릭 수집 성공의 증거가 아니다.

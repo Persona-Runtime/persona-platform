@@ -20,7 +20,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-SCRIPT = Path(__file__).resolve().parents[2] / "kustomize" / "base" / "persona-model-cache" / "seed_model.py"
+SCRIPT = Path(__file__).resolve().parents[2] / "kustomize" / "base" / "persona-model-seed-script" / "seed_model.py"
 _spec = importlib.util.spec_from_file_location("seed_model", SCRIPT)
 assert _spec is not None and _spec.loader is not None
 seed_model = importlib.util.module_from_spec(_spec)

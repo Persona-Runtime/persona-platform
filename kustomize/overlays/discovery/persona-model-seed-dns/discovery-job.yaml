@@ -1,0 +1,100 @@
+# 임시 DNS discovery Job — 실제 seed와 **같은 다운로드 흐름**을 한 번 더 실행해 질의·접속 호스트를 관측한다.
+#
+# seed Job과 같은 것: image digest, seed_model.py, 모델·revision, GPU 노드 배치(같은 노드 egress 경로),
+# non-root·read-only 권한 조건.
+# 다른 것: 저장 위치가 모델 cache PVC가 아니라 emptyDir(/discovery)다. 현재 cache를 지우거나 덮지 않고,
+# Pod가 끝나면 받은 파일도 사라진다. 그래서 cache 완료 여부와 무관하게 전체 다운로드를 다시 관측한다.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: persona-vllm-model-seed
+  labels:
+    app.kubernetes.io/name: persona-vllm-model-seed
+    app.kubernetes.io/component: model-cache-seed
+    app.kubernetes.io/part-of: persona-platform
+    persona.runtime/purpose: dns-discovery
+spec:
+  # 관측 1회용이다. 실패를 재시도로 덮지 않는다.
+  backoffLimit: 0
+  activeDeadlineSeconds: 7200
+  template:
+    metadata:
+      labels:
+        # seed 전용 label + discovery label. 임시 정책은 두 label을 모두 가진 Pod만 고른다.
+        app.kubernetes.io/name: persona-vllm-model-seed
+        app.kubernetes.io/component: model-cache-seed
+        app.kubernetes.io/part-of: persona-platform
+        persona.runtime/purpose: dns-discovery
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      nodeSelector:
+        personaruntime.xyz/node-pool: gpu
+      tolerations:
+        - key: personaruntime.xyz/dedicated
+          operator: Equal
+          value: gpu-serving
+          effect: NoSchedule
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: seed
+          image: vllm/vllm-openai@sha256:51b1042786c1bb7ab640fd05e4a2b19ae41662959387cc07e1c3106ae2a851b8
+          imagePullPolicy: IfNotPresent
+          command: ["python3", "/opt/persona-seed/seed_model.py"]
+          env:
+            - name: MODEL_ID
+              value: Qwen/Qwen3-4B-Instruct-2507
+            - name: MODEL_REVISION
+              value: cdbee75f17c01a7cc42f958dc650907174af0554
+            # 모델 cache PVC가 아니라 emptyDir. 받은 파일은 Pod와 함께 사라진다.
+            - name: TARGET_DIR
+              value: /discovery
+            - name: HOME
+              value: /tmp
+            - name: HF_HOME
+              value: /tmp/hf-home
+            - name: HF_HUB_DISABLE_TELEMETRY
+              value: "1"
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+              # 약 7.5 GiB를 emptyDir에 받는다. 노드 디스크 여유를 스케줄러가 계산하게 한다.
+              ephemeral-storage: 10Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+              ephemeral-storage: 12Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: discovery
+              mountPath: /discovery
+            - name: tmp
+              mountPath: /tmp
+            - name: seed-script
+              mountPath: /opt/persona-seed
+              readOnly: true
+      volumes:
+        - name: discovery
+          emptyDir:
+            sizeLimit: 12Gi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 1Gi
+        - name: seed-script
+          configMap:
+            name: persona-vllm-model-seed-script
+            defaultMode: 0444

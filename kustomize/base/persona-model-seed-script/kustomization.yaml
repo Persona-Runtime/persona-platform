@@ -1,0 +1,18 @@
+# 모델 seed 스크립트(seed_model.py)를 ConfigMap으로 싣는 공용 base.
+#
+# 모델 cache seed Job(persona-model-cache)과 임시 DNS discovery Job(overlays/discovery/
+# persona-model-seed-dns)이 **같은 스크립트**로 같은 다운로드 흐름을 실행하게 하려고 따로 둔다.
+# 이름 뒤에 내용 hash가 붙어, 스크립트를 고치면 Job이 새 ConfigMap을 가리키게 된다(Job은 불변이라
+# 다시 실행하려면 Job을 지우고 적용한다). discovery overlay는 namePrefix로 이 ConfigMap을 따로
+# 만들어, discovery를 지워도 seed Job용 ConfigMap이 함께 지워지지 않는다.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+configMapGenerator:
+  - name: persona-vllm-model-seed-script
+    files:
+      - seed_model.py
+    options:
+      labels:
+        app.kubernetes.io/name: persona-vllm-model-seed
+        app.kubernetes.io/component: model-cache-seed
+        app.kubernetes.io/part-of: persona-platform
