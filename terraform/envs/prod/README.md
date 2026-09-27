@@ -124,7 +124,7 @@ Toolkit 1.20.x다. R580 근거와 폐기된 선택(R570)은 [Join 계획 §4](vl
 | 다운로드 FQDN 관측·Cilium FQDN allowlist | **미완료 — 이번 범위 밖** | inference 정책(특히 `allow-model-seed-dns`) 적용 뒤 seed를 다시 실행해야 할 때 먼저 만든다 |
 | `persona-inference` NetworkPolicy 적용 | **미완료** — 첫 적용 가능한 선언 완성(2026-09-27). Argo Application 없음, 사람이 `kubectl apply` | [vLLM 네트워크 계획](vllm-network-model-bootstrap-plan.md)의 "첫 적용·복구 절차"(allow 먼저, default-deny 마지막) 뒤 실측 a–d |
 | vLLM Deployment | **완료(운영자 제공, 2026-09-27)** — non-root·read-only 기동, 비스트리밍 추론, control-plane → Service 경유 SSE `[DONE]`, Prometheus Target `UP` | 성능·과부하 실험은 미확인 |
-| Gateway LLM mode 전환 | **미완료** — Gateway 애플리케이션은 mock 유지 | NetworkPolicy 적용·실측 a–d 뒤 |
+| Gateway LLM mode 전환 | **미완료** — llm 모드와 예산 수정 Gateway 이미지(`16caa0c`, `sha256:0ac1ac2a…89ef`) 선언 완료, 클러스터 미적용 | Argo `persona-app` 수동 Sync → SVC-01 외부 요청 1건 → 순차 측정([vLLM 네트워크 계획](vllm-network-model-bootstrap-plan.md)의 "Gateway LLM 전환") |
 
 ### 준비 완료·초안 — 선언이나 문서가 있는 것 (동작 확인 아님)
 

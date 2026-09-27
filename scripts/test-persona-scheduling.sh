@@ -79,11 +79,12 @@ cases = [
   # revision 단위 분산이 사라지면 롤아웃 뒤 새 Pod 둘이 한 워커에 남을 수 있다.
   [GATEWAY_DEPLOYMENT, ["spec", "template", "spec", "topologySpreadConstraints", 0, "matchLabelKeys"], DELETE_KEY, "Gateway topology spread matchLabelKeys는 [pod-template-hash]다"],
   [GATEWAY_DEPLOYMENT, ["spec", "template", "spec", "topologySpreadConstraints", 0, "matchLabelKeys"], ["controller-revision-hash"], "Gateway topology spread matchLabelKeys는 [pod-template-hash]다"],
-  # 채팅 mode·mock profile은 함께 선언한다(ROLL-01B). 조용히 짧은 응답이나 llm 경로로 바뀌는 것을 막는다.
-  [GATEWAY_DEPLOYMENT, GATEWAY_ENV + [{ "name" => "PERSONA_CHAT_INFERENCE_MODE" }, "value"], "llm", "Gateway PERSONA_CHAT_INFERENCE_MODE는 mock으로 명시해야 한다"],
-  [GATEWAY_DEPLOYMENT, GATEWAY_ENV + [{ "name" => "PERSONA_CHAT_INFERENCE_MODE" }], DELETE_KEY, "Gateway PERSONA_CHAT_INFERENCE_MODE는 mock으로 명시해야 한다"],
-  [GATEWAY_DEPLOYMENT, GATEWAY_ENV + [{ "name" => "PERSONA_CHAT_MOCK_PROFILE" }, "value"], "short", "Gateway PERSONA_CHAT_MOCK_PROFILE은 long이어야 한다"],
-  [GATEWAY_DEPLOYMENT, GATEWAY_ENV + [{ "name" => "PERSONA_CHAT_MOCK_PROFILE" }], DELETE_KEY, "Gateway PERSONA_CHAT_MOCK_PROFILE은 long이어야 한다"],
+  # 채팅 mode와 vLLM 연결값은 함께 선언한다. 조용히 mock으로 돌아가거나 연결값이 비는 것을 막는다.
+  [GATEWAY_DEPLOYMENT, GATEWAY_ENV + [{ "name" => "PERSONA_CHAT_INFERENCE_MODE" }, "value"], "mock", "Gateway PERSONA_CHAT_INFERENCE_MODE는 llm으로 명시해야 한다"],
+  [GATEWAY_DEPLOYMENT, GATEWAY_ENV + [{ "name" => "PERSONA_CHAT_INFERENCE_MODE" }], DELETE_KEY, "Gateway PERSONA_CHAT_INFERENCE_MODE는 llm으로 명시해야 한다"],
+  [GATEWAY_DEPLOYMENT, GATEWAY_ENV + [{ "name" => "PERSONA_VLLM_BASE_URL" }], DELETE_KEY, "Gateway PERSONA_VLLM_BASE_URL은 persona-vllm Service"],
+  [GATEWAY_DEPLOYMENT, GATEWAY_ENV + [{ "name" => "PERSONA_VLLM_BASE_URL" }, "value"], "http://persona-vllm.persona-inference.svc.cluster.local:8000/v1", "Gateway PERSONA_VLLM_BASE_URL은 persona-vllm Service"],
+  [GATEWAY_DEPLOYMENT, GATEWAY_ENV + [{ "name" => "PERSONA_VLLM_MODEL" }, "value"], "Qwen/Qwen3-4B", "Gateway PERSONA_VLLM_MODEL은 vLLM --served-model-name과 같아야 한다"],
   # 적용이 끝나 history/로 옮긴 Job을 다시 연결하면 Job 수는 1이라 개수 검사를 통과한다.
   # 경로 검사가 막는지 본다(완료된 0005 Job을 되살리는 경로).
   ["kustomize/base/persona-migrate/kustomization.yaml", ["resources"], ["history/job-0005-generation-lease.yaml"], "history/의 과거 선언을 활성 렌더에 연결했다"],

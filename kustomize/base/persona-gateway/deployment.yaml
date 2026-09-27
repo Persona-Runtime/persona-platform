@@ -94,18 +94,18 @@ spec:
       containers:
         - name: gateway
           # 검증된 linux/amd64 child manifest. tag, latest, parent OCI index digest로 바꾸지 않는다.
-          # 0005_generation_lease migration이 끝난 뒤 쓰는 최종 Gateway 이미지다(persona-gateway
-          # PR #20 머지 뒤 게시: 0005 전용 + mock workload profile). 0005만 허용하므로 0004 DB에서는
-          # readyz가 503이다. digest를 바꿀 때는 scripts/validate-persona-app-manifests.sh의
-          # GATEWAY_IMAGE도 함께 바꾼다.
+          # persona-gateway PR #21 머지(16caa0c) 뒤 게시한 이미지다: 0005 전용 + llm 모드 prompt
+          # 예산 BUDGET_4096. 0005만 허용하므로 0004 DB에서는 readyz가 503이다. digest를 바꿀 때는
+          # scripts/validate-persona-app-manifests.sh의 GATEWAY_IMAGE도 함께 바꾼다.
           #
           # 롤백 대상은 돌아갈 이미지가 현재 DB revision을 지원하는지가 정한다
-          # (persona-gateway/docs/migrations.md). DB가 0005인 동안의 롤백 목적지는 bridge 이미지
-          # sha256:26dcf9e0…(소스 6fe5200, 0004·0005 허용, lease 인식)다 — 직전 기능 이미지
-          # sha256:001d3f57…dccfe(0004 전용)는 0005에서 Ready가 되지 않는다. 0005 downgrade는
-          # lease를 인식하는 Gateway가 실행 중일 때 하지 않는다
-          # (persona-gateway api/generation-ownership-lease-design.md 3절).
-          image: ghcr.io/persona-runtime/persona-minimal-api@sha256:5438d8a80acf414704242901a428c7ef3154bb5496709d3d2d7bea1e9e63f436
+          # (persona-gateway/docs/migrations.md). llm 전환을 되돌릴 때는 직전 이미지
+          # sha256:5438d8a8…(PR #20, 0005 전용)와 mock 모드를 **함께** 되돌린다 — 그 이미지는 llm
+          # 모드에서도 BUDGET_8192를 써 vLLM 4096 한도를 넘기 쉽다. 그보다 앞의 롤백 목적지는 bridge
+          # 이미지 sha256:26dcf9e0…(소스 6fe5200, 0004·0005 허용, lease 인식)이고, 0004 전용
+          # sha256:001d3f57…dccfe는 0005에서 Ready가 되지 않는다. 0005 downgrade는 lease를 인식하는
+          # Gateway가 실행 중일 때 하지 않는다(persona-gateway api/generation-ownership-lease-design.md 3절).
+          image: ghcr.io/persona-runtime/persona-minimal-api@sha256:0ac1ac2aa432c9fdcfb6cb516e5863ed7d21ece3895dd3070ecb985c76ff89ef
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
@@ -135,17 +135,23 @@ spec:
             # port-forward 검증은 이 값을 켜도 Bearer로 그대로 된다.
             - name: PERSONA_FORWARD_AUTH_ENABLED
               value: "true"
-            # 채팅은 모델을 부르지 않는 mock 모드로 돈다. 기본값(mock)이나 runtime Secret에 기대지
+            # 채팅은 persona-inference의 vLLM으로 답한다. 기본값(mock)이나 runtime Secret에 기대지
             # 않고 여기서 명시한다 — 명시 env는 envFrom보다 우선하므로 Secret에 같은 키가 있어도
-            # 이 값이 적용된다. llm으로 바꾸려면 vLLM 설정이 함께 필요하다(별도 변경).
+            # 이 값이 적용된다. llm 모드에서는 mock profile(PERSONA_CHAT_MOCK_PROFILE)을 읽지 않아
+            # 두지 않는다. mock으로 되돌릴 때는 이 변경을 revert한다(ROLL-01B용 long profile 복원).
+            #
+            # llm 모드는 prompt 입력 예산을 BUDGET_4096으로 고르는 위 이미지(persona-gateway PR #21)가
+            # 필요하다. vLLM이 --max-model-len 4096으로 뜨기 때문이다. BUDGET_4096은 글자 수 상한이라
+            # 4096 토큰을 보장하지 않고, 넘으면 해당 생성이 upstream_status_400으로 실패한다.
             - name: PERSONA_CHAT_INFERENCE_MODE
-              value: mock
-            # Hard Node Failure 실험(persona-ops-lab ROLL-01B)용 응답 모양. long은 80개 고정 합성
-            # 조각을 0.5초 간격으로 보내는 약 40초짜리 SSE다 — 노드가 죽는 순간에도 스트림이 열려
-            # 있게 하려는 값이며 LLM token·GPU 성능 수치가 아니다. 요청으로는 바꿀 수 없고, 이
-            # 값을 바꾸는 것 자체가 Gateway 롤아웃이다.
-            - name: PERSONA_CHAT_MOCK_PROFILE
-              value: long
+              value: llm
+            # vLLM Service(persona-inference/persona-vllm:8000). /v1 앞까지 적는다 — adapter가
+            # /v1/chat/completions를 붙인다. Gateway → vLLM egress는 allow-gateway가 연다.
+            - name: PERSONA_VLLM_BASE_URL
+              value: http://persona-vllm.persona-inference.svc.cluster.local:8000
+            # vLLM --served-model-name과 같아야 한다. 다르면 vLLM이 404를 돌려준다.
+            - name: PERSONA_VLLM_MODEL
+              value: Qwen/Qwen3-4B-Instruct-2507
           envFrom:
             # DATABASE_URL(runtime 계정)과 정적 토큰·서명 키가 들어 있다.
             # migrator 자격증명은 여기 없다 — migration Job만 그것을 본다.

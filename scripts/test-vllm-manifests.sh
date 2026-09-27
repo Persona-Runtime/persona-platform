@@ -72,7 +72,9 @@ cases = [
   [PM, ["spec", "selector", "matchLabels", "app.kubernetes.io/name"], "persona-vllm-model-seed", "PodMonitor selector는 Pod label과 같다"],
   # 경계
   ["argocd/persona-app.yaml", ["spec", "source", "path"], "kustomize/overlays/prod/persona-vllm", "persona-vllm overlay를 참조한다"],
-  ["kustomize/base/persona-gateway/deployment.yaml", C + ["env", { "name" => "PERSONA_CHAT_INFERENCE_MODE" }, "value"], "llm", "Gateway PERSONA_CHAT_INFERENCE_MODE는 mock 그대로다"],
+  ["kustomize/base/persona-gateway/deployment.yaml", C + ["env", { "name" => "PERSONA_CHAT_INFERENCE_MODE" }, "value"], "mock", "Gateway PERSONA_CHAT_INFERENCE_MODE는 llm이다"],
+  ["kustomize/base/persona-gateway/deployment.yaml", C + ["env", { "name" => "PERSONA_VLLM_BASE_URL" }, "value"], "http://persona-vllm.persona-inference.svc.cluster.local:8080", "Gateway PERSONA_VLLM_BASE_URL이 vLLM Service와 다르다"],
+  ["kustomize/base/persona-gateway/deployment.yaml", C + ["env", { "name" => "PERSONA_VLLM_MODEL" }, "value"], "qwen3-4b", "Gateway PERSONA_VLLM_MODEL이 vLLM --served-model-name"],
 ]
 
 lookup = lambda do |node, key|
