@@ -43,9 +43,9 @@ cache는 `persona-vllm-model-cache` PVC로 둔다.
 - local-path reclaim policy가 `Retain`이므로 Pod 재시작·EC2 stop/start에는 cache가 남을 수
   있다. EC2 terminate나 PVC/PV 수동 정리 뒤에는 다시 seed해야 한다.
 
-현재 local-path ConfigMap은 `k8s-worker1`, `k8s-worker2`만 허용한다. GPU Node 조인 뒤
-`persona-gpu-01`과 `/opt/local-path-provisioner`를 추가하는 별도 GitOps 변경이 필요하다.
-이 변경 없이는 PVC provisioning이 의도적으로 실패한다. hostPath를 vLLM Pod에 직접 mount해
+local-path ConfigMap의 `nodePathMap`에 `persona-gpu-01` → `/opt/local-path-provisioner`를
+추가했다(`bootstrap/local-path/configmap.yaml`). Git 선언에는 추가됐지만, bootstrap은 Argo 밖이므로 실제 클러스터 반영과 GPU PVC `Bound` 실측 전까지 완료가 아니다. 목록 밖 노드(control-plane 등)는
+계속 provisioning이 실패하도록 기본 경로를 두지 않는다. hostPath를 vLLM Pod에 직접 mount해
 우회하지 않는다.
 
 ## 3. 고정 label 계약
@@ -133,7 +133,8 @@ redirect·artifact host를 합성 seed run에서 먼저 기록한 뒤 허용 목
 ## 5. 배포·Sync 순서
 
 1. GPU Node 조인 후 Cilium·kube-proxy가 custom taint를 tolerate하는지 확인한다.
-2. `persona-gpu-01`용 local-path nodePathMap 변경을 별도 검토·Sync한다.
+2. `persona-gpu-01`용 local-path nodePathMap 변경(Git 선언은 추가됨)을 control-plane에서 반영하고,
+   GPU 노드에 고정한 PVC가 `Bound`되는지 확인한다. bootstrap이라 Argo Sync 대상이 아니다.
 3. `persona-inference` Namespace(PSA `restricted`), inference NetworkPolicy, model cache PVC,
    seed Job 선언을 렌더한다. 이 단계에서 vLLM image의 securityContext를 server dry-run으로
    검증한다.
