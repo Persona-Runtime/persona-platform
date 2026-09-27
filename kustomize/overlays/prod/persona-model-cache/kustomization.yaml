@@ -1,0 +1,10 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# persona-inference Namespace, vLLM 모델 cache PVC, 모델 seed Job.
+#
+# **이 overlay를 가리키는 Argo Application이 없다.** 첫 seed는 사람이 control-plane에서
+# `kubectl apply -k`로 적용하고 Job 결과·완료 marker·다운로드 호스트를 기록한다.
+# scripts/validate-model-cache-manifests.sh가 Argo 선언의 이 경로 참조를 막는다.
+namespace: persona-inference
+resources:
+  - ../../../base/persona-model-cache

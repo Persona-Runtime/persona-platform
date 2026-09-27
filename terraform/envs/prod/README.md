@@ -128,7 +128,7 @@ Toolkit 1.20.x다. R580 근거와 폐기된 선택(R570)은 [Join 계획 §4](vl
 | Ansible playbook 5계층 | **준비 완료(2026-09-25)** — 작성했으나 **한 번도 실행하지 않았다.** `ansible` 미설치로 syntax-check·lint 미실행 | ansible 설치 환경에서 `--syntax-check`·`ansible-lint` 먼저 통과 |
 | tailnet subnet router 결정 | **확정(2026-09-19)** — `k8s-cp`, SNAT off. 검증 행렬 7행 작성 완료 | 조인 전 행렬 실행(실제 route 승인은 사람이) |
 | `persona-inference` NetworkPolicy | **배포 전 선언 초안(2026-09-25)** — 미적용(Argo Application 없음). 렌더와 validator 검사는 통과 | vLLM 배포 승인 시 Application 추가(`argocd/README.md` 5단계) |
-| model cache PVC·seed Job | **배포 전 선언 초안(2026-09-25)** — `.yaml.draft`로만 존재하고 렌더 대상이 아니다. seed image와 다운로드 명령이 없어 **실제 Job 기능이 아직 없다** | seed image digest와 다운로드·무결성 확인 명령을 정한 뒤 배선 |
+| model cache PVC·seed Job | **렌더 가능한 선언 완성(2026-09-27)** — `kustomize/overlays/prod/persona-model-cache`(Namespace·40Gi PVC·seed Job). vLLM image로 `snapshot_download` 후 upstream metadata(파일 목록·크기·sha256·git blob sha1) 대조. **Argo Application 없음, 클러스터 미적용** | control-plane에서 적용해 첫 seed 실행, 완료 marker와 다운로드 호스트 기록 |
 | model 다운로드 FQDN 정책 | **열림** — 배포 전 선언 초안이며 실제 호스트를 관측한 적이 없다. placeholder가 들어 있어 배선하지 않았다 | 격리 환경에서 seed 1회 실행해 호스트 기록 후 allowlist 확정 |
 | 0002·0003 복원 재검증 절차 | **준비 완료(2026-09-25)** — `runbooks/material-chunks-restore-verify.md`. 실행하지 않았다 | 사용자가 CP에서 dump·격리 복원 1회 실행 |
 
@@ -145,7 +145,7 @@ Toolkit 1.20.x다. R580 근거와 폐기된 선택(R570)은 [Join 계획 §4](vl
 | 7 | 사람이 `kubeadm join` | Node `Ready`, taint 등록 확인 |
 | 8 | device plugin 배포 | Node `allocatable`에 `nvidia.com/gpu: 1` |
 | 9 | local-path nodePathMap 반영(Git 선언은 추가됨, 적용은 control-plane에서 사람이) | GPU 노드에 고정한 PVC `Bound` |
-| 10 | seed Job 1회 | Job `Complete` + 파일 무결성. 실패면 vLLM 시작하지 않음 |
+| 10 | seed Job 1회(inference NetworkPolicy보다 먼저) | Job `Complete` + 완료 marker·manifest, 다운로드 호스트 관측 기록. 실패면 vLLM 시작하지 않음 |
 | 11 | `persona-inference` 정책 Sync | 외부 namespace → vLLM 차단 확인 |
 | 12 | `persona-app` Gateway egress Sync | 기존 DB·embedding 경로 무변경 확인 |
 | 13 | vLLM Deployment Sync | ClusterIP 내부에서 `/health`와 최소 생성 요청 |

@@ -131,6 +131,10 @@ sh scripts/validate-gpu-observability-manifests.sh
 # bootstrap local-path(Argo 밖) 허용 노드·StorageClass 기준 — 파일만 읽는다
 sh scripts/validate-local-path-bootstrap.sh
 bash scripts/test-local-path-bootstrap.sh
+# 모델 cache seed(persona-inference, Argo 미등록)
+sh scripts/validate-model-cache-manifests.sh
+bash scripts/test-model-cache-manifests.sh
+python3 -m unittest discover -s tests/model-seed
 ```
 
 렌더·정책 검사 성공은 실제 스케줄링, 무중단 배포, 메트릭 수집 성공의 증거가 아니다.

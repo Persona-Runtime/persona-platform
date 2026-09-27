@@ -16,7 +16,8 @@
 
 **`persona-gpu-01`은 vLLM 모델 캐시용으로 명시 허용했다.** Git 선언에는 추가됐지만, bootstrap은 Argo 밖이므로 실제 클러스터 반영과 GPU PVC `Bound` 실측 전까지 완료가 아니다. 반영은 control-plane에서
 사람이 이 ConfigMap을 적용하는 것이고, 확인 기준은 GPU 노드에 고정한 PVC가 `Bound`되는
-것이다. 모델 캐시 PVC·seed Job·vLLM·NetworkPolicy는 아직 배선하지 않았다.
+것이다. 모델 캐시 PVC·seed Job은 `kustomize/overlays/prod/persona-model-cache`에 선언했지만 적용하지
+않았고, vLLM·NetworkPolicy는 아직 배선하지 않았다.
 
 로컬 정적 검사(클러스터를 읽지 않는다):
 
