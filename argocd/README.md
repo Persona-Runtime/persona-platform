@@ -29,6 +29,7 @@ chart version을 고정한다. Sync 전에는 `scripts/argo-preflight.sh <app>`�
 | `monitoring-stack` | (Helm `kube-prometheus-stack`) | `monitoring` | Prometheus·Grafana | 없음(유일하게 `syncOptions: [ServerSideApply=true]` — CRD가 커서, `automated`는 아님) |
 | `gpu-runtime` | `kustomize/overlays/prod/gpu-runtime` | `kube-system` | `RuntimeClass/nvidia`만 | `persona-gpu-01` Ready, `node-pool=gpu`, GPU 전용 taint 확인 |
 | `dcgm-exporter` | (Helm `dcgm-exporter`) | `monitoring` | GPU 전용 DCGM exporter DaemonSet·Service·ServiceMonitor | `gpu-runtime` Sync 뒤 `RuntimeClass/nvidia` 존재, monitoring Prometheus Available, ServiceMonitor CRD 존재 |
+| `nvidia-device-plugin` | `kustomize/overlays/prod/nvidia-device-plugin` | `kube-system` | GPU capacity를 광고하는 NVIDIA device plugin DaemonSet만 | `RuntimeClass/nvidia`, GPU Node Ready, DCGM exporter available=1 |
 
 ## Argo 밖(수동 `kubectl apply -k`/de-registered)
 

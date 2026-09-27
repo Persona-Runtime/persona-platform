@@ -1,0 +1,16 @@
+# GPU capacity를 kubelet에 광고하는 DaemonSet만 관리한다. GPU Operator·Feature Discovery·
+# time-slicing은 이 Application 범위 밖이며, 최초 등록과 이후 Sync는 모두 수동이다.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: nvidia-device-plugin
+  namespace: argocd
+spec:
+  project: default
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kube-system
+  source:
+    repoURL: https://github.com/Persona-Runtime/persona-platform.git
+    targetRevision: develop
+    path: kustomize/overlays/prod/nvidia-device-plugin
