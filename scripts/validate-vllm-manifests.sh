@@ -185,5 +185,5 @@ Dir.glob(File.join(argocd_dir, "**", "*.{yaml,yml}")).sort.each do |path|
   raise "[안전] Argo 선언이 persona-vllm overlay를 참조한다: #{File.basename(path)}" if File.read(path).include?("overlays/prod/persona-vllm")
 end
 
-puts "vLLM overlay 렌더와 서빙 계약 검사 통과(선언만, 클러스터 기동 미실행, Argo 미등록)"
+puts "vLLM overlay 렌더와 서빙 계약 검사 통과(정적 검사만, 클러스터 미접근, Argo 미등록)"
 RUBY

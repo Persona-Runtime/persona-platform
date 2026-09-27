@@ -5,8 +5,10 @@
 # vLLM은 API와 /metrics를 같은 8000(http)에서 낸다. 수집하는 것은 vLLM 자체 지표(요청·토큰·KV
 # cache 등)뿐이다. GPU 장치 지표는 DCGM exporter가 이미 수집하므로 GPU exporter를 새로 두지 않는다.
 #
-# 이 선언만으로는 수집되지 않을 수 있다. persona-inference에 default-deny가 적용되면
-# allow-vllm-metrics(monitoring → 8000)가 함께 있어야 한다(NetworkPolicy는 아직 미적용).
+# 이 선언만으로는 수집되지 않을 수 있다. vLLM Ingress를 고르는 정책(allow-vllm-gateway 등)이
+# 하나라도 적용되면 vLLM 인입이 격리되므로, allow-vllm-metrics(monitoring의 Prometheus Pod → 8000)가
+# 함께 있어야 한다(NetworkPolicy는 아직 미적용). 그 정책은 Prometheus Pod label로 좁혀 있어, 차트
+# 업그레이드로 label이 바뀌면 이 Target이 DOWN이 된다.
 apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
 metadata:

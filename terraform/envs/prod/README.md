@@ -118,12 +118,13 @@ Toolkit 1.20.x다. R580 근거와 폐기된 선택(R570)은 [Join 계획 §4](vl
 | Tailscale + Cilium Pod 간 통신 | **완료** — 구성, Pod 간 통신 확인. subnet router(`k8s-cp`)는 **현재 SNAT을 켠 상태**다 | SNAT 상태를 바꾸면 행렬을 다시 확인 |
 | NVIDIA RuntimeClass·device plugin | **완료** — `RuntimeClass/nvidia`, device plugin, Node `allocatable`에 `nvidia.com/gpu: 1` | — |
 | CUDA·vLLM image GPU smoke | **완료** — CUDA smoke와 vLLM image(`sha256:51b10427…51b8`) GPU smoke 성공 | — |
-| GPU 관측 | **완료** — DCGM exporter·node-exporter Prometheus Target `UP` | vLLM Target은 vLLM 배포 뒤 |
+| GPU 관측 | **완료** — DCGM exporter·node-exporter Prometheus Target `UP`. vLLM Target `UP`(운영자 제공, 2026-09-27) | NetworkPolicy 적용 뒤 vLLM Target `UP` 유지 확인 |
 | local-path GPU 노드 | **완료** — `persona-gpu-01` nodePathMap 반영, GPU 노드 고정 PVC `Bound`, 쓰기/읽기, Retain 정리 확인 | — |
-| 40Gi 모델 cache PVC·seed Job | **미완료** — 선언만 있다(`kustomize/overlays/prod/persona-model-cache`, Argo 미등록) | control-plane에서 적용해 첫 seed 실행, 완료 marker·manifest 확인 |
-| 다운로드 FQDN 관측·Cilium FQDN allowlist | **미완료** | 첫 seed에서 관측한 호스트만 allowlist로 확정 |
-| `persona-inference` NetworkPolicy Sync | **미완료** — Argo Application 없음 | FQDN allowlist 확정 뒤 |
-| vLLM Deployment·Gateway LLM mode 전환 | **미완료** — vLLM Deployment·Service·PodMonitor는 선언·정적 검사 완료(`kustomize/overlays/prod/persona-vllm`), **클러스터 기동 미실행**. Gateway는 mock 유지 | control-plane에서 vLLM 적용·`/health`·최소 생성 요청 확인 뒤 Gateway 전환 |
+| 40Gi 모델 cache PVC·seed Job | **완료(운영자 보고, 2026-09-27)** — 첫 seed 완료. 완료 marker·manifest 관측 기록은 이 문서에 없다 | PVC·Job을 바꾸거나 다시 실행하지 않는다 |
+| 다운로드 FQDN 관측·Cilium FQDN allowlist | **미완료 — 이번 범위 밖** | inference 정책(특히 `allow-model-seed-dns`) 적용 뒤 seed를 다시 실행해야 할 때 먼저 만든다 |
+| `persona-inference` NetworkPolicy 적용 | **미완료** — 첫 적용 가능한 선언 완성(2026-09-27). Argo Application 없음, 사람이 `kubectl apply` | [vLLM 네트워크 계획](vllm-network-model-bootstrap-plan.md)의 "첫 적용·복구 절차"(allow 먼저, default-deny 마지막) 뒤 실측 a–d |
+| vLLM Deployment | **완료(운영자 제공, 2026-09-27)** — non-root·read-only 기동, 비스트리밍 추론, control-plane → Service 경유 SSE `[DONE]`, Prometheus Target `UP` | 성능·과부하 실험은 미확인 |
+| Gateway LLM mode 전환 | **미완료** — Gateway 애플리케이션은 mock 유지 | NetworkPolicy 적용·실측 a–d 뒤 |
 
 ### 준비 완료·초안 — 선언이나 문서가 있는 것 (동작 확인 아님)
 
@@ -134,9 +135,9 @@ Toolkit 1.20.x다. R580 근거와 폐기된 선택(R570)은 [Join 계획 §4](vl
 | GPU 노출 방식 | **확정(2026-09-25)·적용 완료** — NVIDIA device plugin(노드 1대 전제), `nvidia.com/gpu: 1` 확인 | — |
 | Ansible playbook 5계층 | **준비 완료(2026-09-25)** — 작성했으나 **한 번도 실행하지 않았다.** `ansible` 미설치로 syntax-check·lint 미실행 | ansible 설치 환경에서 `--syntax-check`·`ansible-lint` 먼저 통과 |
 | tailnet subnet router | `k8s-cp`. 2026-09-19 결정은 SNAT off였지만 **현재 운영 상태는 SNAT on**이다. 검증 행렬 7행 | SNAT 설정을 바꿀 때 행렬을 다시 실행 |
-| `persona-inference` NetworkPolicy | **배포 전 선언 초안(2026-09-25)** — 미적용(Argo Application 없음). 렌더와 validator 검사는 통과 | vLLM 배포 승인 시 Application 추가(`argocd/README.md` 5단계) |
-| model cache PVC·seed Job | **렌더 가능한 선언 완성(2026-09-27)** — `kustomize/overlays/prod/persona-model-cache`(Namespace·40Gi PVC·seed Job). vLLM image로 `snapshot_download` 후 upstream metadata(파일 목록·크기·sha256·git blob sha1) 대조. **Argo Application 없음, 클러스터 미적용** | control-plane에서 적용해 첫 seed 실행, 완료 marker와 다운로드 호스트 기록 |
-| model 다운로드 FQDN 정책 | **열림** — 배포 전 선언 초안이며 실제 호스트를 관측한 적이 없다. placeholder가 들어 있어 배선하지 않았다 | NetworkPolicy 적용 전 첫 seed에서 호스트 기록 후 allowlist 확정 |
+| `persona-inference` NetworkPolicy·Gateway → vLLM egress | **첫 적용 가능한 선언(2026-09-27)** — Gateway egress는 `persona-inference` ns AND vLLM Pod TCP 8000, metrics는 `monitoring` ns AND Prometheus Pod. 적용 묶음 구분용 `apply-phase` label. validator·음성 테스트 통과, **클러스터 미적용** | inference는 수동 apply(Argo Application 추가 안 함), Gateway egress는 `persona-app-netpol` Argo Sync |
+| model cache PVC·seed Job | **첫 seed 완료(운영자 보고, 2026-09-27)** — `kustomize/overlays/prod/persona-model-cache`(Namespace·40Gi PVC·seed Job). vLLM image로 `snapshot_download` 후 upstream metadata(파일 목록·크기·sha256·git blob sha1) 대조. **Argo Application 없음** | 바꾸거나 다시 실행하지 않는다 |
+| model 다운로드 FQDN 정책 | **열림 — 이번 범위 밖** — 실제 호스트 관측 기록이 없고 placeholder가 들어 있어 배선하지 않았다 | seed 재실행이 필요할 때 호스트 관측 후 allowlist 확정(`allow-model-seed-dns`만 적용돼도 이것 없이 seed가 외부에 닿지 못한다) |
 | 0002·0003 복원 재검증 절차 | **준비 완료(2026-09-25)** — `runbooks/material-chunks-restore-verify.md`. 실행하지 않았다 | 사용자가 CP에서 dump·격리 복원 1회 실행 |
 
 ### GPU 실행 순서와 상태 (2026-09-27)
@@ -154,11 +155,11 @@ Toolkit 1.20.x다. R580 근거와 폐기된 선택(R570)은 [Join 계획 §4](vl
 | 9 | CUDA·vLLM image GPU smoke | container 안에서 GPU 접근 | 완료 |
 | 10 | DCGM exporter·node-exporter | Prometheus Target `UP` | 완료 |
 | 11 | local-path nodePathMap 반영 | GPU 노드에 고정한 PVC `Bound`, 쓰기/읽기, Retain 정리 | 완료 |
-| 12 | 40Gi 모델 cache PVC·seed Job 1회(inference NetworkPolicy보다 먼저) | Job `Complete` + 완료 marker·manifest, 다운로드 호스트 관측 기록. 실패면 vLLM 시작하지 않음 | 미완료 |
-| 13 | Cilium FQDN allowlist 확정 → `persona-inference` 정책 Sync | 관측한 호스트만 허용, 외부 namespace → vLLM 차단 확인 | 미완료 |
-| 14 | `persona-app` Gateway egress Sync | 기존 DB·embedding 경로 무변경 확인 | 미완료 |
-| 15 | vLLM Deployment 적용(선언·정적 검사 완료) | ClusterIP 내부에서 `/health`와 최소 생성 요청 | 미완료(클러스터 기동 미실행) |
-| 16 | Gateway LLM mode 전환과 vLLM Prometheus Target | vLLM Target `UP`, LLM mode 요청 성공 | 미완료 |
+| 12 | 40Gi 모델 cache PVC·seed Job 1회(inference NetworkPolicy보다 먼저) | Job `Complete` + 완료 marker·manifest, 다운로드 호스트 관측 기록. 실패면 vLLM 시작하지 않음 | 완료(운영자 보고, 기록 미첨부) |
+| 13 | `persona-inference` 정책 수동 적용(적용 전 목록 보관 → allow 4개 → 확인 → default-deny → 재확인). FQDN allowlist는 범위 밖 | 단계마다 실측 a–d: Gateway→vLLM 허용, Prometheus Target `UP`, 일반 Pod→vLLM 차단, 추론 정상. 실패하면 default-deny로 진행하지 않음 | 미완료 |
+| 14 | `persona-app-netpol` Argo Sync(Gateway → vLLM egress) | 기존 DB·embedding·DNS 경로 무변경 확인 | 미완료 |
+| 15 | vLLM Deployment 적용 | ClusterIP 내부에서 `/health`와 최소 생성 요청 | 완료(운영자 제공: 비스트리밍 추론, Service 경유 SSE `[DONE]`) |
+| 16 | Gateway LLM mode 전환 | NetworkPolicy 적용 뒤 vLLM Target `UP` 유지, Gateway LLM mode 요청 성공 | 미완료(vLLM Target `UP`은 정책 적용 전 운영자 제공으로 확인) |
 
 ## 근거
 

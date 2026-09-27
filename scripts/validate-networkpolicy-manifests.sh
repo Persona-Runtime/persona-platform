@@ -32,8 +32,8 @@ kubectl kustomize "$repo_dir/kustomize/overlays/prod/persona-app-netpol"      > 
 kubectl kustomize "$repo_dir/kustomize/overlays/prod/persona-db-netpol"       > "$data_file"
 kubectl kustomize "$repo_dir/kustomize/overlays/prod/persona-edge"            > "$edge_file"
 kubectl kustomize "$repo_dir/kustomize/overlays/prod/traefik-networkpolicy"   > "$traefik_file"
-# persona-inference는 아직 Argo Application이 없는 미적용 선언이다. 적용 전에도 렌더와
-# 정책 모양을 검사해, 나중에 Application을 붙일 때 이 검사를 새로 만들지 않게 한다.
+# persona-inference는 Argo Application 없이 사람이 kubectl로 적용한다. Argo가 Sync 전에
+# 막아 주지 않으므로 적용 전에 이 검사로 렌더와 정책 모양을 확인한다.
 kubectl kustomize "$repo_dir/kustomize/overlays/prod/persona-inference-netpol" > "$inference_file"
 
 ruby -ryaml - "$app_file" "$data_file" "$edge_file" "$traefik_file" "$inference_file" <<'RUBY'
@@ -84,6 +84,17 @@ def rule_ports(rule)
   (rule["ports"] || []).map { |p| [p["protocol"], p["port"]] }
 end
 
+# 규칙의 peer가 정확히 하나이고, 그 peer 하나에 namespaceSelector와 podSelector가 **함께**
+# 있어야 "이 namespace의 이 Pod"(AND)다. 두 selector를 별도 peer로 나누면 OR가 되어 그
+# namespace 전체 또는 정책이 있는 namespace의 같은 라벨 Pod가 허용된다. 그래서 namespace
+# 이름·Pod 라벨을 따로 모아 비교하지 않고 peer 전체를 기대값과 통째로 비교한다.
+def check_single_and_peer(rule, namespace, pod_labels, context)
+  peers = rule["from"] || rule["to"] || []
+  expected = { "namespaceSelector" => { "matchLabels" => ns(namespace) }, "podSelector" => { "matchLabels" => pod_labels } }
+  raise "[안전] #{context}: peer가 정확히 1개가 아니다(#{peers.length}개) — namespace·Pod selector를 별도 peer로 나누면 OR가 된다" unless peers.length == 1
+  raise "[안전] #{context}: #{namespace} namespace AND #{pod_labels} Pod를 같은 peer에서 골라야 한다(실제: #{peers.fetch(0).inspect})" unless peers.fetch(0) == expected
+end
+
 # 내부 순서 고정(2026-09-19): allow-*(wave 0) → default-deny(wave 1). 허용 규칙이 먼저
 # 들어가야 차단이 걸리는 순간에도 기존 통신이 안 끊긴다. persona-app·persona-data만
 # 대상이다(persona-edge·traefik은 이번에 안 건드림).
@@ -106,8 +117,29 @@ raise "[안전] allow-web: 포트가 8080이 아니다" unless rule_ports(web.di
 gw = resource(app, "NetworkPolicy", "allow-gateway")
 check_sync_wave(gw, "0", "persona-app allow-gateway")
 raise "[안전] allow-gateway: traefik에서만 인입해야 한다" unless rule_from_namespaces(gw.dig("spec", "ingress", 0)) == ["traefik"]
-gw_egress_targets = gw.dig("spec", "egress").flat_map { |rule| (rule["to"] || []).map { |peer| peer.dig("namespaceSelector", "matchLabels", "kubernetes.io/metadata.name") || peer.dig("podSelector", "matchLabels", "app.kubernetes.io/name") } }
-raise "[안전] allow-gateway egress 대상이 다르다(persona-data·persona-embedding·kube-system이어야 한다)" unless gw_egress_targets.sort == %w[kube-system persona-data persona-embedding].sort
+
+# egress는 DB·embedding·DNS·vLLM 네 규칙뿐이다. vLLM 추가 전부터 있던 세 규칙은 구조까지
+# 그대로여야 한다 — 대상 이름 목록만 비교하면 포트 변경이나 selector 확장을 놓친다.
+gw_existing_egress = [
+  { "to" => [{ "namespaceSelector" => { "matchLabels" => ns("persona-data") } }],
+    "ports" => [{ "protocol" => "TCP", "port" => 5432 }] },
+  { "to" => [{ "podSelector" => { "matchLabels" => { "app.kubernetes.io/name" => "persona-embedding" } } }],
+    "ports" => [{ "protocol" => "TCP", "port" => 8081 }] },
+  { "to" => [{ "namespaceSelector" => { "matchLabels" => ns("kube-system") }, "podSelector" => { "matchLabels" => { "k8s-app" => "kube-dns" } } }],
+    "ports" => [{ "protocol" => "UDP", "port" => 53 }, { "protocol" => "TCP", "port" => 53 }] },
+]
+gw_egress_rules = gw.dig("spec", "egress")
+raise "[안전] allow-gateway egress 규칙은 DB·embedding·DNS·vLLM 4개여야 한다(실제: #{gw_egress_rules.length}개)" unless gw_egress_rules.length == 4
+gw_existing_egress.each do |expected|
+  raise "[안전] allow-gateway의 기존 egress 규칙이 바뀌었다(DB 5432·embedding 8081·DNS 53은 그대로 둔다): #{expected.inspect}" unless gw_egress_rules.include?(expected)
+end
+
+# Gateway → vLLM. persona-inference의 vLLM Pod 하나, TCP 8000 하나만 연다.
+gw_vllm_rules = gw_egress_rules.reject { |rule| gw_existing_egress.include?(rule) }
+raise "[안전] allow-gateway의 vLLM egress 규칙이 정확히 1개가 아니다(#{gw_vllm_rules.length}개)" unless gw_vllm_rules.length == 1
+gw_vllm_rule = gw_vllm_rules.fetch(0)
+check_single_and_peer(gw_vllm_rule, "persona-inference", { "app.kubernetes.io/name" => "persona-vllm" }, "allow-gateway → vLLM egress")
+raise "[안전] allow-gateway → vLLM egress 포트가 TCP 8000 하나가 아니다(실제: #{rule_ports(gw_vllm_rule).inspect})" unless rule_ports(gw_vllm_rule) == [["TCP", 8000]]
 
 embedding = resource(app, "NetworkPolicy", "allow-embedding")
 check_sync_wave(embedding, "0", "persona-app allow-embedding")
@@ -232,8 +264,8 @@ metrics = resource(traefik, "NetworkPolicy", "allow-ingress-metrics")
 raise "[안전] traefik 메트릭 인입이 monitoring에서만 오지 않는다" unless rule_from_namespaces(metrics.dig("spec", "ingress", 0)) == ["monitoring"]
 raise "[안전] traefik 메트릭 인입 포트가 9100이 아니다" unless rule_ports(metrics.dig("spec", "ingress", 0)) == [["TCP", 9100]]
 
-# --- persona-inference (미적용) ----------------------------------------------
-# vLLM은 아직 배포되지 않았다. 여기서 검사하는 것은 "적용하면 무엇이 열리는가"의 모양이다.
+# --- persona-inference (수동 적용) --------------------------------------------
+# 클러스터 적용 여부와 무관하게 "적용하면 무엇이 열리는가"의 모양을 검사한다.
 inference = load(inference_path)
 check_default_deny(inference, "persona-inference")
 check_sync_wave(resource(inference, "NetworkPolicy", "default-deny"), "1", "persona-inference default-deny")
@@ -247,9 +279,9 @@ vllm_ingress = resource(inference, "NetworkPolicy", "allow-vllm-gateway")
 check_sync_wave(vllm_ingress, "0", "persona-inference allow-vllm-gateway")
 raise "[안전] allow-vllm-gateway는 vLLM Pod만 골라야 한다" unless vllm_ingress.dig("spec", "podSelector", "matchLabels") == vllm_label
 raise "[안전] allow-vllm-gateway에 Egress를 열지 않는다(모델 다운로드 경로가 생긴다)" if (vllm_ingress.dig("spec", "policyTypes") || []).include?("Egress")
+raise "[안전] allow-vllm-gateway ingress 규칙이 정확히 1개여야 한다" unless (vllm_ingress.dig("spec", "ingress") || []).length == 1
 raise "[안전] Gateway → vLLM ingress가 persona-app에서만 오지 않는다" unless rule_from_namespaces(vllm_ingress.dig("spec", "ingress", 0)) == ["persona-app"]
-gateway_peer = (vllm_ingress.dig("spec", "ingress", 0, "from") || []).fetch(0, {})
-raise "[안전] Gateway → vLLM ingress가 Gateway Pod label로 좁혀지지 않았다 — namespace만 열면 web·embedding·migrate도 닿는다" unless gateway_peer.dig("podSelector", "matchLabels") == { "app.kubernetes.io/name" => "persona-gateway" }
+check_single_and_peer(vllm_ingress.dig("spec", "ingress", 0), "persona-app", { "app.kubernetes.io/name" => "persona-gateway" }, "Gateway → vLLM ingress")
 raise "[안전] vLLM 추론 포트가 TCP 8000이 아니다(CNPG status 8000·Traefik web 8000과 다른 용도다)" unless rule_ports(vllm_ingress.dig("spec", "ingress", 0)) == [["TCP", 8000]]
 
 # metrics는 별도 정책이어야 한다. vLLM은 API와 /metrics를 같은 8000에서 내므로, 포트가
@@ -257,7 +289,14 @@ raise "[안전] vLLM 추론 포트가 TCP 8000이 아니다(CNPG status 8000·Tr
 # 함께 끊긴다.
 vllm_metrics = resource(inference, "NetworkPolicy", "allow-vllm-metrics")
 check_sync_wave(vllm_metrics, "0", "persona-inference allow-vllm-metrics")
+raise "[안전] allow-vllm-metrics는 vLLM Pod만 골라야 한다" unless vllm_metrics.dig("spec", "podSelector", "matchLabels") == vllm_label
+raise "[안전] allow-vllm-metrics에 Egress를 열지 않는다" if (vllm_metrics.dig("spec", "policyTypes") || []).include?("Egress")
+raise "[안전] allow-vllm-metrics ingress 규칙이 정확히 1개여야 한다" unless (vllm_metrics.dig("spec", "ingress") || []).length == 1
 raise "[안전] vLLM 메트릭 인입이 monitoring에서만 오지 않는다" unless rule_from_namespaces(vllm_metrics.dig("spec", "ingress", 0)) == ["monitoring"]
+# 8000은 추론 API와 같은 포트라 monitoring namespace 전체를 열면 Grafana 등도 추론 API에
+# 닿는다. kube-prometheus-stack이 Prometheus Pod에 붙이는 두 라벨로 좁힌다.
+prometheus_labels = { "app.kubernetes.io/name" => "prometheus", "app.kubernetes.io/instance" => "monitoring-stack-kube-prom-prometheus" }
+check_single_and_peer(vllm_metrics.dig("spec", "ingress", 0), "monitoring", prometheus_labels, "Prometheus → vLLM metrics ingress")
 raise "[안전] vLLM 메트릭 포트가 TCP 8000이 아니다" unless rule_ports(vllm_metrics.dig("spec", "ingress", 0)) == [["TCP", 8000]]
 raise "[안전] Gateway 허용과 metrics 허용을 한 정책에 합치지 않는다" if rule_from_namespaces(vllm_ingress.dig("spec", "ingress", 0)).include?("monitoring")
 
@@ -279,6 +318,16 @@ check_sync_wave(seed_dns, "0", "persona-inference allow-model-seed-dns")
 raise "[안전] seed Job 정책이 vLLM과 같은 label을 고른다 — 라벨을 분리해야 정책이 섞이지 않는다" unless seed_dns.dig("spec", "podSelector", "matchLabels") == seed_label
 raise "[안전] seed DNS egress 포트가 UDP/TCP 53이 아니다" unless rule_ports(seed_dns.dig("spec", "egress", 0)).sort == [["TCP", 53], ["UDP", 53]]
 
+# kubectl apply는 sync-wave를 읽지 않는다. 수동 적용 때 allow를 먼저, default-deny를 마지막에
+# 넣을 수 있도록 apply-phase label로 두 묶음을 나눈다. label이 틀리면 `-l ...=allow`로
+# default-deny가 함께 들어가거나 allow 정책이 빠진다.
+inference.select { |item| item["kind"] == "NetworkPolicy" }.each do |policy|
+  name = policy.dig("metadata", "name")
+  expected_phase = name == "default-deny" ? "deny" : "allow"
+  actual_phase = policy.dig("metadata", "labels", "persona.runtime/apply-phase")
+  raise "[안전] persona-inference #{name}: apply-phase label이 #{expected_phase}가 아니다(실제: #{actual_phase.inspect})" unless actual_phase == expected_phase
+end
+
 # 이 namespace에 외부로 나가는 HTTPS 허용이 들어오지 않았는지 본다. 모델 다운로드 호스트가
 # 아직 관측되지 않아 FQDN 정책은 일부러 배선하지 않았다(network-policy-fqdn.yaml.draft).
 # 그 사이에 누가 ipBlock이나 와일드카드로 443을 열면 여기서 걸린다.
@@ -287,6 +336,9 @@ inference.each do |item|
   raise "[안전] persona-inference에 443 egress가 생겼다 — 모델 호스트는 관측 후 FQDN으로만 연다" if ports.any? { |(_proto, port)| port == 443 || port == "443" }
   (item.dig("spec", "egress") || []).each do |rule|
     raise "[안전] persona-inference egress에 ipBlock을 쓰지 않는다 — namespace·Pod label로만 고른다" if (rule["to"] || []).any? { |peer| peer.key?("ipBlock") }
+    # `to`나 `ports`가 비면 "모든 대상" 또는 "모든 포트"라서 위 443 검사를 우회한다.
+    raise "[안전] persona-inference egress 규칙에 대상(to)이 없다 — 비우면 world를 포함한 모든 대상이다" if (rule["to"] || []).empty?
+    raise "[안전] persona-inference egress 규칙에 포트가 없다 — 비우면 모든 포트다" if (rule["ports"] || []).empty?
   end
 end
 
