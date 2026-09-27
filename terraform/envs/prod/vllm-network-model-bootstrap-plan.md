@@ -3,7 +3,9 @@
 상태: 2026-09-25 결정, **2026-09-27 모델 cache seed 선언 완성**(`kustomize/overlays/prod/persona-model-cache`,
 Argo Application 없음). **vLLM Deployment·Service·PodMonitor는 선언·정적 검사까지 완료**
 (`kustomize/overlays/prod/persona-vllm`, Argo Application 없음) — **클러스터에서 vLLM을 기동한 적은 없다.**
-NetworkPolicy·FQDN allowlist·Gateway egress·Gateway LLM mode는 아직 만들거나 Sync하지 않는다.
+**NetworkPolicy(2026-09-27)**: `persona-inference` 정책과 Gateway → vLLM egress를 첫 적용 가능한
+선언으로 보완했다(아래 "첫 적용·복구 절차"). 클러스터에는 아직 적용하지 않았다. FQDN allowlist와
+Gateway LLM mode는 만들지 않는다. 모델 cache seed는 운영자 보고로 완료됐다(2026-09-27).
 
 ## 한 문장 결론
 
@@ -73,64 +75,64 @@ vLLM용 ingress·metrics policy가 의도치 않게 seed Pod에도 적용될 수
 | `persona-inference` | `allow-vllm-metrics` | 실제 Prometheus Pod → vLLM TCP 8000 | `/metrics` scrape |
 | `persona-inference` | `allow-vllm-dns` | vLLM Pod → CoreDNS TCP/UDP 53 | 내부 이름 해석 |
 | `persona-inference` | `allow-model-seed-dns` | seed Job → CoreDNS TCP/UDP 53 | 최초 download 이름 해석 |
-| `persona-inference` | Cilium FQDN egress | seed Job → 실행 시 확인한 model host만 HTTPS | 최초 download |
+| `persona-inference` | Cilium FQDN egress | seed Job → 실행 시 확인한 model host만 HTTPS | 최초 download — **이번 범위 밖**(아래) |
 
 표준 Kubernetes NetworkPolicy는 IP/Pod/namespace 기준이고 FQDN을 직접 표현하지 못한다.
 model download만 CiliumNetworkPolicy의 FQDN 정책으로 별도 선언한다. 실제 다운로드 시 필요한
 redirect·artifact host를 합성 seed run에서 먼저 기록한 뒤 허용 목록을 확정한다. 추측한 host
 목록이나 `0.0.0.0/0:443`은 넣지 않는다.
 
-### 초안이 실제로 어디에 있는가 (2026-09-25)
+첫 seed는 default-deny 없이 끝났으므로 FQDN 정책 없이 나머지 정책을 먼저 적용한다. **운영
+제약**: default-deny가 들어간 뒤에는 seed Pod에 DNS만 열려 있어 모델 호스트에 닿지 못한다. seed를
+다시 실행해야 하면(revision 변경·cache 손상) 관측한 FQDN만 여는 별도 다운로드 허용 정책을 먼저
+만들고 적용한다. default-deny를 지워 우회하지 않는다.
 
-위 표 중 `persona-inference` 쪽 다섯 개는 **미적용 매니페스트로 작성했다.**
+**NetworkPolicy가 막지 못하는 것**: 표준 NetworkPolicy는 L3/L4(namespace·Pod·포트)만 본다.
+vLLM은 추론 API와 `/metrics`를 같은 TCP 8000에서 내므로, Prometheus Pod에 8000을 열면 추론
+경로에도 닿는다. Prometheus를 `/metrics` 경로로만 제한하는 것은 이 정책으로 하지 않는다.
+
+### 선언이 실제로 어디에 있는가 (2026-09-25 작성, 2026-09-27 보완)
+
+위 표 중 FQDN을 뺀 여섯 개는 매니페스트로 작성했다. 클러스터에는 아직 적용하지 않았다.
 
 | 파일 | 상태 |
 | --- | --- |
 | `kustomize/overlays/prod/persona-model-cache/` | Namespace·model cache PVC·seed Job(2026-09-27). **Argo Application 없음** — 첫 seed는 사람이 적용. 예전 `bootstrap/namespaces/persona-inference.yaml`은 소유를 옮기며 지웠다 |
-| `kustomize/base/networkpolicy/persona-inference/network-policy.yaml` | 작성. 정책 5개 |
-| `kustomize/overlays/prod/persona-inference-netpol/` | 작성. **Argo Application 없음** |
+| `kustomize/base/networkpolicy/persona-inference/network-policy.yaml` | 작성. 정책 5개. 수동 적용 순서용 `persona.runtime/apply-phase` label(allow·deny) |
+| `kustomize/overlays/prod/persona-inference-netpol/` | 작성. **Argo Application 없음** — 사람이 `kubectl apply -k`로 적용. Namespace는 만들지 않는다(model-cache overlay 소유) |
+| `kustomize/base/networkpolicy/persona-app/network-policy.yaml` | `allow-gateway` egress에 vLLM TCP 8000 추가(2026-09-27). `persona-app-netpol` Argo Application 소유 |
 | `kustomize/base/networkpolicy/persona-inference/network-policy-fqdn.yaml.draft` | 배선하지 않음 — 확장자와 `resources` 둘 다에서 제외 |
 
-`kubectl kustomize kustomize/overlays/prod/persona-inference-netpol`로 렌더되고
-`scripts/validate-networkpolicy-manifests.sh`가 검사하지만, Argo가 보는 경로가 아니므로
-클러스터에는 들어가지 않는다.
+`scripts/validate-networkpolicy-manifests.sh`가 렌더와 정책 모양을 검사하고,
+`scripts/test-networkpolicy-manifests.sh`가 잘못된 변경(namespace만 허용, selector를 별도 peer로
+분리, 포트 변경, 기존 Gateway 규칙 변경 등)을 잡는지 확인한다.
 
-**`persona-app`의 Gateway egress는 아직 손대지 않았다.** `allow-gateway`는 살아 있는
-`persona-app-netpol` Application이 Sync하는 파일이라, 지금 한 줄을 더하면 다음 Sync에서
-그대로 적용된다. 대상이 없어 동작상 무해하지만 "이 Application은 한 종류의 변경만 담는다"는
-규약(`argocd/README.md`)과 위 §5의 5단계 순서에 어긋난다. 그래서 **vLLM 배포와 같은 단계에서
-넣을 조각을 여기 적어 두고 파일은 그대로 둔다.** `allow-gateway`의 `egress` 목록 끝에 더한다.
+**Gateway → vLLM egress**: `allow-gateway`의 `egress` 끝에 한 규칙을 더했다. 대상은
+`persona-inference` namespace AND `app.kubernetes.io/name=persona-vllm` Pod, TCP 8000 하나다.
+namespaceSelector와 podSelector를 **같은 peer**에 둬야 AND다(별도 `-` 항목이면 OR). 기존 DB·
+embedding·DNS·ingress 규칙은 그대로다. 이 파일은 `persona-app-netpol` Argo Application이
+소유하므로 반영은 머지 뒤 그 Application의 Sync로만 한다. `kubectl patch`·`kubectl edit`로 live
+정책을 고치지 않는다 — Git과 어긋나고 다음 Sync에서 되돌려진다.
+
+### Prometheus selector — 실제 Prometheus Pod로 좁혔다 (2026-09-27)
+
+`allow-vllm-metrics`는 `monitoring` namespace AND 아래 Pod label을 같은 peer에서 고른다.
+라벨은 운영 클러스터의 Prometheus Pod에서 관측한 값이다.
 
 ```yaml
-    # vLLM 추론. 대상은 persona-inference의 vLLM Pod 하나뿐이다.
-    - to:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: persona-inference
-          podSelector:
-            matchLabels:
-              app.kubernetes.io/name: persona-vllm
-      ports:
-        - protocol: TCP
-          port: 8000
+app.kubernetes.io/name: prometheus
+app.kubernetes.io/instance: monitoring-stack-kube-prom-prometheus
 ```
 
-### Prometheus selector — 문서와 매니페스트가 다르다
-
-이 문서는 "`monitoring` namespace 전체가 아니라 실제 Prometheus Pod label로 고정한다"고
-적었다. **작성한 매니페스트는 namespace label만 쓴다.** 일부러 다르게 했으므로 판단이
-필요하다.
-
-- namespace만 쓴 이유: Prometheus Pod 라벨은 kube-prometheus-stack 차트가 정하고 이
-  저장소가 선언하지 않는다. 차트를 올리면 라벨이 바뀌어 수집이 **조용히** 끊긴다. 그리고
-  기존 세 선례(`traefik/allow-ingress-metrics`, `persona-data`의 exporter 허용,
-  `persona-app/allow-gateway-metrics`)가 **전부 namespace 라벨만** 쓴다 — 여기만 다르게 하면
-  관례가 갈라진다.
-- Pod label로 좁히는 쪽의 장점: `monitoring`의 다른 Pod(Grafana·sidecar 등)가 vLLM의 8000에
-  닿지 못한다. 문서가 말한 "Target이 DOWN으로 드러나야 한다"는 것도 맞는 요구다.
-
-둘 다 근거가 있다. 지금은 기존 관례를 따랐고, Pod label로 좁히기로 결정하면 **네 정책을 함께**
-바꿔야 한다(한 곳만 좁히면 관례가 더 갈라진다).
+- 좁힌 이유: vLLM은 추론 API와 `/metrics`를 같은 8000에서 낸다. namespace 전체를 열면 Grafana
+  등 `monitoring`의 다른 Pod도 추론 API에 닿는다.
+- Pod 이름·IP·controller revision hash는 재시작·업그레이드마다 바뀌므로 쓰지 않는다.
+- 위험: 이 라벨은 kube-prometheus-stack 차트가 정하고 이 저장소가 선언하지 않는다. 차트
+  업그레이드로 바뀌면 수집이 끊기고 vLLM Target이 `DOWN`이 된다. 업그레이드 뒤 Target을 확인하고
+  selector를 함께 고친다.
+- 기존 세 선례(`traefik/allow-ingress-metrics`, `persona-data`의 exporter 허용,
+  `persona-app/allow-gateway-metrics`)는 namespace 라벨만 쓰며 이번에 바꾸지 않았다. 관례가
+  다르다는 점은 남는다.
 
 ## 5. 배포·Sync 순서
 
@@ -143,10 +145,10 @@ redirect·artifact host를 합성 seed run에서 먼저 기록한 뒤 허용 목
 4. 첫 seed 결과를 기록한다: Job `Complete`, 완료 marker(`.persona-seed-complete.json`)와 manifest,
    PVC bound Node, 그리고 Hubble·DNS 로그로 seed Pod가 질의·접속한 호스트 목록. token·원문은
    로그에 남기지 않는다. seed가 실패하면 재시도로 덮지 않고 원인(네트워크·용량·무결성)부터 본다.
-5. 관측한 호스트만 `network-policy-fqdn.yaml.draft`의 matchName으로 채우고 배선한다. 그 뒤
-   `persona-inference`의 allow 정책을 sync-wave 0, default-deny를 wave 1로 Sync한다.
-6. `persona-app-netpol`의 Gateway egress를 수동 Sync한다. 대상 Service가 없어도 기존
-   DB·embedding 경로를 바꾸지 않는다.
+5. `persona-inference` NetworkPolicy를 적용한다(아래 "첫 적용·복구 절차"). 첫 seed가 끝났으므로
+   FQDN 정책 없이 적용한다. seed 재실행에는 별도 다운로드 허용 정책이 먼저 필요하다(§4).
+6. `persona-app-netpol`의 Gateway egress를 Argo에서 Sync한다(기존 소유 경로). 기존 DB·embedding·DNS
+   경로는 바꾸지 않는다.
 7. seed 완료를 확인한 뒤 local model path를 쓰는 vLLM Deployment·Service·PodMonitor를 적용한다
    (`kustomize/overlays/prod/persona-vllm`, 선언·정적 검사 완료, 클러스터 기동 미실행).
    - 모델 cache PVC를 read-only로 붙이고, initContainer가 seed marker·manifest·weight index를 확인하지
@@ -159,7 +161,56 @@ redirect·artifact host를 합성 seed run에서 먼저 기록한 뒤 허용 목
      non-root 10001·read-only rootfs, `/tmp`·`/dev/shm` emptyDir.
    - 확인 범위: seed 조건의 non-root·read-only smoke(GPU 미사용)와 root(uid 0) GPU smoke는 통과했지만,
      이 Deployment 조건의 non-root GPU 추론은 아직 확인하지 않았다.
-8. Prometheus Target `UP`, Gateway→vLLM 허용, 외부 namespace→vLLM 차단을 각각 확인한다.
+8. 아래 "다음 실측 항목" a–d를 확인한다.
+
+### 첫 적용·복구 절차 (control-plane에서 사람이 수행, 아직 실행하지 않음)
+
+`kubectl apply`는 Argo의 sync-wave annotation을 읽지 않는다. `-k`로 overlay 전체를 한 번에 적용하면
+default-deny와 allow 정책이 순서 없이 함께 들어간다. 그래서 `persona.runtime/apply-phase` label로
+나눠 **allow를 먼저, default-deny를 마지막에** 적용한다.
+
+1. 전제: kubectl context가 운영 클러스터이고, `persona-inference` Namespace(model-cache overlay 소유)와
+   vLLM Pod가 있다. `sh scripts/validate-networkpolicy-manifests.sh`가 통과한다.
+2. Gateway egress: 이 변경이 머지된 뒤 Argo에서 `persona-app-netpol`을 Sync한다. `allow-gateway`는
+   Argo 소유이므로 live patch하지 않는다. 적용 전에는 persona-app default-deny가 Gateway → vLLM
+   egress를 막고 있다.
+3. inference allow 정책:
+   ```sh
+   kubectl apply -k kustomize/overlays/prod/persona-inference-netpol \
+     -l persona.runtime/apply-phase=allow
+   kubectl -n persona-inference get networkpolicy
+   ```
+   allow 4개(`allow-vllm-gateway`·`allow-vllm-metrics`·`allow-vllm-dns`·`allow-model-seed-dns`)만
+   있고 `default-deny`가 없는지 확인한다.
+4. inference default-deny:
+   ```sh
+   kubectl apply -k kustomize/overlays/prod/persona-inference-netpol \
+     -l persona.runtime/apply-phase=deny
+   ```
+5. 바로 아래 실측 a–d를 확인한다.
+
+**복구**: 차단 때문에 추론·수집이 끊기면 먼저 차단만 푼다.
+
+```sh
+kubectl -n persona-inference delete networkpolicy default-deny
+```
+
+allow 정책은 남겨 둬도 허용만 더하므로 해가 없다. 원인(selector·label 불일치)을 Git에서 고친 뒤
+위 3–4단계를 다시 한다. Gateway egress 규칙을 되돌려야 하면 Git revert를 머지하고
+`persona-app-netpol`을 Sync한다(live patch 금지).
+
+### 다음 실측 항목 (정책 적용 뒤, 아직 측정하지 않음)
+
+| # | 항목 | 확인 방법 | 기대 |
+| --- | --- | --- | --- |
+| a | Gateway Pod → vLLM Service 허용 | Gateway Pod에서 `persona-vllm` Service의 `/health` 요청, Hubble `FORWARDED` | 200 |
+| b | Prometheus Target UP 유지 | Prometheus `/targets`에서 vLLM PodMonitor Target | `UP` |
+| c | 허용되지 않은 일반 Pod → vLLM 차단 | egress 제한이 없는 다른 namespace의 임시 Pod에서 같은 요청, Hubble `Policy denied` | 연결 실패·DROPPED |
+| d | 정책 적용 뒤 vLLM 추론 정상 | Gateway Pod에서 최소 `/v1/chat/completions` 요청(Gateway LLM mode 전환 없이) | 정상 응답 |
+
+Gateway image에 요청 도구가 없으면 `kubectl debug`의 ephemeral container를 쓴다. 같은 Pod라서
+Pod label과 정책 판정이 Gateway와 같다. 요청 본문·응답 원문·토큰은 기록에 남기지 않는다. 상태
+코드·지연·Hubble verdict만 적는다.
 
 ### 모델 seed 명령과 무결성 기준 (2026-09-27)
 
@@ -192,6 +243,7 @@ vLLM이 Ready여도 Gateway 설정을 LLM mode로 바꾸지 않는다.
 - Gateway와 Prometheus만 vLLM TCP 8000에 성공한다.
 - vLLM·DCGM Target이 `UP`이며, 허용하지 않은 namespace/port 흐름은 Hubble에서 차단된다.
 
-seed Job image·명령·model revision은 선언에 고정했다(위 절). 아직 확정하지 않은 항목은 실제 model
-FQDN 목록(첫 seed에서 관측), Prometheus Pod label, 그리고 vLLM이 read-only rootfs·`/tmp` cache로
-실제 기동하는지다(선언은 있으나 클러스터에서 확인하지 않았다).
+seed Job image·명령·model revision은 선언에 고정했다(위 절). Prometheus Pod label은 관측값으로
+정했다(2026-09-27). 아직 확정하지 않은 항목은 실제 model FQDN 목록(seed 재실행 전 필요), 정책 적용
+뒤 실측 a–d, 그리고 vLLM이 read-only rootfs·`/tmp` cache로 실제 기동하는지다(선언은 있으나
+클러스터에서 확인하지 않았다).

@@ -1,15 +1,17 @@
-# persona-inference NetworkPolicy — **미적용 초안**. 이 base를 가리키는 Argo Application이
-# 없으므로 렌더·검증만 되고 클러스터에는 들어가지 않는다. GPU 노드 조인과 vLLM 배포 승인
-# 뒤에 Application을 만든다.
-#
-# 설계는 terraform/envs/prod/vllm-network-model-bootstrap-plan.md가 정했다. 여기서는 그
-# 결정을 매니페스트로 옮긴다.
+# persona-inference NetworkPolicy. 이 base를 가리키는 Argo Application이 없다 — 사람이
+# control-plane에서 `kubectl apply -k`로 적용한다(절차: terraform/envs/prod/
+# vllm-network-model-bootstrap-plan.md의 "첫 적용·복구 절차").
 #
 # 선택 기준은 namespace label + Pod label뿐이다. IP·Pod 이름을 정책 기준으로 쓰지 않는다 —
 # Pod IP는 재시작마다 바뀌고 이름은 ReplicaSet 해시를 포함해 배포마다 달라진다.
 #
-# sync-wave: allow는 "0", default-deny는 "1". persona-app·persona-data와 같은 규약이다.
-# default-deny가 먼저 들어가면 그 사이에 vLLM이 아무것도 못 하는 창이 생긴다.
+# 적용 순서: allow를 먼저, default-deny를 마지막에 넣는다. default-deny가 먼저 들어가면 그
+# 사이에 Gateway 요청·Prometheus 수집·vLLM DNS가 모두 막히는 창이 생긴다.
+# - sync-wave(allow "0", default-deny "1")는 Argo가 Sync할 때만 쓰는 순서다. `kubectl apply`는
+#   이 annotation을 읽지 않고 한 번에 모두 적용한다.
+# - 그래서 수동 적용용으로 `persona.runtime/apply-phase` label(allow·deny)을 붙였다.
+#   `kubectl apply -k ... -l persona.runtime/apply-phase=allow`로 allow만 먼저 넣고, 확인한 뒤
+#   `=deny`로 default-deny를 넣는다.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -17,6 +19,7 @@ metadata:
   labels:
     app.kubernetes.io/part-of: persona-platform
     app.kubernetes.io/component: networkpolicy
+    persona.runtime/apply-phase: deny
   annotations:
     argocd.argoproj.io/sync-wave: "1"
 spec:
@@ -32,6 +35,10 @@ spec:
 # 포트가 TCP 8000 하나인 근거: persona-gateway의 adapter는
 # `{PERSONA_VLLM_BASE_URL}/v1/chat/completions` 하나만 POST한다
 # (persona-gateway의 chat/vllm_client.py). 다른 포트·경로를 부르지 않는다.
+#
+# 보내는 쪽 허용은 persona-app의 allow-gateway egress다. 두 정책이 모두 있어야 통신된다.
+# namespaceSelector와 podSelector는 같은 peer에 둔다(AND). 별도 `-` 항목으로 나누면 OR가 되어
+# persona-app의 모든 Pod 또는 이 namespace의 persona-gateway 라벨 Pod가 들어올 수 있다.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -39,6 +46,7 @@ metadata:
   labels:
     app.kubernetes.io/part-of: persona-platform
     app.kubernetes.io/component: networkpolicy
+    persona.runtime/apply-phase: allow
   annotations:
     argocd.argoproj.io/sync-wave: "0"
 spec:
@@ -74,6 +82,7 @@ metadata:
   labels:
     app.kubernetes.io/part-of: persona-platform
     app.kubernetes.io/component: networkpolicy
+    persona.runtime/apply-phase: allow
   annotations:
     argocd.argoproj.io/sync-wave: "0"
 spec:
@@ -84,12 +93,23 @@ spec:
     - Ingress
   ingress:
     - from:
-        # Prometheus Pod 라벨이 아니라 namespace 라벨로 좁힌다 — Pod 라벨은 Helm 차트가
-        # 정하고 이 저장소가 선언하지 않아서, 차트 업그레이드로 조용히 끊길 수 있다.
-        # 기존 세 선례(traefik·persona-data·persona-app)도 전부 namespace 라벨만 쓴다.
+        # monitoring namespace AND 실제 Prometheus Pod 라벨(같은 peer). namespace만 열면
+        # monitoring의 Grafana·exporter 등 다른 Pod도 vLLM 추론 API에 닿는다 — 포트가 API와
+        # 같아서 metrics만 여는 것이 불가능하기 때문이다.
+        # - 라벨은 kube-prometheus-stack(release monitoring-stack)이 붙인 값이다. Pod 이름·
+        #   IP·controller revision hash는 재시작·업그레이드마다 바뀌므로 쓰지 않는다.
+        # - 이 라벨은 Helm 차트가 정하고 이 저장소가 선언하지 않는다. 차트 업그레이드로
+        #   바뀌면 수집이 끊기고 Prometheus Target이 DOWN으로 보인다. 업그레이드 뒤 Target을
+        #   확인하고 이 selector를 함께 고친다.
+        # - NetworkPolicy는 L3/L4만 본다. Prometheus Pod에 TCP 8000을 열면 /metrics뿐 아니라
+        #   추론 API 경로도 닿는다. 경로 단위 제한은 이 정책으로 하지 않는다.
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+              app.kubernetes.io/instance: monitoring-stack-kube-prom-prometheus
       ports:
         - protocol: TCP
           port: 8000
@@ -105,6 +125,7 @@ metadata:
   labels:
     app.kubernetes.io/part-of: persona-platform
     app.kubernetes.io/component: networkpolicy
+    persona.runtime/apply-phase: allow
   annotations:
     argocd.argoproj.io/sync-wave: "0"
 spec:
@@ -129,8 +150,12 @@ spec:
 ---
 # model cache seed Job의 DNS. vLLM과 **다른 Pod label**을 고른다.
 #
-# seed Job을 vLLM 라벨로 만들면 위 ingress·metrics 정책이 seed Pod에도 걸리고, 반대로 이
-# 정책의 외부 egress가 vLLM에도 열린다. 둘의 라벨을 나누는 것이 그 사고를 구조적으로 막는다.
+# seed Job을 vLLM 라벨로 만들면 위 ingress·metrics 정책이 seed Pod에도 걸리고, 반대로 seed용
+# egress가 vLLM에도 열린다. 둘의 라벨을 나누는 것이 그 사고를 구조적으로 막는다.
+#
+# 이 정책은 DNS만 연다. default-deny가 들어간 뒤에는 seed Job이 모델 호스트(HTTPS)에 닿지
+# 못하므로, seed를 다시 실행하려면 관측한 FQDN만 여는 별도 다운로드 허용 정책이 먼저
+# 필요하다(network-policy-fqdn.yaml.draft, 이 base에 배선하지 않았다).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -138,6 +163,7 @@ metadata:
   labels:
     app.kubernetes.io/part-of: persona-platform
     app.kubernetes.io/component: networkpolicy
+    persona.runtime/apply-phase: allow
   annotations:
     argocd.argoproj.io/sync-wave: "0"
 spec:
