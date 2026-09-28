@@ -555,7 +555,7 @@ check_v1_and_root_rules(
 public_route = resource(ingress, "HTTPRoute", "persona-app-public")
 raise "[안전] 공개 HTTPRoute는 https listener에 붙어야 한다" unless public_route.dig("spec", "parentRefs", 0, "sectionName") == "https"
 raise "[안전] 공개 HTTPRoute hostname이 공개 진입 도메인과 다르다" unless public_route.dig("spec", "hostnames") == ["app.personaruntime.xyz"]
-raise "[안전] 공개 HTTPRoute: 규칙은 /oauth2·/v1·/ 세 개다" unless public_route.dig("spec", "rules")&.length == 3
+raise "[안전] 공개 HTTPRoute: 규칙은 /oauth2·SSE·/v1·/ 네 개다" unless public_route.dig("spec", "rules")&.length == 4
 check_v1_and_root_rules(
   public_route.dig("spec", "rules"), "persona-app-public HTTPRoute",
   # security-headers가 맨 앞 — Traefik 체인은 앞선 미들웨어일수록 뒤 미들웨어의 응답까지
@@ -568,6 +568,54 @@ check_v1_and_root_rules(
     "/" => ["security-headers", "rate-limit", "oauth-forward"],
   },
 )
+
+# 채팅 SSE rule — body-limit(buffering)만 빠지고 인증·rate-limit·보안 헤더와 backend는 /v1과 같다.
+# buffering은 응답까지 모아 보내므로 SSE가 생성 끝까지 도착하지 않는다(httproute-public.yaml 주석).
+SSE_MATCHES = [
+  { "method" => "POST", "path" => { "type" => "Exact", "value" => "/v1/chat/completions" } },
+  { "method" => "POST", "path" => { "type" => "RegularExpression", "value" => "^/v1/generations/[^/]+/retry$" } },
+].freeze
+sse_rule = public_route.dig("spec", "rules").find { |r| r["matches"] == SSE_MATCHES } ||
+  raise("[안전] 공개 HTTPRoute: SSE rule(POST chat/completions Exact + POST retry 앵커 정규식)이 없다")
+sse_filters = (sse_rule["filters"] || []).map do |filter|
+  raise "[안전] SSE rule: filters는 traefik.io Middleware ExtensionRef만 허용한다" unless filter["type"] == "ExtensionRef" &&
+    filter.dig("extensionRef", "group") == "traefik.io" && filter.dig("extensionRef", "kind") == "Middleware"
+  filter.dig("extensionRef", "name")
+end
+raise "[안전] SSE rule에 body-limit(buffering)을 두면 SSE 응답이 끝까지 모였다가 나간다" if sse_filters.include?("body-limit")
+raise "[안전] SSE rule 필터는 security-headers·rate-limit·oauth-forward 순서다 (실제 #{sse_filters})" unless sse_filters == ["security-headers", "rate-limit", "oauth-forward"]
+raise "[안전] SSE rule은 persona-gateway:8080으로 간다" unless sse_rule["backendRefs"] == [{ "name" => "persona-gateway", "port" => 8080 }]
+
+# 정규식이 retry 경로만 잡는지 샘플로 확인한다. Traefik PathRegexp(Go regexp)는 부분 일치라,
+# 앵커가 빠지거나 넓어지면 다른 /v1 경로가 이 rule로 빠져 body-limit을 우회한다.
+# 이 패턴은 Go와 Ruby에서 뜻이 같은 문법만 쓴다.
+retry_regex = Regexp.new(SSE_MATCHES[1].dig("path", "value"))
+["/v1/generations/0f8fad5b-d9cb-469f-a165-70867728950e/retry"].each do |sample|
+  raise "[안전] SSE retry 정규식이 retry 경로를 놓친다: #{sample}" unless retry_regex.match?(sample)
+end
+["/v1/generations/x/retry/extra", "/v1/generations//retry", "/v1/generations/x/cancel",
+ "/v1/generations/a/b/retry", "/prefix/v1/generations/x/retry"].each do |sample|
+  raise "[안전] SSE retry 정규식이 다른 경로까지 잡는다: #{sample}" if retry_regex.match?(sample)
+end
+
+# Traefik v3.7 Gateway provider의 router priority 공식(buildMatchRule)을 옮겨 SSE 매치가 /v1
+# PathPrefix보다 먼저 평가되는지 확인한다. rule 목록 순서는 동점일 때만 영향을 준다.
+# hostname 가중치는 같은 route의 모든 매치에 똑같이 더해지므로 비교에서 뺀다.
+traefik_priority = lambda do |match|
+  type = match.dig("path", "type")
+  value = match.dig("path", "value")
+  base = case type
+         when "Exact" then 100_000
+         when "PathPrefix" then value == "/" ? 1 : 10_000 + value.length * 100
+         when "RegularExpression" then 10_000 + value.length * 100
+         else raise "[안전] 공개 HTTPRoute: 지원하지 않는 path type #{type}"
+         end
+  base + (match["method"] ? 1_000 : 0)
+end
+v1_rule = public_route.dig("spec", "rules").find { |r| r.dig("matches", 0, "path", "value") == "/v1" }
+SSE_MATCHES.each do |match|
+  raise "[안전] SSE 매치가 /v1 PathPrefix보다 우선순위가 낮다: #{match}" unless traefik_priority.call(match) > traefik_priority.call(v1_rule.dig("matches", 0))
+end
 
 oauth_rule = public_route.dig("spec", "rules").find { |r| r.dig("matches", 0, "path", "value") == "/oauth2" } ||
   raise("[안전] 공개 HTTPRoute: /oauth2 규칙이 없다")
