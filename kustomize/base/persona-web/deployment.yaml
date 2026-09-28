@@ -55,10 +55,16 @@ spec:
                     app.kubernetes.io/name: persona-web
       containers:
         - name: web
-          # 검증된 linux/amd64 child manifest. 소스 커밋 656dd26(PR #8 머지,
-          # 초안 없음 시 이름·소개 초기 입력 폼).
+          # 검증된 linux/amd64 child manifest. 소스 커밋 5bd851a(PR #9 머지,
+          # 채팅에 적용 버튼·저장/색인 순서 가드·질문 1,000자 한도·캐릭터 삭제).
           #
-          # 직전 이미지(d8e41e1)는 초안이 없으면 빈 소개로 초안 생성을 자동 호출했고,
+          # 캐릭터 삭제 버튼은 DELETE /v1/personas/{id}를 부른다 — Gateway 4eaa9cc 이상과
+          # grants의 삭제 권한이 있어야 성공한다. 둘은 같은 persona-app Sync로 함께 올라가고,
+          # grants는 그 전에 적용한다. 그 전 Gateway에서는 삭제 요청만 실패하고 화면은 목록을
+          # 먼저 비우지 않는다. 채팅에 적용은 기존 POST draft/activate를 쓴다.
+          # 질문 한도 1,000자는 운영 llm 모드의 질문 예산에 맞춘 값이다.
+          #
+          # 656dd26(PR #8)의 초기 입력 폼도 그대로 포함한다. 그 전 이미지(d8e41e1)는 초안이 없으면 빈 소개로 초안 생성을 자동 호출했고,
           # Gateway가 비공백 name·profile을 요구해(422 invalid_settings) 늘 실패했다.
           # 이제 이름·소개 입력 폼을 보여주고 유효한 값을 저장할 때만 초안을 만든다.
           # 새 API 경로는 쓰지 않으므로 Gateway 이미지 조건은 그대로다.
@@ -77,7 +83,7 @@ spec:
           # 중복해 적지 않는다).
           # SSE 자체는 이 컨테이너를 거치지 않는다(파일 첫 줄 참고) — HTTPRoute가
           # /v1을 persona-gateway로 직접 보내므로 nginx 버퍼링과 무관하다.
-          image: ghcr.io/persona-runtime/persona-web@sha256:737883fd8f680b68aa3c17c6bc2d785cb0e9b9be0717c9122320f43c8d58a753
+          image: ghcr.io/persona-runtime/persona-web@sha256:b0a26509e694602a67d990b3a1b3376e2cb16ef18ddcecb71527dec24d2be530
           imagePullPolicy: IfNotPresent
           ports:
             - name: http

@@ -134,5 +134,37 @@ cases.each do |relative_path, keys, value, message|
     File.write(path, original)
   end
 end
-puts "스케줄링 음성 테스트 #{cases.length}건 통과"
+# grants는 YAML이 아니라 SQL이라 위 키 경로 방식으로 바꿀 수 없다. 문장 하나를 통째로 바꿔
+# 캐릭터 삭제 권한이 빠지거나(대화·멱등 기록) tombstone 원칙이 깨지는 경로를 재현한다.
+GRANTS = "db/grants/persona_minimal.sql"
+grant_cases = [
+  ["GRANT SELECT, INSERT, UPDATE, DELETE ON persona_minimal.idempotency_records TO persona_runtime;",
+   "GRANT SELECT, INSERT, UPDATE ON persona_minimal.idempotency_records TO persona_runtime;",
+   "캐릭터 삭제가 지우는 idempotency_records에 runtime DELETE 권한이 없다"],
+  ["GRANT SELECT, INSERT, UPDATE, DELETE ON persona_minimal.generations    TO persona_runtime;",
+   "GRANT SELECT, INSERT, UPDATE ON persona_minimal.generations    TO persona_runtime;",
+   "캐릭터 삭제가 지우는 generations에 runtime DELETE 권한이 없다"],
+  ["GRANT SELECT, INSERT, DELETE ON persona_minimal.chat_idempotency_records TO persona_runtime;",
+   "GRANT SELECT, INSERT ON persona_minimal.chat_idempotency_records TO persona_runtime;",
+   "캐릭터 삭제가 지우는 chat_idempotency_records에 runtime DELETE 권한이 없다"],
+  ["GRANT SELECT, INSERT, UPDATE ON persona_minimal.personas         TO persona_runtime;",
+   "GRANT SELECT, INSERT, UPDATE, DELETE ON persona_minimal.personas         TO persona_runtime;",
+   "personas에 runtime DELETE를 주지 않는다"],
+]
+grant_cases.each do |from, to, message|
+  path = File.join(root, GRANTS)
+  original = File.read(path)
+  begin
+    raise "사례의 원래 문장을 grants에서 찾지 못했다: #{from}" unless original.include?(from)
+    File.write(path, original.sub(from, to))
+    output_path = File.join(root, "result.log")
+    success = system("sh", File.join(root, "scripts/validate-persona-app-manifests.sh"), out: output_path, err: [:child, :out])
+    raise "회귀 검사가 결함을 놓쳤다: #{message}" if success
+    raise "예상과 다른 검사 오류다: #{message}" unless File.read(output_path).include?(message)
+    puts "검출: #{message}"
+  ensure
+    File.write(path, original)
+  end
+end
+puts "스케줄링 음성 테스트 #{cases.length + grant_cases.length}건 통과"
 RUBY
