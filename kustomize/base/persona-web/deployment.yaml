@@ -55,10 +55,15 @@ spec:
                     app.kubernetes.io/name: persona-web
       containers:
         - name: web
-          # 검증된 linux/amd64 child manifest. 소스 커밋 d8e41e1(PR #7 머지,
-          # ForwardAuth 세션 판정·채팅 판정 보정·모바일 레이아웃).
+          # 검증된 linux/amd64 child manifest. 소스 커밋 656dd26(PR #8 머지,
+          # 초안 없음 시 이름·소개 초기 입력 폼).
           #
-          # 직전 이미지(317a7ed)의 두 결함을 고친다. (1) 대화 가능 여부를 초안
+          # 직전 이미지(d8e41e1)는 초안이 없으면 빈 소개로 초안 생성을 자동 호출했고,
+          # Gateway가 비공백 name·profile을 요구해(422 invalid_settings) 늘 실패했다.
+          # 이제 이름·소개 입력 폼을 보여주고 유효한 값을 저장할 때만 초안을 만든다.
+          # 새 API 경로는 쓰지 않으므로 Gateway 이미지 조건은 그대로다.
+          #
+          # d8e41e1에서 들어온 두 수정도 그대로 포함한다. (1) 대화 가능 여부를 초안
           # 상태로 판정해, 활성화하면 초안 슬롯이 비는 탓에 자료를 제대로 적용한
           # 캐릭터일수록 대화가 막혔다 — 이제 persona.active_version_id로 판정한다.
           # (2) 공개 경로에서도 토큰 입력창이 떠 아무 문자열이나 넣어야 통과했다 —
@@ -72,7 +77,7 @@ spec:
           # 중복해 적지 않는다).
           # SSE 자체는 이 컨테이너를 거치지 않는다(파일 첫 줄 참고) — HTTPRoute가
           # /v1을 persona-gateway로 직접 보내므로 nginx 버퍼링과 무관하다.
-          image: ghcr.io/persona-runtime/persona-web@sha256:a8232f5a2541e044f4db0d7efa94003a880f0cf48bf390edce4f07540689a9ed
+          image: ghcr.io/persona-runtime/persona-web@sha256:737883fd8f680b68aa3c17c6bc2d785cb0e9b9be0717c9122320f43c8d58a753
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
