@@ -73,12 +73,12 @@ db_path, migrate_path, app_path, ingress_path,
   ns_data_path, ns_app_path, grants_path, traefik_values_path,
   migrate_base_path, argocd_dir = ARGV
 
-# 0005 전용 + llm 모드 prompt 예산(BUDGET_4096) Gateway 이미지(persona-gateway PR #21 머지
-# 16caa0c 뒤 게시, SUPPORTED=0005). 0005 migration은 적용·Complete됐다(Job은 history/). 바꿀 때는 kustomize/base/persona-gateway/
+# 0005 전용 + llm 모드 prompt 예산(BUDGET_4096) + 캐릭터 동기 삭제 Gateway 이미지(persona-gateway
+# PR #22 머지 4eaa9cc 뒤 게시, SUPPORTED=0005). 삭제 API가 쓰는 DELETE 권한은 아래 grant 계약이 검사한다. 0005 migration은 적용·Complete됐다(Job은 history/). 바꿀 때는 kustomize/base/persona-gateway/
 # deployment.yaml의 image를 함께 바꾼다.
 # 아래 MIGRATION_IMAGES["0004-chat"]은 이 값과 다르지만 그게 맞다 — 그쪽은 이미 만들어진
 # Job이 쓴 이미지라 바꿀 수 없다(다음 주석 참고).
-GATEWAY_IMAGE = "ghcr.io/persona-runtime/persona-minimal-api@sha256:0ac1ac2aa432c9fdcfb6cb516e5863ed7d21ece3895dd3070ecb985c76ff89ef"
+GATEWAY_IMAGE = "ghcr.io/persona-runtime/persona-minimal-api@sha256:cd81c0262b82ff9a5c0f1db8d79779f2a82ad236ca6424e4e4f5a168f595b4d0"
 # llm 모드 prompt 예산(BUDGET_4096)이 들어가기 전 이미지들. 이 이미지는 mode와 무관하게
 # BUDGET_8192로 prompt를 조립해 vLLM --max-model-len 4096을 넘기 쉽다. llm 모드 선언이 이
 # 이미지를 쓰면 막는다 — 모드 전환만 먼저 배포되는 것을 막는 가드다.
@@ -109,7 +109,7 @@ MIGRATION_IMAGES = {
   # 적용·Complete 뒤 history/로 옮겼지만 이력으로 남긴다(0001·0003·0004와 같은 정책).
   "0005-generation-lease" => "ghcr.io/persona-runtime/persona-minimal-api@sha256:26dcf9e0f2b64aa49c7683bab37ba6a937027b92b0ba2fa1f1f6ed21f53d311e",
 }
-WEB_IMAGE     = "ghcr.io/persona-runtime/persona-web@sha256:737883fd8f680b68aa3c17c6bc2d785cb0e9b9be0717c9122320f43c8d58a753"
+WEB_IMAGE     = "ghcr.io/persona-runtime/persona-web@sha256:b0a26509e694602a67d990b3a1b3376e2cb16ef18ddcecb71527dec24d2be530"
 EMBEDDING_IMAGE = "ghcr.io/persona-runtime/persona-embedding-service@sha256:a0165c1c16c96c7525f36af013aee1fa635501aad9b7f2aab05cfee31be1e887"
 HOME_WORKERS  = ["k8s-worker1", "k8s-worker2"]
 
@@ -678,6 +678,26 @@ raise "[안전] 기본 권한으로 UPDATE를 주면 alembic_version에도 붙�
 raise "[안전] alembic_version은 SELECT만 줘야 한다" unless grants =~ /GRANT SELECT ON persona_minimal\.alembic_version/i
 raise "[안전] alembic_version 쓰기 권한을 명시적으로 회수해야 한다" unless grants =~ /REVOKE[^;]*ON persona_minimal\.alembic_version/im
 raise "[안전] platform이 테이블 정의를 복제하면 안 된다" if grants =~ /CREATE TABLE/i
+
+# 캐릭터 삭제(DELETE /v1/personas/{id}, persona-gateway 4eaa9cc)가 한 트랜잭션에서 지우는 표.
+# 하나라도 DELETE가 빠지면 삭제 요청이 permission denied(500)로 끝나고 트랜잭션이 통째로
+# 롤백된다. 권한 검사는 지울 행이 없어도 문장 단위로 하므로 대화 없는 캐릭터도 실패한다.
+PERSONA_DELETE_TABLES = %w[
+  idempotency_records material_versions material_sources material_chunks
+  conversations user_messages generations chat_idempotency_records
+].freeze
+grant_privileges = lambda do |table|
+  grants.scan(/GRANT\s+([A-Z,\s]+?)\s+ON\s+persona_minimal\.#{table}\s+TO\s+persona_runtime/i)
+        .flat_map { |(privileges)| privileges.split(",").map { |p| p.strip.upcase } }
+end
+PERSONA_DELETE_TABLES.each do |table|
+  raise "[안전] 캐릭터 삭제가 지우는 #{table}에 runtime DELETE 권한이 없다" unless grant_privileges.call(table).include?("DELETE")
+end
+# 캐릭터 행은 tombstone으로 남아 멱등 기록이 가리킨다. 사용자 행도 지우는 코드가 없다.
+%w[users personas].each do |table|
+  raise "[안전] #{table}에 runtime DELETE를 주지 않는다 — 캐릭터 삭제는 tombstone이다" if grant_privileges.call(table).include?("DELETE")
+end
+raise "[안전] runtime에 TRUNCATE를 주지 않는다" if grants =~ /GRANT[^;]*TRUNCATE[^;]*TO persona_runtime/im
 
 puts "persona-app 렌더와 매니페스트 정책 검사 통과"
 RUBY

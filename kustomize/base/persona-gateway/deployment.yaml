@@ -94,18 +94,25 @@ spec:
       containers:
         - name: gateway
           # 검증된 linux/amd64 child manifest. tag, latest, parent OCI index digest로 바꾸지 않는다.
-          # persona-gateway PR #21 머지(16caa0c) 뒤 게시한 이미지다: 0005 전용 + llm 모드 prompt
-          # 예산 BUDGET_4096. 0005만 허용하므로 0004 DB에서는 readyz가 503이다. digest를 바꿀 때는
+          # persona-gateway PR #22 머지(4eaa9cc) 뒤 게시한 이미지다: 0005 전용 + llm 모드 prompt
+          # 예산 BUDGET_4096 + 캐릭터 동기 삭제(DELETE /v1/personas/{id}). 0005만 허용하므로 0004
+          # DB에서는 readyz가 503이다. digest를 바꿀 때는
           # scripts/validate-persona-app-manifests.sh의 GATEWAY_IMAGE도 함께 바꾼다.
           #
+          # 새 migration은 없다(여전히 0005). 대신 캐릭터 삭제가 대화·멱등 기록 표의 행을 지우므로
+          # db/grants/persona_minimal.sql의 DELETE 권한을 **이 이미지를 Sync하기 전에** 다시 적용한다.
+          # 권한 없이 올라가면 삭제 요청만 permission denied(500)로 실패하고 나머지 API는 그대로다.
+          #
           # 롤백 대상은 돌아갈 이미지가 현재 DB revision을 지원하는지가 정한다
-          # (persona-gateway/docs/migrations.md). llm 전환을 되돌릴 때는 직전 이미지
-          # sha256:5438d8a8…(PR #20, 0005 전용)와 mock 모드를 **함께** 되돌린다 — 그 이미지는 llm
+          # (persona-gateway/docs/migrations.md). 삭제 API만 되돌릴 때는 직전 이미지
+          # sha256:0ac1ac2a…(PR #21, 16caa0c)로 돌린다 — 같은 0005·llm 모드라 다른 설정은 그대로
+          # 두고, 추가한 DELETE 권한은 그 이미지가 쓰지 않으므로 남겨도 동작이 바뀌지 않는다.
+          # llm 전환까지 되돌릴 때는 sha256:5438d8a8…(PR #20, 0005 전용)와 mock 모드를 **함께** 되돌린다 — 그 이미지는 llm
           # 모드에서도 BUDGET_8192를 써 vLLM 4096 한도를 넘기 쉽다. 그보다 앞의 롤백 목적지는 bridge
           # 이미지 sha256:26dcf9e0…(소스 6fe5200, 0004·0005 허용, lease 인식)이고, 0004 전용
           # sha256:001d3f57…dccfe는 0005에서 Ready가 되지 않는다. 0005 downgrade는 lease를 인식하는
           # Gateway가 실행 중일 때 하지 않는다(persona-gateway api/generation-ownership-lease-design.md 3절).
-          image: ghcr.io/persona-runtime/persona-minimal-api@sha256:0ac1ac2aa432c9fdcfb6cb516e5863ed7d21ece3895dd3070ecb985c76ff89ef
+          image: ghcr.io/persona-runtime/persona-minimal-api@sha256:cd81c0262b82ff9a5c0f1db8d79779f2a82ad236ca6424e4e4f5a168f595b4d0
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
