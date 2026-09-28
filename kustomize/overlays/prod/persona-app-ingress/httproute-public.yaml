@@ -54,6 +54,55 @@ spec:
         - name: oauth2-proxy
           namespace: persona-edge
           port: 4180
+    # 채팅 SSE 두 경로 — body-limit만 뺀다.
+    #
+    # body-limit은 Traefik buffering Middleware다. 요청 본문뿐 아니라 응답도 끝까지 모았다가
+    # 한 번에 보내므로, 토큰 단위로 흘러야 하는 SSE 응답이 생성이 끝날 때까지 도착하지 않는다.
+    # 그래서 SSE를 여는 두 API만 이 rule로 떼고 나머지 필터(security-headers·rate-limit·
+    # oauth-forward)와 순서, backend는 /v1 rule과 같게 둔다.
+    #
+    # 그 대가로 이 두 경로에는 프록시의 2 MiB 요청 본문 제한도 없다. Gateway의 질문 길이 검사
+    # (글자 수, JSON 파싱 뒤)는 HTTP 본문 크기 제한이 아니다 — 큰 본문은 앱이 끝까지 읽은 뒤에야
+    # 거절된다. 이 경로의 본문 크기 방어는 oauth-forward(로그인 사용자만)와 rate-limit에 기댄다.
+    #
+    # 매칭은 Traefik v3.7(chart 41.4.0) Gateway provider가 지원하는 방식으로 한정한다.
+    # - chat/completions: Exact. 경로에 가변 부분이 없다.
+    # - retry: RegularExpression(Traefik PathRegexp). generation_id가 경로 가운데에 있어 Exact·
+    #   PathPrefix로는 표현할 수 없다. PathRegexp는 부분 일치라 ^…$로 전체 경로를 고정한다 —
+    #   없으면 /v1/generations/x/retry/y 같은 경로도 이 rule로 빠져 body-limit을 우회한다.
+    # - 두 매치 모두 method POST로 한정한다. 다른 method는 /v1 rule(body-limit 있음)로 간다.
+    #
+    # 우선순위: Traefik은 rule 순서가 아니라 매치 모양으로 router priority를 계산한다
+    # (pkg/provider/kubernetes/gateway/httproute.go buildMatchRule). Exact 100000, RegularExpression
+    # 10000+길이×100, method +1000이므로 두 매치 모두 /v1 PathPrefix(10000+3×100)보다 항상 먼저다.
+    - matches:
+        - method: POST
+          path:
+            type: Exact
+            value: /v1/chat/completions
+        - method: POST
+          path:
+            type: RegularExpression
+            value: ^/v1/generations/[^/]+/retry$
+      filters:
+        - type: ExtensionRef
+          extensionRef:
+            group: traefik.io
+            kind: Middleware
+            name: security-headers
+        - type: ExtensionRef
+          extensionRef:
+            group: traefik.io
+            kind: Middleware
+            name: rate-limit
+        - type: ExtensionRef
+          extensionRef:
+            group: traefik.io
+            kind: Middleware
+            name: oauth-forward
+      backendRefs:
+        - name: persona-gateway
+          port: 8080
     - matches:
         - path:
             type: PathPrefix
