@@ -18,6 +18,10 @@
 -- 그 권한을 쓰는 Gateway 이미지를 Sync하기 **전에** 적용한다 — 이전 이미지는 추가 권한을
 -- 쓰지 않으므로 먼저 적용해도 동작이 바뀌지 않지만, 순서가 반대면 새 이미지의 해당
 -- 요청이 permission denied로 실패한다.
+--
+-- 예외 — 새 테이블을 만드는 migration(예: 0006의 credentials·sessions)은 위 "테이블이 없으면
+-- 실패" 규칙 때문에 **migration을 적용한 뒤에만** 이 파일을 실행할 수 있다. 그 사이 새 테이블을
+-- 쓰는 경로만 permission denied이고, 그래서 migration 직후 곧바로 적용한다.
 
 \set ON_ERROR_STOP on
 
@@ -86,3 +90,12 @@ REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON persona_minimal.alembic_version FROM 
 
 -- 5. 시퀀스 권한은 주지 않는다. 0001·0002에는 시퀀스가 없다.
 --    id는 앱이 만든 uuid이고 시각은 now() 기본값이다. 시퀀스가 생기면 이 주석도 고친다.
+
+-- 6. 계정·세션(0006_auth_sessions, A-1). **0006 적용 뒤에만** 실행한다 — 그 전에는 테이블이 없어
+--    이 줄에서 멈춘다(ON_ERROR_STOP). 그래서 파일 맨 끝에 둔다: 0006 전에 이 파일을 다시 적용해도
+--    1~5절은 이미 끝난 뒤라 기존 권한은 그대로 확정된다.
+--    DELETE는 주지 않는다 — 로그아웃은 sessions.revoked_at UPDATE이고, 계정을 지우는 API는 없다.
+--    credentials의 UPDATE는 로그인 실패 횟수·잠금 갱신과 SELECT ... FOR UPDATE(같은 계정의
+--    동시 로그인 직렬화)에, sessions의 UPDATE는 revoked_at·last_seen_at 갱신에 필요하다.
+GRANT SELECT, INSERT, UPDATE ON persona_minimal.credentials TO persona_runtime;
+GRANT SELECT, INSERT, UPDATE ON persona_minimal.sessions    TO persona_runtime;
