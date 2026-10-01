@@ -113,7 +113,9 @@ MIGRATION_IMAGES = {
   # 허용하므로 migration 앞뒤로 같은 이미지가 Ready이고, migration 코드와 앱 코드가 갈라지지 않는다.
   "0006-auth-sessions" => "ghcr.io/persona-runtime/persona-minimal-api@sha256:76d389d6ce0edf83d61b2240c54801c98a68fdc866cd9a7a201220607f5a07e5",
 }
-WEB_IMAGE     = "ghcr.io/persona-runtime/persona-web@sha256:b0a26509e694602a67d990b3a1b3376e2cb16ef18ddcecb71527dec24d2be530"
+# W-0 디자인 시스템 전환 Web 이미지(persona-web develop 2c4d61a, 기능 변경 없음). 바꿀 때는
+# kustomize/base/persona-web/deployment.yaml의 image를 함께 바꾼다.
+WEB_IMAGE     = "ghcr.io/persona-runtime/persona-web@sha256:b821e139594b9306e67258dc7e0459b859811c615fe8f282690ef15ed0431a70"
 EMBEDDING_IMAGE = "ghcr.io/persona-runtime/persona-embedding-service@sha256:a0165c1c16c96c7525f36af013aee1fa635501aad9b7f2aab05cfee31be1e887"
 HOME_WORKERS  = ["k8s-worker1", "k8s-worker2"]
 

@@ -55,8 +55,13 @@ spec:
                     app.kubernetes.io/name: persona-web
       containers:
         - name: web
-          # 검증된 linux/amd64 child manifest. 소스 커밋 5bd851a(PR #9 머지,
-          # 채팅에 적용 버튼·저장/색인 순서 가드·질문 1,000자 한도·캐릭터 삭제).
+          # 검증된 linux/amd64 child manifest. 소스 커밋 2c4d61a(PR #10 머지,
+          # W-0 디자인 시스템 전환(기능 변경 없음) — 캐릭터 중심 3분할 셸·디자인 토큰·글꼴 축소).
+          # 새 API 경로를 쓰지 않으므로 Gateway 이미지 조건은 직전 이미지와 같다. 토큰 화면의
+          # 로그인·회원가입 탭은 비활성 상태가 정상이다(폼 연결은 이후 web 작업).
+          #
+          # 아래 기능은 직전 이미지(5bd851a, PR #9 — 채팅에 적용 버튼·저장/색인 순서 가드·질문
+          # 1,000자 한도·캐릭터 삭제)에서 그대로 이어진다.
           #
           # 캐릭터 삭제 버튼은 DELETE /v1/personas/{id}를 부른다 — Gateway 4eaa9cc 이상과
           # grants의 삭제 권한이 있어야 성공한다. 둘은 같은 persona-app Sync로 함께 올라가고,
@@ -83,7 +88,7 @@ spec:
           # 중복해 적지 않는다).
           # SSE 자체는 이 컨테이너를 거치지 않는다(파일 첫 줄 참고) — HTTPRoute가
           # /v1을 persona-gateway로 직접 보내므로 nginx 버퍼링과 무관하다.
-          image: ghcr.io/persona-runtime/persona-web@sha256:b0a26509e694602a67d990b3a1b3376e2cb16ef18ddcecb71527dec24d2be530
+          image: ghcr.io/persona-runtime/persona-web@sha256:b821e139594b9306e67258dc7e0459b859811c615fe8f282690ef15ed0431a70
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
