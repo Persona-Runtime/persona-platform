@@ -73,12 +73,13 @@ db_path, migrate_path, app_path, ingress_path,
   ns_data_path, ns_app_path, grants_path, traefik_values_path,
   migrate_base_path, argocd_dir = ARGV
 
-# 0005 전용 + llm 모드 prompt 예산(BUDGET_4096) + 캐릭터 동기 삭제 Gateway 이미지(persona-gateway
-# PR #22 머지 4eaa9cc 뒤 게시, SUPPORTED=0005). 삭제 API가 쓰는 DELETE 권한은 아래 grant 계약이 검사한다. 0005 migration은 적용·Complete됐다(Job은 history/). 바꿀 때는 kustomize/base/persona-gateway/
-# deployment.yaml의 image를 함께 바꾼다.
+# 3ee5534 = A-1 인증 bridge(SUPPORTED=0005·0006) + Q-1 프롬프트 v2 Gateway 이미지(persona-gateway
+# develop 3ee5534 뒤 게시). 0006 migration Job이 활성 렌더에 있다(아래 MIGRATION_IMAGES["0006-auth-
+# sessions"]). 캐릭터 삭제용 DELETE 권한은 아래 grant 계약이 검사한다. 바꿀 때는 kustomize/base/
+# persona-gateway/deployment.yaml의 image를 함께 바꾼다.
 # 아래 MIGRATION_IMAGES["0004-chat"]은 이 값과 다르지만 그게 맞다 — 그쪽은 이미 만들어진
 # Job이 쓴 이미지라 바꿀 수 없다(다음 주석 참고).
-GATEWAY_IMAGE = "ghcr.io/persona-runtime/persona-minimal-api@sha256:cd81c0262b82ff9a5c0f1db8d79779f2a82ad236ca6424e4e4f5a168f595b4d0"
+GATEWAY_IMAGE = "ghcr.io/persona-runtime/persona-minimal-api@sha256:76d389d6ce0edf83d61b2240c54801c98a68fdc866cd9a7a201220607f5a07e5"
 # llm 모드 prompt 예산(BUDGET_4096)이 들어가기 전 이미지들. 이 이미지는 mode와 무관하게
 # BUDGET_8192로 prompt를 조립해 vLLM --max-model-len 4096을 넘기 쉽다. llm 모드 선언이 이
 # 이미지를 쓰면 막는다 — 모드 전환만 먼저 배포되는 것을 막는 가드다.
@@ -108,6 +109,9 @@ MIGRATION_IMAGES = {
   # 허용하므로 migration 앞뒤로 같은 이미지가 Ready이고, migration 코드와 앱 코드가 갈라지지 않는다.
   # 적용·Complete 뒤 history/로 옮겼지만 이력으로 남긴다(0001·0003·0004와 같은 정책).
   "0005-generation-lease" => "ghcr.io/persona-runtime/persona-minimal-api@sha256:26dcf9e0f2b64aa49c7683bab37ba6a937027b92b0ba2fa1f1f6ed21f53d311e",
+  # 0006 Job도 운영 Gateway와 같은 bridge 이미지(gateway 3ee5534)를 쓴다 — 0005·0006을 둘 다
+  # 허용하므로 migration 앞뒤로 같은 이미지가 Ready이고, migration 코드와 앱 코드가 갈라지지 않는다.
+  "0006-auth-sessions" => "ghcr.io/persona-runtime/persona-minimal-api@sha256:76d389d6ce0edf83d61b2240c54801c98a68fdc866cd9a7a201220607f5a07e5",
 }
 WEB_IMAGE     = "ghcr.io/persona-runtime/persona-web@sha256:b0a26509e694602a67d990b3a1b3376e2cb16ef18ddcecb71527dec24d2be530"
 EMBEDDING_IMAGE = "ghcr.io/persona-runtime/persona-embedding-service@sha256:a0165c1c16c96c7525f36af013aee1fa635501aad9b7f2aab05cfee31be1e887"
