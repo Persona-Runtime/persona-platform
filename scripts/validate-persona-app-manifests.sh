@@ -109,7 +109,9 @@ MIGRATION_IMAGES = {
   # 적용·Complete 뒤 history/로 옮겼지만 이력으로 남긴다(0001·0003·0004와 같은 정책).
   "0005-generation-lease" => "ghcr.io/persona-runtime/persona-minimal-api@sha256:26dcf9e0f2b64aa49c7683bab37ba6a937027b92b0ba2fa1f1f6ed21f53d311e",
 }
-WEB_IMAGE     = "ghcr.io/persona-runtime/persona-web@sha256:b0a26509e694602a67d990b3a1b3376e2cb16ef18ddcecb71527dec24d2be530"
+# W-0 디자인 시스템 전환 Web 이미지(persona-web develop 2c4d61a, 기능 변경 없음). 바꿀 때는
+# kustomize/base/persona-web/deployment.yaml의 image를 함께 바꾼다.
+WEB_IMAGE     = "ghcr.io/persona-runtime/persona-web@sha256:b821e139594b9306e67258dc7e0459b859811c615fe8f282690ef15ed0431a70"
 EMBEDDING_IMAGE = "ghcr.io/persona-runtime/persona-embedding-service@sha256:a0165c1c16c96c7525f36af013aee1fa635501aad9b7f2aab05cfee31be1e887"
 HOME_WORKERS  = ["k8s-worker1", "k8s-worker2"]
 
