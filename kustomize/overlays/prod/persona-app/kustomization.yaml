@@ -6,11 +6,14 @@ kind: Kustomization
 # public 진입(httproute-public.yaml·인터넷용 Middleware 4개)은 persona-app-ingress로,
 # NetworkPolicy는 persona-app-netpol로 분리했다(Sync 통제, 2026-09-19) — 한 Application이
 # 여러 종류의 변경을 한꺼번에 반영하지 않게 하려는 것. argocd/README.md 참고.
+# Gateway 객체(persona-app/persona-app)는 public-gateway overlay로 옮겼다(Phase 1 소유권 분리).
+# 내부 HTTPRoute는 그 Gateway의 http listener를 이름으로 참조할 뿐 소유하지 않는다.
+# 이 overlay에 Gateway를 다시 넣으면 두 Application이 같은 객체를 추적하게 되므로
+# scripts/validate-persona-app-manifests.sh가 막는다.
 namespace: persona-app
 resources:
   - ../../../base/persona-gateway
   - ../../../base/persona-web
   - ../../../base/persona-embedding
-  - gateway.yaml
   - httproute.yaml
   - middlewares.yaml

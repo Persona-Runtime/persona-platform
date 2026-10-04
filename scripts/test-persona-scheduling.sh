@@ -37,6 +37,7 @@ GATEWAY_ENV = ["spec", "template", "spec", "containers", 0, "env"]
 PUBLIC_ROUTE = "kustomize/overlays/prod/persona-app-ingress/httproute-public.yaml"
 SSE_RULE = ["spec", "rules", 1]
 V1_RULE = ["spec", "rules", 2]
+PUBLIC_GATEWAY = "kustomize/overlays/prod/public-gateway/gateway.yaml"
 middleware_filters = lambda do |*names|
   names.map { |name| { "type" => "ExtensionRef", "extensionRef" => { "group" => "traefik.io", "kind" => "Middleware", "name" => name } } }
 end
@@ -104,6 +105,17 @@ cases = [
   [PUBLIC_ROUTE, SSE_RULE + ["backendRefs", 0, "name"], "persona-web", "SSE rule은 persona-gateway:8080으로 간다"],
   # 일반 /v1 API에는 2 MiB body-limit이 그대로 있어야 한다.
   [PUBLIC_ROUTE, V1_RULE + ["filters"], middleware_filters.call("security-headers", "rate-limit", "oauth-forward"), "persona-app-public HTTPRoute /v1: Middleware 필터 순서가 다르다"],
+  # 공개 Gateway 단일 소유(Phase 1) — persona-app이 Gateway를 다시 선언하면 두 Application이
+  # 같은 객체를 추적한다. 렌더는 성공하므로 개수 검사가 막아야 한다.
+  ["kustomize/overlays/prod/persona-app/kustomization.yaml", ["resources"],
+   ["../../../base/persona-gateway", "../../../base/persona-web", "../../../base/persona-embedding", "httproute.yaml", "middlewares.yaml", "../public-gateway"],
+   "Gateway persona-app/persona-app 선언은 public-gateway 하나여야 한다"],
+  # listener별 검사가 보지 않는 필드(allowedRoutes)를 바꿔도 이동 전 spec 지문이 잡는지 본다.
+  [PUBLIC_GATEWAY, ["spec", "listeners", 0, "allowedRoutes", "namespaces", "from"], "All",
+   "Gateway spec이 이동 전(origin/develop ccc014c)과 다르다"],
+  # 리소스 annotation으로 Replace=true를 붙이면 Application syncPolicy 검사를 우회한다.
+  [PUBLIC_GATEWAY, ["metadata", "annotations", "argocd.argoproj.io/sync-options"], "Replace=true",
+   "Gateway persona-app에 삭제·재생성을 일으키는 sync-options가 있다"],
 ]
 # migration Job 사례는 **활성 렌더에 연결된 파일**에서 뽑는다. 경로를 고정하면 다음 배포에서
 # 다른 Job이 활성화됐을 때 이 검사가 렌더되지 않는 파일을 건드리며 조용히 통과한다.

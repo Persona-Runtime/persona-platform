@@ -21,7 +21,8 @@
 # 자체가 로그인 흐름이라 자기 자신을 인증할 수 없다).
 #
 # Sync 분리(2026-09-19): persona-app-ingress 소속. Gateway 객체 자체(listener 선언)는
-# persona-app에 남아 있다 — 한 Gateway를 두 Application이 나눠 관리할 수 없어서다.
+# public-gateway Application이 소유한다(Phase 1) — 한 Gateway를 두 Application이 나눠 관리할
+# 수 없어서다. 이 Route는 parentRefs로 이름·sectionName만 참조한다.
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
