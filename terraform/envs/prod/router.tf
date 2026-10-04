@@ -102,6 +102,10 @@ resource "aws_instance" "router" {
   # 별도 전환 절차 없이는 허용하지 않는다. 중지는 과금만 줄이며 경로를 복구하지 않는다.
   lifecycle {
     prevent_destroy = true
+
+    # 이 값은 생성 시 공인 IPv4를 요청하기 위한 launch-time 설정이다.
+    # stopped 상태의 refresh 결과만으로 기존 라우터를 교체하지 않는다.
+    ignore_changes = [associate_public_ip_address]
   }
 
   depends_on = [aws_route.router_internet, aws_route_table_association.router]
