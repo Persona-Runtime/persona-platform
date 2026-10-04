@@ -1,0 +1,27 @@
+# 공개 진입 Gateway(persona-app/persona-app)만 관리한다. 앱 폐기(persona-app Application
+# 정리)가 Gateway·Certificate·TLS Secret 삭제로 번지지 않게 소유권을 분리했다(Phase 1).
+#
+# 실제 이관은 기존 객체를 같은 UID로 넘겨받는 것이다 — 이름만 같은 재생성은 실패다.
+# 절차·중단 조건·롤백은 runbooks/transition/phase1/README.md(로컬)를 따른다.
+#
+# 아래 두 가지를 넣지 않는다.
+# - syncPolicy: 자동 Sync·prune·selfHeal이 없어야 사람이 Gate를 확인하며 단계별로 Sync한다.
+# - metadata.finalizers(resources-finalizer.argocd.argoproj.io): 있으면 Application 삭제가
+#   Gateway 삭제로 이어지고, gateway-shim이 만든 Certificate도 ownerReference로 함께 지워질 수 있다.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: public-gateway
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: ingress
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/Persona-Runtime/persona-platform.git
+    targetRevision: develop
+    path: kustomize/overlays/prod/public-gateway
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: persona-app

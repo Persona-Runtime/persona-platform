@@ -40,18 +40,21 @@ db_file=$(mktemp "${TMPDIR:-/tmp}/persona-db.XXXXXX.yaml")
 migrate_file=$(mktemp "${TMPDIR:-/tmp}/persona-migrate.XXXXXX.yaml")
 app_file=$(mktemp "${TMPDIR:-/tmp}/persona-app.XXXXXX.yaml")
 ingress_file=$(mktemp "${TMPDIR:-/tmp}/persona-app-ingress.XXXXXX.yaml")
-trap 'rm -f "$db_file" "$migrate_file" "$app_file" "$ingress_file"' EXIT HUP INT TERM
+public_gateway_file=$(mktemp "${TMPDIR:-/tmp}/public-gateway.XXXXXX.yaml")
+trap 'rm -f "$db_file" "$migrate_file" "$app_file" "$ingress_file" "$public_gateway_file"' EXIT HUP INT TERM
 
 kubectl kustomize "$repo_dir/kustomize/overlays/prod/persona-db"            > "$db_file"
 kubectl kustomize "$repo_dir/kustomize/overlays/prod/persona-migrate"       > "$migrate_file"
 kubectl kustomize "$repo_dir/kustomize/overlays/prod/persona-app"           > "$app_file"
 kubectl kustomize "$repo_dir/kustomize/overlays/prod/persona-app-ingress"   > "$ingress_file"
+kubectl kustomize "$repo_dir/kustomize/overlays/prod/public-gateway"        > "$public_gateway_file"
 
 ruby -ryaml - \
-  "$db_file" "$migrate_file" "$app_file" "$ingress_file" \
+  "$db_file" "$migrate_file" "$app_file" "$ingress_file" "$public_gateway_file" \
   "$repo_dir/argocd/persona-db.yaml" \
   "$repo_dir/argocd/persona-app.yaml" \
   "$repo_dir/argocd/persona-app-ingress.yaml" \
+  "$repo_dir/argocd/public-gateway.yaml" \
   "$repo_dir/argocd/persona-app-netpol.yaml" \
   "$repo_dir/argocd/persona-db-netpol.yaml" \
   "$repo_dir/bootstrap/namespaces/persona-data.yaml" \
@@ -59,7 +62,8 @@ ruby -ryaml - \
   "$repo_dir/db/grants/persona_minimal.sql" \
   "$repo_dir/bootstrap/traefik/values.yaml" \
   "$repo_dir/kustomize/base/persona-migrate/kustomization.yaml" \
-  "$repo_dir/argocd" <<'RUBY'
+  "$repo_dir/argocd" \
+  "$repo_dir/kustomize/overlays/prod" <<'RUBY'
 # encoding: utf-8
 #
 # 로케일이 UTF-8이 아닌 환경(cron, 다른 셸 설정 등)에서 실행하면 Ruby가 이 heredoc 소스를
@@ -68,10 +72,13 @@ ruby -ryaml - \
 # 기본 인코딩(Encoding.default_external)에는 영향을 주지 않으므로 별도로 UTF-8로 고정한다.
 Encoding.default_external = Encoding::UTF_8
 
-db_path, migrate_path, app_path, ingress_path,
-  app_db, app_apps, app_ingress, app_app_netpol, app_db_netpol,
+require "json"
+require "digest"
+
+db_path, migrate_path, app_path, ingress_path, public_gateway_path,
+  app_db, app_apps, app_ingress, app_public_gateway, app_app_netpol, app_db_netpol,
   ns_data_path, ns_app_path, grants_path, traefik_values_path,
-  migrate_base_path, argocd_dir = ARGV
+  migrate_base_path, argocd_dir, prod_overlays_dir = ARGV
 
 # 3ee5534 = A-1 인증 bridge(SUPPORTED=0005·0006) + Q-1 프롬프트 v2 Gateway 이미지(persona-gateway
 # develop 3ee5534 뒤 게시). 0006 migration Job이 활성 렌더에 있다(아래 MIGRATION_IMAGES["0006-auth-
@@ -494,8 +501,70 @@ raise "[안전] Embedding Service 포트는 8081이다" unless embedding_service
   raise "[안전] nodePort를 지정하면 안 된다" if (item.dig("spec", "ports") || []).any? { |p| p.key?("nodePort") }
 end
 
+# --- 공개 Gateway 단일 소유(Phase 1) ----------------------------------------
+# Gateway persona-app/persona-app은 public-gateway Application 하나만 선언한다. 두 Application이
+# 같은 객체를 선언하면 Argo가 서로 다른 tracking 값으로 번갈아 덮어쓰고, 한쪽에서 prune하면
+# Gateway가 삭제된다. Gateway가 지워지면 cert-manager gateway-shim이 만든 Certificate도
+# ownerReference로 함께 지워져 인증서가 재발급될 수 있다. 그래서 overlay 하나만 보지 않고
+# prod overlay 전체를 렌더해 선언 개수를 센다.
+gateway_declarations = []
+Dir.glob(File.join(prod_overlays_dir, "*", "kustomization.yaml")).sort.each do |kustomization|
+  overlay_dir = File.dirname(kustomization)
+  rendered = IO.popen(["kubectl", "kustomize", overlay_dir], err: [:child, :out], &:read)
+  # 렌더 실패를 "Gateway 0개"로 읽으면 중복 선언을 놓친다. 실패는 그대로 멈춘다.
+  raise "prod overlay 렌더 실패: #{overlay_dir}\n#{rendered}" unless $?.success?
+  YAML.load_stream(rendered).compact.each do |item|
+    next unless item["kind"] == "Gateway" && item.dig("metadata", "name") == "persona-app"
+    gateway_declarations << "#{File.basename(overlay_dir)}(namespace=#{item.dig("metadata", "namespace") || "없음"})"
+  end
+end
+unless gateway_declarations == ["public-gateway(namespace=persona-app)"]
+  raise "[안전] prod overlay 전체에서 Gateway persona-app/persona-app 선언은 public-gateway 하나여야 한다: #{gateway_declarations.inspect}"
+end
+
+public_gateway = load(public_gateway_path)
+# Certificate·Secret persona-app-tls는 gateway-shim이 만든 live 객체를 그대로 둔다. 이 overlay가
+# 그것을 선언하면 Argo가 새로 추적·patch하게 되어 재발급이나 값 덮어쓰기 위험이 생긴다.
+unless public_gateway.map { |item| item["kind"] } == ["Gateway"]
+  raise "[안전] public-gateway 렌더는 Gateway 하나만 담아야 한다(Certificate·Secret 선언 금지): #{public_gateway.map { |i| "#{i["kind"]}/#{i.dig("metadata", "name")}" }}"
+end
+
+# 이동 전(origin/develop ccc014c의 persona-app overlay) Gateway spec 지문. 키를 정렬한 JSON의
+# SHA-256이다. spec이 조금이라도 바뀌면 이관 Sync가 단순 소유권 이전이 아니라 listener·TLS
+# 변경을 함께 반영하게 되므로 막는다. 아래 listener별 검사는 이유를 설명하는 메시지를 주고,
+# 이 지문은 그 검사가 보지 않는 필드(allowedRoutes 등)까지 잡는 최종 안전망이다.
+# spec 변경이 정말 필요하면 소유권 이전과 별도 변경으로 나누고, 그때 이 값을 근거와 함께 바꾼다.
+GATEWAY_SPEC_SHA256_BEFORE_MOVE = "3439425fbe0dbc41ee5462b38f6207ea972917ef0dc73d15426bce1f4e769891"
+canonical = lambda do |value|
+  case value
+  when Hash then value.keys.sort.map { |key| [key, canonical.call(value[key])] }.to_h
+  when Array then value.map { |element| canonical.call(element) }
+  else value
+  end
+end
+gw = resource(public_gateway, "Gateway", "persona-app")
+raise "[안전] Gateway는 persona-app namespace여야 한다" unless gw.dig("metadata", "namespace") == "persona-app"
+gateway_spec_json = JSON.generate(canonical.call(gw.fetch("spec")))
+unless Digest::SHA256.hexdigest(gateway_spec_json) == GATEWAY_SPEC_SHA256_BEFORE_MOVE
+  raise "[안전] Gateway spec이 이동 전(origin/develop ccc014c)과 다르다 — 소유권 이전과 spec 변경을 섞지 않는다. 현재 spec: #{gateway_spec_json}"
+end
+# issuer annotation이 바뀌면 gateway-shim이 Certificate를 다른 issuer로 다시 발급한다.
+cert_manager_annotations = (gw.dig("metadata", "annotations") || {}).select { |key, _| key.start_with?("cert-manager.io/") }
+unless cert_manager_annotations == { "cert-manager.io/cluster-issuer" => "letsencrypt-prod" }
+  raise "[안전] Gateway cert-manager annotation이 이동 전과 다르다(cluster-issuer=letsencrypt-prod만 허용): #{cert_manager_annotations}"
+end
+# Application에 syncPolicy가 없어도 리소스 annotation의 sync-options는 그 리소스에 따로 적용된다.
+# Replace=true는 Gateway를 지우고 다시 만들 수 있고(UID 변경 → Certificate cascade 삭제), Force=true도
+# 같은 삭제·재생성 경로를 연다. 이관 대상 Gateway에는 둘 다 허용하지 않는다.
+gateway_sync_options = gw.dig("metadata", "annotations", "argocd.argoproj.io/sync-options").to_s.split(",").map(&:strip)
+forbidden_sync_options = gateway_sync_options & ["Replace=true", "Force=true"]
+unless forbidden_sync_options.empty?
+  raise "[안전] Gateway persona-app에 삭제·재생성을 일으키는 sync-options가 있다: #{forbidden_sync_options}"
+end
+raise "[안전] persona-app 렌더에 Gateway가 남아 있다 — public-gateway로 옮겼다" if app.any? { |i| i["kind"] == "Gateway" }
+raise "[안전] persona-app-ingress 렌더에 Gateway가 있으면 안 된다" if ingress.any? { |i| i["kind"] == "Gateway" }
+
 # --- Traefik 라우팅 -------------------------------------------------------
-gw = resource(app, "Gateway", "persona-app")
 raise "[안전] Gateway는 Traefik이 처리한다" unless gw.dig("spec", "gatewayClassName") == "traefik"
 listeners = gw.dig("spec", "listeners") || []
 raise "[안전] Gateway listener는 http·https 두 개여야 한다: #{listeners.length}개" unless listeners.length == 2
@@ -678,6 +747,7 @@ raise "[안전] persona-app-ingress 렌더에 strip-auth-header가 있으면 안
   app_db          => ["persona-db", "kustomize/overlays/prod/persona-db", "persona-data"],
   app_apps        => ["persona-app", "kustomize/overlays/prod/persona-app", "persona-app"],
   app_ingress     => ["persona-app-ingress", "kustomize/overlays/prod/persona-app-ingress", "persona-app"],
+  app_public_gateway => ["public-gateway", "kustomize/overlays/prod/public-gateway", "persona-app"],
   app_app_netpol  => ["persona-app-netpol", "kustomize/overlays/prod/persona-app-netpol", "persona-app"],
   app_db_netpol   => ["persona-db-netpol", "kustomize/overlays/prod/persona-db-netpol", "persona-data"],
 }.each do |path, (name, source_path, namespace)|
@@ -690,6 +760,11 @@ raise "[안전] persona-app-ingress 렌더에 strip-auth-header가 있으면 안
   raise "[안전] #{name}: 대상 namespace가 다르다" unless spec.dig("destination", "namespace") == namespace
   # 순서는 사람이 단계별로 Sync해서 만든다. 자동 Sync를 켜면 그 순서가 사라진다.
   raise "[안전] #{name}: 자동 Sync를 켜면 안 된다" if spec.key?("syncPolicy")
+end
+# Application 삭제가 관리 리소스 삭제로 이어지는 finalizer를 공개 Gateway 소유자에 붙이지 않는다.
+# 붙어 있으면 Application 정리가 Gateway → Certificate 연쇄 삭제가 된다.
+unless YAML.load_file(app_public_gateway).dig("metadata", "finalizers").nil?
+  raise "[안전] public-gateway Application에 finalizers를 두지 않는다 — Application 삭제가 Gateway 삭제로 번진다"
 end
 
 # 위 루프는 이름을 아는 Application만 본다. 여기서는 argocd/ 아래 파일 전부를 훑어
