@@ -1,4 +1,65 @@
-# AWS GPU 랩 기반 — 생성 전 준비
+# AWS GPU 랩 기반 — 생성 기록과 라우터 준비
+
+> **2026-10-01 확인:** 복원된 이 worktree의 로컬 Terraform state에는 GPU VPC,
+> `ap-northeast-2a` GPU 인스턴스와 EIP가 등록돼 있다. 이후 실제 AWS refresh plan에서도
+> 변경 없음을 확인했다. 아래 2026-09-19·09-25의 "생성 전" 문구와 준비 상태표는 당시 기록이며
+> 현재 미배포를 뜻하지 않는다. 새 site-to-site 라우터의 코드·검증·적용 경계는
+> [AWS 라우터 단계 계획](site-to-site-router-plan.md)을 따른다. 2026-10-01 라우터 EC2와
+> 전용 서브넷·보안 그룹을 생성했다. 두 전용 라우터의 Tailscale 시험망은 양방향
+> ICMP 각 100/100을 확인했지만 기존 GPU·Kubernetes 경로 전환은 수행하지 않았다.
+> 코드의 기본값은 `router_enabled=false`다. 현재 환경의 비공개 `terraform.tfvars`에는
+> `true`와 임시 관리자 SSH `/32`를 유지하며, 이후 일반 plan에서 삭제가 계획되지 않게 한다.
+
+## 전용 라우터 경로용 비공개 시험 EC2
+
+`site_probe_enabled`는 기본 `false`다. 현재 환경에서 시험할 때만 비공개
+`terraform.tfvars` 또는 `TF_VAR_site_probe_enabled=true`로 활성화한다.
+`router_enabled=true`도 함께 유지해야 한다. 두 값이 모두 true일 때만 GPU와 같은
+서브넷에 `t3.micro` 시험 EC2, 전용 보안 그룹, AWS 라우터 보안 그룹에서만 허용하는
+사설 SSH 규칙을 만든다. 공인 IPv4, Tailscale, Kubernetes, 자동 부트스트랩은 없다.
+첫 생성 단계에서는 GPU 서브넷 라우트 테이블이나 기존 노드 경로를 바꾸지 않았다.
+사설 EC2이므로 인터넷에서 직접 SSH하거나 패키지를 설치할 수 있다고 가정하지 않는다.
+
+2026-10-01 실제 계정 plan에서 시험 EC2·보안 그룹·SSH 규칙만 추가되고
+기존 자원 변경·삭제가 0임을 확인했다(`3 to add, 0 to change, 0 to destroy`).
+그 plan을 적용했고 시험 EC2의 사설 주소는 `10.80.0.58`이다. Mac에서 AWS 라우터를
+경유한 SSH도 확인했다. 홈 라우터는 이 주소를 `tailscale0`로 보낸다.
+
+다음 단계 코드는 GPU 서브넷 라우트 테이블에 **`172.29.250.2/32`만** AWS 라우터 ENI로
+보내는 경로를 추가한다. 시험 EC2와 라우터의 ICMP 규칙도 이 시험 주소와 시험 EC2
+사설 주소로만 제한한다. AWS 라우터의 `source_dest_check=false`, 홈·AWS 라우터의
+IP forwarding, Tailnet 경로 승인·수신이 전제다. 이 변경을 적용해도 기존 GPU·Kubernetes
+Node InternalIP나 실제 홈 LAN `192.168.50.0/24`의 경로는 전환하지 않는다.
+2026-10-01 실제 계정 plan에서 `172.29.250.2/32` 경로가 GPU 서브넷 라우트 테이블
+`rtb-07435e3f8b89d2dcd`에서 AWS 라우터 ENI `eni-06195cd88a0ce9dd3`로 향하고,
+ICMP 규칙 세 개만 추가됨을 확인했다(`4 to add, 0 to change, 0 to destroy`).
+저장된 `site-probe-route.tfplan`은 민감한 state 정보를 포함할 수 있어 Git·채팅에
+올리지 않는다. 적용 후 `TF_VAR_site_probe_enabled=true terraform plan`에서
+**변경 없음**을 확인했다. 시험 EC2 → 홈 시험 주소는 ICMP 100/100 응답·평균
+4.225ms, 홈 시험 주소 → 시험 EC2도 100/100 응답·평균 4.708ms였다. 측정 직후
+AWS 라우터의 Tailscale 상태는 홈 라우터와 `direct`였다.
+1200바이트 ICMP payload에 DF를 설정한 시험도 100/100 응답·평균 4.617ms였다.
+이 결과는 해당 크기의 패킷 통과만 확인한다. 손실률·지연의 장기 보장이나 기존
+경로 대비 성능 개선으로 해석하지 않는다. 실제 GPU·Pod의 VXLAN/HTTP 경로
+검증도 별도로 필요하다.
+시험 중에는 매번 `TF_VAR_site_probe_enabled=true`를 유지해야 한다. 생략하면 기본값
+`false`에 따라 시험 EC2와 시험 경로의 삭제 계획이 나올 수 있다.
+시험 EC2와 gp3 디스크는 실행·중지 상태에 따라 비용이 발생한다. 적용과 제거는
+각각 별도의 계획 검토를 거친다.
+
+### TCP/HTTP 시험 준비
+
+ICMP 다음으로 시험 EC2에서 홈 시험 주소 `172.29.250.2/32`의 TCP 8080으로만
+요청을 보낼 수 있도록 egress 규칙을 추가했다. 중간 AWS 라우터에도 시험 EC2
+`10.80.0.58/32`에서 들어오는 TCP 8080만 허용한다. 시험 EC2의 HTTP ingress나
+실제 홈 LAN·GPU 서비스 포트는 열지 않는다. 2026-10-01 실제 계정 plan에서
+규칙 두 개만 추가되고 기존 자원 변경·삭제는 0개임을 확인했다.
+저장된 `site-probe-http.tfplan`을 적용했고, 결과는 2개 추가·변경 0개·삭제 0개였다.
+홈 시험 namespace의 빈 임시 디렉터리를 제공하는 HTTP 서버에 시험 EC2에서
+GET을 100회 보냈고 모두 `200`이었다(평균 0.0090초, 최대 0.0242초).
+이것은 작은 정적 응답의 연결 검증이며 실제 서비스 처리량·장기 가용성이나
+기존 경로 대비 성능 개선을 의미하지 않는다. HTTP 테스트를 마치면 임시 서버를
+종료하고 빈 디렉터리를 제거한다.
 
 2026-09-19: Terraform·노드 Join 계획 작성 단계. AWS 리소스 생성·실제 plan·K8s 조인 완료가 아니다.
 기존 `envs/prod` 경로를 사용하지만 상용 HA 환경이 아닌 단일 GPU 실험 환경이다.
@@ -7,7 +68,7 @@
 
 - 서울 전용 VPC, 퍼블릭 서브넷 하나(/16 VPC의 첫 /24), Internet Gateway, 기본 경로.
 - On-Demand `g6.xlarge` 한 대(4 vCPU·16 GiB RAM·NVIDIA L4 1장, EC2 사양표 기준 가용 GPU 메모리 22 GiB), 암호화 gp3 루트 디스크 100 GiB·3000 IOPS·125 MiB/s.
-- EC2에만 자동 할당 퍼블릭 IPv4. NAT Gateway, EIP, Load Balancer는 만들지 않는다.
+- EC2 primary network interface에 고정 Elastic IP(EIP) 하나. NAT Gateway, Load Balancer는 만들지 않는다.
 - IMDSv2 필수, hop limit 1. AWS API가 필요 없는 호스트이므로 instance IAM role/profile은 만들지 않는다.
 - 초기 SSH용 공개 키만 등록. 개인 키·AWS 키·Tailscale 인증 키·kubeadm 토큰은 코드/state/user-data에 넣지 않는다.
 - SSH는 기본 닫힘. 최초 접속용 관리자 공인 IPv4 `/32`를 명시하면 TCP 22만 임시 허용한다.
@@ -36,7 +97,7 @@ AWS 생성·Kubernetes Join·관측 리소스 Sync가 실행된 것은 아니다
 4. Canonical Ubuntu 24.04 amd64 일반 서버 AMI ID를 확인해 고정한다. data source는 ID·Canonical 소유자·이미지 이름·아키텍처·상태를 함께 검사한다. 자동 latest 선택은 하지 않는다.
 5. AWS VPC CIDR을 홈 LAN·Pod CIDR·Service CIDR·기존 VPN/VPC 경로와 비교한다. 예시 `10.80.0.0/16`은 확정값이 아니다. 코드의 RFC1918 검사는 실제 경로 중복을 판별하지 않는다.
 6. 초기 접속용 공개 키와 관리자 공인 `/32`를 준비한다. 예시 IP·키로 접속할 수 없다.
-7. EC2·EBS·public IPv4·전송 비용을 공식 콘솔에서 재확인하고 월 10~20만원 예산 안에서 실험 시간을 정한다. 예산 알림 설정, 종료 방법과 확인 책임도 생성 전에 정한다.
+7. EC2·EBS·EIP·전송 비용을 공식 콘솔에서 재확인하고 월 10~20만원 예산 안에서 실험 시간을 정한다. EIP는 stopped 상태에도 과금되므로, 중지 기간에도 유지할 이유를 확인한다.
 8. 이 검토와 생성 허가 후에만 `launch_review_confirmed=true`로 실제 plan을 실행한다. 이는 **수동 확인 표시**이며 할당량·가격 자동 검사가 아니다.
 
 ### plan 전에 실제 값이 필요한 입력
@@ -84,7 +145,7 @@ terraform test
 - `launch_review_confirmed=false`는 종료 스위치가 아니다. false로 되돌려도 EC2는 계속 실행된다.
 - `prevent_destroy=true`는 Terraform의 EC2 삭제·교체를 차단한다. 요금 차단이나 콘솔/CLI 삭제 방지가 아니며, 리소스 선언을 제거해도 보호가 유지되는 것은 아니다.
 - 일상 종료는 **EC2 Stop**이다. Pod 삭제·kubelet 중지·Terraform 코드 삭제로는 컴퓨팅 과금이 멈추지 않는다. AWS 상태가 `stopped`인지 확인한다. 이 코드에는 자동 종료 타이머·하드 예산 제한이 없다.
-- EBS는 중지 중에도 과금된다. 인스턴스의 자동 할당 public IPv4는 stop/start 시 바뀔 수 있다. Kubernetes 식별값에 이 주소를 쓰지 않는다.
+- EBS와 EIP는 중지 중에도 과금된다. EIP는 관리 편의를 위한 고정 SSH 목적지일 뿐이며, Kubernetes 식별값·vLLM endpoint에 쓰지 않는다. SSH 허용 범위는 계속 관리자 공인 `/32`다.
 - `delete_on_termination=true`: 실제 EC2 종료(terminate) 시 루트 디스크와 모델 캐시도 삭제된다. Terraform 보호를 해제하거나 콘솔에서 종료하기 전 정확한 대상·데이터 폐기 승인이 필요하다. 이 노드에는 유일한 원본·DB를 두지 않는다.
 - AMI·네트워크·키 변경은 재생성을 유발할 수 있다. plan에서 replacement가 보이면 멈추고 검토한다. `prevent_destroy=true`는 삭제뿐 아니라 **교체도 막으므로**, AMI를 바꾸면 plan이 재생성을 시도하다 하드 실패한다. 그때 보호를 임시로 끄는 것이 아니라 교체가 정말 필요한지부터 검토한다.
 - 루트 볼륨 암호화는 **AWS 관리 키**다(`kms_key_id` 미지정). 고객 관리 키(CMK)의 회전·접근 감사·삭제 통제가 필요해지면 별도 결정으로 추가한다. "암호화됨"과 "키를 우리가 통제함"은 다르다.

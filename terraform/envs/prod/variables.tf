@@ -74,3 +74,36 @@ variable "launch_review_confirmed" {
   type        = bool
   default     = false
 }
+
+variable "router_enabled" {
+  description = "Opt in to the separate AWS router. Keep true in environments where the router already exists."
+  type        = bool
+  default     = false
+}
+
+variable "router_bootstrap_ssh_cidr" {
+  description = "Optional administrator public IPv4 /32 for router bootstrap. Null closes public SSH."
+  type        = string
+  default     = null
+  nullable    = true
+  validation {
+    condition     = var.router_bootstrap_ssh_cidr == null ? true : can(cidrnetmask(var.router_bootstrap_ssh_cidr)) && can(regex("/32$", var.router_bootstrap_ssh_cidr))
+    error_message = "Router public SSH may allow only one IPv4 /32, or null."
+  }
+}
+
+variable "router_tailscale_peer_cidrs" {
+  description = "Optional peer public IPv4 /32 addresses allowed to router UDP 41641; empty by default."
+  type        = set(string)
+  default     = []
+  validation {
+    condition     = alltrue([for cidr in var.router_tailscale_peer_cidrs : can(cidrnetmask(cidr)) && can(regex("/32$", cidr))])
+    error_message = "Each router Tailscale peer source must be an IPv4 /32."
+  }
+}
+
+variable "site_probe_enabled" {
+  description = "전용 라우터의 AWS 서브넷 경로를 검증할 비공개 시험 EC2를 생성한다."
+  type        = bool
+  default     = false
+}
