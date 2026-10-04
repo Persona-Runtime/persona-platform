@@ -29,3 +29,28 @@ output "vpc_id" {
 output "security_group_id" {
   value = aws_security_group.gpu.id
 }
+
+output "router_instance_id" {
+  description = "Null until the separate AWS router is enabled and created."
+  value       = one(aws_instance.router[*].id)
+}
+
+output "router_subnet_id" {
+  description = "Separate router subnet; null while router_enabled is false."
+  value       = one(aws_subnet.router[*].id)
+}
+
+output "router_private_ip" {
+  description = "VPC address for the router; not a Kubernetes Node InternalIP."
+  value       = one(aws_instance.router[*].private_ip)
+}
+
+output "router_public_ip" {
+  description = "Temporary public IPv4 for bootstrap; not an application endpoint."
+  value       = one(aws_instance.router[*].public_ip)
+}
+
+output "site_probe_private_ip" {
+  description = "시험 EC2의 VPC 사설 주소. site_probe_enabled가 false이면 null이다."
+  value       = one(aws_instance.site_probe[*].private_ip)
+}

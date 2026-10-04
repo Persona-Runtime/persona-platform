@@ -1,4 +1,65 @@
-# AWS GPU 랩 기반 — 생성 전 준비
+# AWS GPU 랩 기반 — 생성 기록과 라우터 준비
+
+> **2026-10-01 확인:** 복원된 이 worktree의 로컬 Terraform state에는 GPU VPC,
+> `ap-northeast-2a` GPU 인스턴스와 EIP가 등록돼 있다. 이후 실제 AWS refresh plan에서도
+> 변경 없음을 확인했다. 아래 2026-09-19·09-25의 "생성 전" 문구와 준비 상태표는 당시 기록이며
+> 현재 미배포를 뜻하지 않는다. 새 site-to-site 라우터의 코드·검증·적용 경계는
+> [AWS 라우터 단계 계획](site-to-site-router-plan.md)을 따른다. 2026-10-01 라우터 EC2와
+> 전용 서브넷·보안 그룹을 생성했다. 두 전용 라우터의 Tailscale 시험망은 양방향
+> ICMP 각 100/100을 확인했지만 기존 GPU·Kubernetes 경로 전환은 수행하지 않았다.
+> 코드의 기본값은 `router_enabled=false`다. 현재 환경의 비공개 `terraform.tfvars`에는
+> `true`와 임시 관리자 SSH `/32`를 유지하며, 이후 일반 plan에서 삭제가 계획되지 않게 한다.
+
+## 전용 라우터 경로용 비공개 시험 EC2
+
+`site_probe_enabled`는 기본 `false`다. 현재 환경에서 시험할 때만 비공개
+`terraform.tfvars` 또는 `TF_VAR_site_probe_enabled=true`로 활성화한다.
+`router_enabled=true`도 함께 유지해야 한다. 두 값이 모두 true일 때만 GPU와 같은
+서브넷에 `t3.micro` 시험 EC2, 전용 보안 그룹, AWS 라우터 보안 그룹에서만 허용하는
+사설 SSH 규칙을 만든다. 공인 IPv4, Tailscale, Kubernetes, 자동 부트스트랩은 없다.
+첫 생성 단계에서는 GPU 서브넷 라우트 테이블이나 기존 노드 경로를 바꾸지 않았다.
+사설 EC2이므로 인터넷에서 직접 SSH하거나 패키지를 설치할 수 있다고 가정하지 않는다.
+
+2026-10-01 실제 계정 plan에서 시험 EC2·보안 그룹·SSH 규칙만 추가되고
+기존 자원 변경·삭제가 0임을 확인했다(`3 to add, 0 to change, 0 to destroy`).
+그 plan을 적용했고 시험 EC2의 사설 주소는 `10.80.0.58`이다. Mac에서 AWS 라우터를
+경유한 SSH도 확인했다. 홈 라우터는 이 주소를 `tailscale0`로 보낸다.
+
+다음 단계 코드는 GPU 서브넷 라우트 테이블에 **`172.29.250.2/32`만** AWS 라우터 ENI로
+보내는 경로를 추가한다. 시험 EC2와 라우터의 ICMP 규칙도 이 시험 주소와 시험 EC2
+사설 주소로만 제한한다. AWS 라우터의 `source_dest_check=false`, 홈·AWS 라우터의
+IP forwarding, Tailnet 경로 승인·수신이 전제다. 이 변경을 적용해도 기존 GPU·Kubernetes
+Node InternalIP나 실제 홈 LAN `192.168.50.0/24`의 경로는 전환하지 않는다.
+2026-10-01 실제 계정 plan에서 `172.29.250.2/32` 경로가 GPU 서브넷 라우트 테이블
+`rtb-07435e3f8b89d2dcd`에서 AWS 라우터 ENI `eni-06195cd88a0ce9dd3`로 향하고,
+ICMP 규칙 세 개만 추가됨을 확인했다(`4 to add, 0 to change, 0 to destroy`).
+저장된 `site-probe-route.tfplan`은 민감한 state 정보를 포함할 수 있어 Git·채팅에
+올리지 않는다. 적용 후 `TF_VAR_site_probe_enabled=true terraform plan`에서
+**변경 없음**을 확인했다. 시험 EC2 → 홈 시험 주소는 ICMP 100/100 응답·평균
+4.225ms, 홈 시험 주소 → 시험 EC2도 100/100 응답·평균 4.708ms였다. 측정 직후
+AWS 라우터의 Tailscale 상태는 홈 라우터와 `direct`였다.
+1200바이트 ICMP payload에 DF를 설정한 시험도 100/100 응답·평균 4.617ms였다.
+이 결과는 해당 크기의 패킷 통과만 확인한다. 손실률·지연의 장기 보장이나 기존
+경로 대비 성능 개선으로 해석하지 않는다. 실제 GPU·Pod의 VXLAN/HTTP 경로
+검증도 별도로 필요하다.
+시험 중에는 매번 `TF_VAR_site_probe_enabled=true`를 유지해야 한다. 생략하면 기본값
+`false`에 따라 시험 EC2와 시험 경로의 삭제 계획이 나올 수 있다.
+시험 EC2와 gp3 디스크는 실행·중지 상태에 따라 비용이 발생한다. 적용과 제거는
+각각 별도의 계획 검토를 거친다.
+
+### TCP/HTTP 시험 준비
+
+ICMP 다음으로 시험 EC2에서 홈 시험 주소 `172.29.250.2/32`의 TCP 8080으로만
+요청을 보낼 수 있도록 egress 규칙을 추가했다. 중간 AWS 라우터에도 시험 EC2
+`10.80.0.58/32`에서 들어오는 TCP 8080만 허용한다. 시험 EC2의 HTTP ingress나
+실제 홈 LAN·GPU 서비스 포트는 열지 않는다. 2026-10-01 실제 계정 plan에서
+규칙 두 개만 추가되고 기존 자원 변경·삭제는 0개임을 확인했다.
+저장된 `site-probe-http.tfplan`을 적용했고, 결과는 2개 추가·변경 0개·삭제 0개였다.
+홈 시험 namespace의 빈 임시 디렉터리를 제공하는 HTTP 서버에 시험 EC2에서
+GET을 100회 보냈고 모두 `200`이었다(평균 0.0090초, 최대 0.0242초).
+이것은 작은 정적 응답의 연결 검증이며 실제 서비스 처리량·장기 가용성이나
+기존 경로 대비 성능 개선을 의미하지 않는다. HTTP 테스트를 마치면 임시 서버를
+종료하고 빈 디렉터리를 제거한다.
 
 2026-09-19: Terraform·노드 Join 계획 작성 단계. AWS 리소스 생성·실제 plan·K8s 조인 완료가 아니다.
 기존 `envs/prod` 경로를 사용하지만 상용 HA 환경이 아닌 단일 GPU 실험 환경이다.
