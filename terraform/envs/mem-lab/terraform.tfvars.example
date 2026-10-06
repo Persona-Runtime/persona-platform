@@ -1,0 +1,43 @@
+# EXAMPLE ONLY: 아래 식별자·주소는 전부 합성값이며 그대로 배포할 수 있는 설정이 아니다.
+# gitignore되는 terraform.tfvars로 복사한 뒤, 실제 계정·네트워크를 확인해 바꾼다.
+expected_account_id = "000000000000"
+ami_id              = "ami-00000000000000000"
+availability_zone   = "ap-northeast-2a"
+
+# 이 lab VPC의 주소. reserved_cidrs 중 어느 항목과도 겹치면 plan이 멈춘다.
+vpc_cidr = "10.90.0.0/16"
+
+# 겹치면 안 되는 범위 **전부**를 여기에 적는다. 기본값이 없는 필수 항목이다 — 하나를 빼면
+# 그 범위는 검사되지 않고, 게이트가 통과해도 그 충돌은 남는다.
+#
+# 각 값을 어디서 읽는가 (추측하지 않는다):
+#   1. home LAN        → 홈 라우터의 DHCP 범위. 이 저장소 기준 192.168.50.0/24
+#   2. Pod CIDR        → kubectl -n kube-system get cm cilium-config -o yaml | grep cluster-pool-ipv4-cidr
+#                        (또는 CP의 /etc/kubernetes/manifests/kube-controller-manager.yaml
+#                        --cluster-cidr)
+#   3. Service CIDR    → CP의 /etc/kubernetes/manifests/kube-apiserver.yaml
+#                        --service-cluster-ip-range. **저장소에 기록돼 있지 않다.**
+#                        kube-dns가 10.96.0.10이라는 사실만으로 prefix를 추측하지 않는다.
+#   4. GPU VPC 후보    → terraform/envs/prod의 vpc_cidr (같은 tailnet에 붙을 예정이라 지금
+#                        실재하지 않아도 예약 취급한다)
+reserved_cidrs = [
+  "192.168.50.0/24", # home LAN
+  "10.244.0.0/16",   # Pod CIDR
+  "10.96.0.0/12",    # Service CIDR — 실제 --service-cluster-ip-range로 교체한다
+  "10.80.0.0/16",    # GPU VPC 후보 (envs/prod)
+]
+
+ssh_public_key = "ssh-ed25519 REPLACE_WITH_YOUR_PUBLIC_KEY"
+
+# 최초 SSH가 필요할 때만 현재 공인 IPv4를 /32로 넣는다. tailnet 접속이 확인되면 null로 되돌린다.
+bootstrap_ssh_cidr = null
+
+# 선택: 홈 피어의 **공인** IPv4/32. tailnet 100.x 주소가 아니다. 비워 두면 Tailscale은
+# DERP 중계로 붙는다(느리지만 동작한다).
+tailscale_peer_cidrs = []
+
+# 검토와 명시적 승인 전까지 false로 둔다. 전원 스위치가 아니다.
+launch_review_confirmed = false
+
+# 여기에 넣지 않는 것: tailnet auth key, kubeadm join token, CA hash, 비밀번호.
+# 이 파일은 Terraform state로 들어가고 state는 평문이다.

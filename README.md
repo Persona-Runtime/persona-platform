@@ -23,70 +23,10 @@ Prometheus local-path는 worker2에 종속되며 DB 복제로 해결되지 않�
 
 ## 인프라 구성도
 
-실선은 확인된 구성·연결, 점선은 미배포 계획이다. 공유 워커 풀 안의 앱은 배치 후보를
-나타내며, 노드마다 정확히 하나씩 실행된다는 뜻은 아니다. 웹 검증은 worker2 Traefik으로
-고정한 터널 경로를 사용했다. 일반 서비스 진입 경로 전체의 장애 내성을 검증한 것은 아니다.
+![Persona Runtime 인프라 구성도 — 홈 Kubernetes와 AWS GPU vLLM 연결](assets/architecture-slide-v13.drawio.png)
 
-```mermaid
-flowchart TB
-    laptop["노트북 · 브라우저 / kubectl"]
-    git["Git · 배포 선언"]
-
-    subgraph home["홈 · 단일 Proxmox 물리 호스트"]
-        subgraph cpvm["k8s-cp VM"]
-            cp["Kubernetes Control Plane<br/>API server · etcd · scheduler · controller-manager"]
-            operator["CNPG Operator · 1개"]
-        end
-        subgraph workers["공유 워커 풀 · worker1 / worker2"]
-            argo["Argo CD · 수동 Sync"]
-            traefik["Traefik · 2개<br/>Gateway API / HTTPRoute"]
-            web["Web · 2개"]
-            gateway["Python Gateway · 1개"]
-            rw["persona-db-rw Service"]
-            db["worker1 · PostgreSQL primary 1개"]
-            dbdisk[("worker1 local-path<br/>DB PVC 20Gi")]
-            replica["worker2 · PostgreSQL replica<br/>Gate 4 · 미배포"]
-            replicadisk[("worker2 local-path<br/>신규 DB PVC · 미생성")]
-            prom["Prometheus · worker2"]
-            promdisk[("worker2 local-path<br/>메트릭 PVC")]
-            grafana["Grafana"]
-            metrics["노드 · Kubernetes 메트릭"]
-            csi["NFS CSI · nfs-shared"]
-        end
-        nfs[("NFS 전용 VM<br/>공유 저장소 · DB/PVC 이전 아님")]
-    end
-
-    subgraph aws["AWS · 후속 계획 / 미배포"]
-        gpu["GPU Worker · vLLM"]
-    end
-
-    laptop -->|"Tailscale · 관리 접근"| cp
-    laptop -->|"검증한 worker2 터널 경로"| traefik
-    traefik -->|"웹 경로"| web
-    traefik -->|"API 경로"| gateway
-    gateway -->|"SQL 읽기·쓰기"| rw
-    rw --> db
-    db --> dbdisk
-    db -.->|"WAL 비동기 복제 계획"| replica
-    replica -.-> replicadisk
-    argo -->|"선언 조회"| git
-    argo -->|"승인한 revision 적용"| cp
-    operator -->|"API로 DB Cluster 조정"| cp
-    grafana -->|"PromQL 조회"| prom
-    prom -->|"PodMonitor · 9187 /metrics · UP 확인"| db
-    prom -.->|"추가 후 수집 검증"| replica
-    prom -->|"스크랩"| metrics
-    prom --> promdisk
-    csi -->|"두 홈 워커에서 NFS 마운트"| nfs
-    gpu -.->|"Tailscale · 동일 클러스터 조인 계획"| cp
-
-    classDef planned stroke-dasharray: 5 5;
-    class replica,replicadisk,gpu planned;
-```
-
-홈 Pod 네트워크는 Cilium VXLAN과 kube-proxy를 사용한다. AWS 연결·vLLM 호출 경로는 아직
-검증하지 않았다. DB 복제본은 별도 로컬 볼륨을 사용하며, 기존 DB 디스크를 공유하거나 옮기는
-방식이 아니다. 두 DB가 생겨도 같은 Proxmox 호스트의 장애까지 견디지는 못한다.
+구성도는 서비스 연결과 배치 개요를 나타내며, 실제 배포·장애 복구 검증 결과를 대신하지 않는다.
+홈 워커와 DB 복제본은 같은 Proxmox 물리 호스트를 사용하므로 물리 호스트 장애까지 견디는 구성은 아니다.
 
 ## 진행 중인 변경
 
@@ -127,17 +67,10 @@ sh scripts/validate-persona-app-manifests.sh
 bash scripts/test-persona-scheduling.sh
 # monitoring-stack만 Helm chart를 네트워크로 받아 렌더한다. 오프라인에서는 돌지 않는다.
 sh scripts/validate-monitoring-manifests.sh
-sh scripts/validate-gpu-observability-manifests.sh
-# bootstrap local-path(Argo 밖) 허용 노드·StorageClass 기준 — 파일만 읽는다
-sh scripts/validate-local-path-bootstrap.sh
-bash scripts/test-local-path-bootstrap.sh
-# 모델 cache seed(persona-inference, Argo 미등록)
-sh scripts/validate-model-cache-manifests.sh
-bash scripts/test-model-cache-manifests.sh
-python3 -m unittest discover -s tests/model-seed
-# vLLM 서빙(persona-inference, Argo 미등록)
-sh scripts/validate-vllm-manifests.sh
-bash scripts/test-vllm-manifests.sh
+# mem-lab 노드 선언: public Kubernetes port와 GPU runtime 유입을 막는다.
+sh scripts/validate-mem-lab-declarations.sh
+# 위 검사와 terraform test가 실제로 결함을 잡는지 복사본에 결함을 넣어 확인한다(terraform 필요).
+sh scripts/test-mem-lab-negative.sh
 ```
 
 렌더·정책 검사 성공은 실제 스케줄링, 무중단 배포, 메트릭 수집 성공의 증거가 아니다.

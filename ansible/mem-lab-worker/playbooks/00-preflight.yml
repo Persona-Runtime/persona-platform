@@ -1,0 +1,121 @@
+---
+# persona-mem-01의 읽기 전용 증거 수집. 어떤 설정도 바꾸지 않는다.
+#
+# 모든 조회 task에 `check_mode: false`를 붙인다. `ansible.builtin.command`는 기본적으로
+# `--check`에서 건너뛰어지므로, 그대로 두면 `--check` 실행이 아무것도 읽지 못한 채 "통과"로
+# 보인다. 읽기만 하는 task이므로 check mode에서 실행해도 host를 바꾸지 않는다.
+- name: Memory lab worker host preflight
+  hosts: mem_lab_nodes
+  gather_facts: true
+  become: false
+  any_errors_fatal: true
+
+  vars:
+    # t3a.medium의 실제 MemTotal은 4 GiB에서 firmware·예약분을 뺀 값이라 4096보다 작다.
+    # 위아래를 모두 막는 이유는 아래 assert 주석에 있다.
+    mem_expected_memtotal_mb_min: 3300
+    mem_expected_memtotal_mb_max: 5000
+
+  tasks:
+    - name: Ubuntu 24.04 amd64 대상만 허용
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.distribution == 'Ubuntu'
+          - ansible_facts.distribution_major_version == '24'
+          - ansible_facts.architecture == 'x86_64'
+        fail_msg: >-
+          이 playbook은 검토한 Ubuntu 24.04 amd64 host만 대상으로 한다. lab Pod가
+          linux/amd64 전용이라 architecture가 다르면 실험 자체가 성립하지 않는다.
+
+    # **위아래를 모두 막는다.** 아래쪽은 흔한 검사지만, 이 실험에서는 위쪽이 더 중요하다.
+    # 노드가 계획보다 크면 lab consumer가 선언된 상한(3584Mi)까지 올라가도 kubelet이
+    # MemoryPressure를 선언하지 않는다. 그 결과는 "축출이 일어나지 않았다"가 아니라
+    # **압박 주입 실패**이고, 그것을 모른 채 기록하면 실험 결론이 뒤집힌다.
+    - name: 메모리 용량이 계획한 t3a.medium(4 GiB)과 맞는지 확인
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.memtotal_mb > mem_expected_memtotal_mb_min
+          - ansible_facts.memtotal_mb < mem_expected_memtotal_mb_max
+        fail_msg: >-
+          MemTotal이 {{ ansible_facts.memtotal_mb }} MiB로 t3a.medium(4 GiB) 전제를 벗어난다.
+          더 큰 노드에서는 선언된 consumer 값으로 메모리 압박에 도달하지 못해 이 실험이
+          성립하지 않는다. 인스턴스 타입을 먼저 확인한다.
+        success_msg: "MemTotal={{ ansible_facts.memtotal_mb }} MiB (4 GiB 전제 범위 안)"
+
+    # gp3 30 GiB 전제. image pull과 journal이 같은 루트 볼륨을 쓴다.
+    - name: Root filesystem 여유 확인
+      ansible.builtin.assert:
+        that:
+          - >-
+            (ansible_facts.mounts | selectattr('mount', 'equalto', '/') | first).size_available
+            > 10 * 1024 * 1024 * 1024
+        fail_msg: >-
+          루트 여유가 10 GiB 미만이다. 실험 중 journal과 image가 늘어나면 디스크 압박이
+          메모리 압박과 섞여 축출 원인을 구분할 수 없게 된다.
+
+    - name: Swap 상태 기록 (10-base가 끄기 전 상태)
+      ansible.builtin.debug:
+        msg: "swaptotal_mb={{ ansible_facts.swaptotal_mb }}"
+
+    - name: Root filesystem 여유와 swap 상태 읽기
+      ansible.builtin.command:
+        cmd: "sh -c 'df -h / && swapon --show'"
+      changed_when: false
+      check_mode: false
+      register: mem_host_storage_and_swap
+
+    # kubelet의 축출 판단과 이벤트 타임스탬프가 시계에 의존한다. 시계가 어긋나면 축출
+    # 순서를 기록에서 재구성할 수 없다.
+    - name: Clock 동기화 상태 읽기
+      ansible.builtin.command:
+        cmd: timedatectl show --property=NTPSynchronized --property=TimeUSec
+      changed_when: false
+      check_mode: false
+      register: mem_host_clock
+
+    # MTU를 Join 전에 읽는다. Cilium underlay 기준이 1280이고 여유가 0이다. Join 뒤에
+    # 확인하면 이미 Pod 통신이 조용히 깨진 상태에서 원인을 찾게 된다. tailscale0은 아직
+    # 없을 수 있으므로 없는 것도 정상 기록이다.
+    - name: 네트워크 인터페이스와 MTU 읽기
+      ansible.builtin.command:
+        cmd: "sh -c 'ip -o link show | awk \"{print \\$2, \\$NF}\"; ip route show default'"
+      changed_when: false
+      check_mode: false
+      register: mem_host_network
+
+    # cgroup v2가 아니면 kubelet의 메모리 축출 동작과 memory.current 기반 관측이 달라진다.
+    # Ubuntu 24.04는 기본이 v2이지만, 이 실험의 전제라 값을 남긴다.
+    - name: cgroup 계층 확인
+      ansible.builtin.command:
+        cmd: stat -f -c %T /sys/fs/cgroup
+      changed_when: false
+      check_mode: false
+      register: mem_host_cgroup
+
+    - name: cgroup v2인지 확인
+      ansible.builtin.assert:
+        that:
+          - "'cgroup2fs' in mem_host_cgroup.stdout"
+        fail_msg: >-
+          /sys/fs/cgroup이 cgroup2fs가 아니다({{ mem_host_cgroup.stdout | trim }}).
+          cgroup v1에서는 kubelet의 메모리 축출 기준과 관측 지표가 달라 이 실험의 전제가 깨진다.
+
+    - name: 아직 설치하지 않은 binary 상태를 구분해 기록
+      ansible.builtin.command:
+        cmd: "sh -c 'for bin in containerd kubeadm kubelet tailscale; do command -v \"$bin\" || true; done'"
+      changed_when: false
+      check_mode: false
+      register: mem_host_binaries
+
+    - name: Preflight 증거 표시
+      ansible.builtin.debug:
+        msg:
+          memtotal_mb: "{{ ansible_facts.memtotal_mb }}"
+          storage_and_swap: "{{ mem_host_storage_and_swap.stdout_lines }}"
+          clock: "{{ mem_host_clock.stdout_lines }}"
+          network_and_mtu: "{{ mem_host_network.stdout_lines }}"
+          cgroup: "{{ mem_host_cgroup.stdout | trim }}"
+          binaries: "{{ mem_host_binaries.stdout_lines }}"
+          note: >-
+            이 playbook의 통과는 "host가 준비 단계를 시작할 수 있다"까지다. tailnet 경로,
+            kubeadm Join 성공, Pod 간 통신을 뜻하지 않는다.

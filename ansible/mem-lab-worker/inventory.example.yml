@@ -1,0 +1,9 @@
+# 합성 예시다. 실제 IP, 키 경로, Tailnet 주소, 토큰을 Git에 넣지 않는다.
+# 203.0.113.0/24는 문서 전용 대역(TEST-NET-3)이라 실제로 접속되지 않는다.
+all:
+  children:
+    mem_lab_nodes:
+      hosts:
+        persona-mem-01:
+          ansible_host: 203.0.113.20
+          ansible_user: ubuntu

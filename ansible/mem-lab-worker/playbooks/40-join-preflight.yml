@@ -1,0 +1,401 @@
+---
+# `kubeadm join` **직전**의 읽기 전용 확인. 이 playbook은 Join하지 않고, token·CA hash를
+# 받지도 않고, 어떤 설정도 바꾸지 않는다.
+#
+# ── 이 playbook이 증명하는 계층과 증명하지 못하는 계층 ──────────────────────
+#
+# 통과가 "Pod 통신이 정상이다"를 뜻하지 않는다. 확인 항목마다 어느 계층까지인지 다르다.
+#
+# | 확인                         | 증명하는 것                                   |
+# | ---------------------------- | --------------------------------------------- |
+# | src_valid_mark=0, 재부팅 유지 | host sysctl                                   |
+# | tailscale ping               | tailnet L3 **뿐** (direct인지 DERP인지 구분)  |
+# | TCP 6443                     | subnet route 수락 + API 포트 도달             |
+# | TCP 4240                     | CP의 Cilium health 응답                       |
+# | tailscale0 MTU               | underlay 값 하나. Pod route MTU는 별개다      |
+#
+# **아래 네 가지는 Join 전에 확인할 수 없다.** 이 playbook은 확인했다고 말하지 않고, 대신
+# Join 뒤에 무엇을 어디서 실행해야 하는지 마지막 task에 출력한다.
+#
+#  - kubelet 10250 **수신** — control plane → 이 노드 방향이다. 이 노드에서 자기 포트로
+#    접속해 보는 것은 같은 경로가 아니다(loopback은 tailnet을 지나지 않는다). CP에서 확인한다.
+#  - Cilium VXLAN **UDP 8472** — UDP는 연결이 없어 TCP처럼 "열렸다"를 확인할 수 없고, 이
+#    노드에 Cilium agent가 아직 없어 응답할 상대도 없다. Join 뒤 실제 Pod 트래픽으로 본다.
+#  - CoreDNS 질의 — Pod netns 안에서만 의미가 있다. 이 노드에는 아직 Pod가 없다.
+#  - Pod-to-Pod MTU — 위와 같다. underlay가 다 맞아도 여기서 깨질 수 있고, 그것이 이 실험의
+#    네트워크 리허설 목적이다.
+#
+# token 존재 여부를 어떻게 확인하는가: 값을 받지 않고 **환경변수가 비어 있지 않은지만** 본다.
+# 값을 vars로 받으면 로그와 `--diff`에 남는다.
+- name: Read-only checks before kubeadm join
+  hosts: mem_lab_nodes
+  gather_facts: true
+  become: true
+  any_errors_fatal: true
+
+  vars:
+    # x.y.z만 꺼내는 패턴. `v` 접두사와 `Kubernetes ` 접두사, 빌드 메타데이터를 모두 흘린다.
+    mem_semver_pattern: '[0-9]+\.[0-9]+\.[0-9]+'
+    # **버전 게이트의 기준값**이다. CP에서
+    # `kubectl version -o json`의 serverVersion.gitVersion으로 읽는다(예: v1.36.4).
+    mem_api_server_version: ""
+    # drift 기록용이다. 판정 기준이 아니다 — 위 주석과 아래 게이트 설명 참고.
+    mem_control_plane_kubelet_version: ""
+    # CP의 tailnet 주소(100.x). LAN 주소를 넣으면 tailnet 경로를 확인하는 의미가 없다.
+    mem_control_plane_tailnet_ip: ""
+    # 이 노드가 kubelet --node-ip로 쓸 주소. tailscale0의 실제 주소와 대조한다.
+    mem_intended_node_ip: ""
+    # Cilium underlay 기준값. 여유가 0이라 이보다 크면 Pod 트래픽이 조용히 잘린다.
+    mem_expected_tailscale_mtu: 1280
+    # tunnel overhead를 뺀 Pod route 값. Join 뒤 Pod 안에서 확인할 기대값이라 여기서는
+    # 출력만 한다.
+    mem_expected_pod_route_mtu: 1230
+
+  tasks:
+    - name: 필요한 binary가 모두 있는지 확인
+      ansible.builtin.command:
+        cmd: "sh -c 'for bin in kubeadm kubelet containerd tailscale; do command -v \"$bin\" >/dev/null || echo \"MISSING:$bin\"; done'"
+      changed_when: false
+      check_mode: false
+      register: mem_join_binaries
+
+    - name: 빠진 binary가 없는지 확인
+      ansible.builtin.assert:
+        that:
+          - "'MISSING:' not in mem_join_binaries.stdout"
+        fail_msg: >-
+          Join 전제 binary가 빠졌다: {{ mem_join_binaries.stdout_lines }}.
+          10-base·20-tailscale을 먼저 끝낸다.
+
+    - name: kubelet·kubeadm 버전 읽기
+      ansible.builtin.command:
+        cmd: "sh -c 'kubeadm version -o short; kubelet --version'"
+      changed_when: false
+      check_mode: false
+      register: mem_join_versions
+
+    # ── 버전 게이트 ─────────────────────────────────────────────────────────
+    #
+    # 기준은 **API server**다. CP kubelet이 아니다. kubelet version skew 정책이 정하는 상한은
+    # API server 버전이고, 같은 클러스터에서도 CP kubelet과 API server의 patch는 다를 수 있다.
+    # CP kubelet을 기준으로 삼으면 실제로 허용되는 조합을 막거나 막아야 할 조합을 통과시킨다.
+    #
+    # 이전 판은 `mem_control_plane_kubelet_version in mem_join_versions.stdout`으로 **부분
+    # 문자열**을 봤다. 두 가지가 틀렸고 둘 다 재현했다.
+    #   1. `v1.36.2`가 `v1.36.21`에도 포함된다 — patch가 19 앞선 kubelet이 통과한다.
+    #   2. kubeadm과 kubelet 출력이 한 stdout에 붙어 있어, **둘 중 하나만** 맞아도 통과한다.
+    # 그래서 각각을 따로 꺼내 major.minor와 patch를 숫자로 비교한다.
+    - name: 노드와 API server 버전을 비교 가능한 형태로 분해
+      ansible.builtin.set_fact:
+        mem_node_kubeadm_semver: "{{ mem_join_versions.stdout_lines[0] | regex_search(mem_semver_pattern) }}"
+        mem_node_kubelet_semver: "{{ mem_join_versions.stdout_lines[1] | regex_search(mem_semver_pattern) }}"
+        mem_api_server_semver: "{{ mem_api_server_version | regex_search(mem_semver_pattern) }}"
+      when: mem_api_server_version | length > 0
+
+    - name: 분해한 값에서 major.minor와 patch를 나눈다
+      ansible.builtin.set_fact:
+        mem_node_kubeadm_minor: "{{ mem_node_kubeadm_semver | regex_replace('^([0-9]+\\.[0-9]+).*$', '\\1') }}"
+        mem_node_kubelet_minor: "{{ mem_node_kubelet_semver | regex_replace('^([0-9]+\\.[0-9]+).*$', '\\1') }}"
+        mem_api_server_minor: "{{ mem_api_server_semver | regex_replace('^([0-9]+\\.[0-9]+).*$', '\\1') }}"
+        mem_node_kubelet_patch: "{{ mem_node_kubelet_semver | regex_replace('^[0-9]+\\.[0-9]+\\.([0-9]+).*$', '\\1') }}"
+        mem_api_server_patch: "{{ mem_api_server_semver | regex_replace('^[0-9]+\\.[0-9]+\\.([0-9]+).*$', '\\1') }}"
+      when: mem_api_server_version | length > 0
+
+    - name: 버전을 읽지 못한 경우를 먼저 걸러낸다
+      ansible.builtin.assert:
+        that:
+          - mem_node_kubeadm_semver | length > 0
+          - mem_node_kubelet_semver | length > 0
+          - mem_api_server_semver | length > 0
+        fail_msg: >-
+          버전 문자열에서 x.y.z를 찾지 못했다. kubeadm={{ mem_node_kubeadm_semver | default('(없음)') }},
+          kubelet={{ mem_node_kubelet_semver | default('(없음)') }},
+          api-server={{ mem_api_server_semver | default('(없음)') }}.
+          비교하지 못한 것을 통과로 남기지 않는다.
+      when: mem_api_server_version | length > 0
+
+    - name: kubeadm·kubelet의 major.minor가 API server와 같은지 확인
+      ansible.builtin.assert:
+        that:
+          - mem_node_kubelet_minor == mem_api_server_minor
+          - mem_node_kubeadm_minor == mem_api_server_minor
+        fail_msg: >-
+          노드의 kube minor가 API server({{ mem_api_server_minor }})와 다르다.
+          kubeadm={{ mem_node_kubeadm_minor }}, kubelet={{ mem_node_kubelet_minor }}.
+          10-base에 mem_kubernetes_package_version을 넘겨 patch까지 고정해 설치한다.
+      when: mem_api_server_version | length > 0
+
+    # kubelet은 API server보다 **새로울 수 없다**(skew 정책). 반대로 오래된 것은 허용 범위가
+    # 있으므로 여기서는 상한만 본다.
+    #
+    # `| int`를 비교 시점에 다시 붙이는 이유: set_fact가 템플릿 결과를 문자열로 저장한다
+    # (jinja2_native가 꺼진 기본 설정). 문자열로 비교하면 "4" > "21"이 되어 patch가 큰 쪽을
+    # 작다고 판정한다 — 이 게이트가 막아야 할 바로 그 경우를 통과시킨다.
+    - name: kubelet patch가 API server patch를 넘지 않는지 확인
+      ansible.builtin.assert:
+        that:
+          - (mem_node_kubelet_patch | int) <= (mem_api_server_patch | int)
+        fail_msg: >-
+          노드 kubelet patch({{ mem_node_kubelet_patch }})가 API server patch
+          ({{ mem_api_server_patch }})보다 새롭다. kubelet은 API server보다 새로울 수 없다.
+        success_msg: >-
+          kubelet {{ mem_node_kubelet_semver }} <= API server {{ mem_api_server_semver }} (minor 일치)
+      when: mem_api_server_version | length > 0
+
+    # CP kubelet과의 차이는 **출력만** 한다. 실패로 만들지 않는 이유는 그것이 skew 기준이
+    # 아니기 때문이다. 같은 클러스터에서 CP kubelet과 API server의 patch가 다른 것은 정상이다.
+    - name: control plane kubelet과의 drift 기록 (판정하지 않는다)
+      ansible.builtin.debug:
+        msg: >-
+          노드 kubelet={{ mem_node_kubelet_semver | default('(읽지 못함)') }},
+          CP kubelet={{ mem_control_plane_kubelet_version }},
+          API server={{ mem_api_server_version | default('(주어지지 않음)') }}.
+          CP kubelet과의 차이는 drift 기록이며 Join 가능 여부의 기준이 아니다.
+      when: mem_control_plane_kubelet_version | length > 0
+
+    - name: API server 버전이 주어지지 않은 경우를 기록
+      ansible.builtin.debug:
+        msg: >-
+          mem_api_server_version이 비어 있어 버전 게이트를 건너뛴다. CP에서
+          `kubectl version -o json`의 serverVersion.gitVersion을 읽어 넘긴 뒤 다시 실행한다.
+          대조 없이 Join하지 않는다 — CP kubelet 버전은 이 게이트의 기준이 아니다.
+      when: mem_api_server_version | length == 0
+
+    - name: swap이 꺼져 있는지 확인
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.swaptotal_mb | default(0) == 0
+        fail_msg: >-
+          swap이 켜져 있다. kubelet이 기동을 거부하고, 남아 있으면 메모리 압박이 축출 대신
+          스왑으로 흡수되어 실험 결과가 달라진다.
+
+    - name: containerd socket과 cgroup driver 확인
+      ansible.builtin.command:
+        cmd: "sh -c 'test -S /run/containerd/containerd.sock && echo socket-ok; grep -c \"SystemdCgroup = true\" /etc/containerd/config.toml'"
+      changed_when: false
+      check_mode: false
+      register: mem_join_containerd
+
+    - name: containerd가 systemd cgroup driver인지 확인
+      ansible.builtin.assert:
+        that:
+          - "'socket-ok' in mem_join_containerd.stdout"
+          - mem_join_containerd.stdout_lines[-1] | int > 0
+        fail_msg: >-
+          containerd socket이 없거나 SystemdCgroup이 true가 아니다. 10-base를 다시 확인한다.
+
+    # ── src_valid_mark: 현재 값과 재부팅 뒤 유지 ────────────────────────────
+
+    - name: src_valid_mark 현재 실효값 읽기
+      ansible.builtin.command:
+        cmd: sysctl -n net.ipv4.conf.all.src_valid_mark
+      changed_when: false
+      check_mode: false
+      register: mem_srcmark_now
+
+    - name: src_valid_mark가 0인지 확인
+      ansible.builtin.assert:
+        that:
+          - mem_srcmark_now.stdout | trim == '0'
+        fail_msg: >-
+          src_valid_mark가 {{ mem_srcmark_now.stdout | trim }}다. 이 상태로 Join하면 Cilium
+          DNS 프록시 패킷이 IP_LOCAL_SOURCE로 **로그 없이** 버려진다(cilium/cilium#48706).
+          20-tailscale의 drop-in을 확인한다.
+
+    - name: 두 영구화 장치가 모두 있는지 확인
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - /etc/sysctl.d/99-cilium-srcmark.conf
+        - /etc/systemd/system/tailscaled.service.d/10-cilium-srcmark.conf
+      register: mem_srcmark_files
+      check_mode: false
+
+    # 둘 다 필요하다. 하나는 부팅 시점 값, 하나는 tailscaled 기동 뒤 재적용을 맡는다.
+    # 하나만 있으면 지금 값이 0이어도 재부팅이나 tailscaled 재시작에서 되돌아간다.
+    - name: src_valid_mark 영구화 선언이 둘 다 있는지 단정
+      ansible.builtin.assert:
+        that:
+          - mem_srcmark_files.results | map(attribute='stat.exists') | list == [true, true]
+        fail_msg: >-
+          src_valid_mark 영구화 선언이 빠졌다:
+          {{ mem_srcmark_files.results | rejectattr('stat.exists') | map(attribute='item') | list }}.
+          sysctl.d만 있으면 tailscaled 기동 뒤 1로 되돌아가고, drop-in만 있으면 재부팅 직후
+          tailscaled가 뜨기 전 구간에서 1이다.
+
+    # **재부팅 뒤 유지를 실제로 증명한다.** 선언이 있다는 것만으로는 유지를 확인한 것이
+    # 아니다 — 선언을 쓴 뒤 한 번도 재부팅하지 않았다면 그 경로는 검증되지 않았다.
+    # 그래서 마지막 부팅 시각과 선언 파일의 수정 시각을 비교한다. 부팅이 더 나중이면
+    # "이 선언으로 부팅한 뒤 값이 0이다"가 성립한다.
+    - name: 마지막 부팅 시각과 선언 파일 수정 시각 읽기
+      ansible.builtin.command:
+        cmd: "sh -c 'awk \"/^btime/ {print \\$2}\" /proc/stat; stat -c %Y /etc/sysctl.d/99-cilium-srcmark.conf; stat -c %Y /etc/systemd/system/tailscaled.service.d/10-cilium-srcmark.conf'"
+      changed_when: false
+      check_mode: false
+      register: mem_srcmark_times
+
+    - name: 선언을 쓴 뒤 재부팅을 거쳤는지 단정
+      ansible.builtin.assert:
+        that:
+          # 괄호는 없어도 같은 뜻이지만(필터가 비교보다 먼저 묶인다) 읽는 사람이 그것을
+          # 확인하지 않아도 되게 명시한다. 문자열이 아니라 숫자로 비교해야 한다 —
+          # epoch 문자열끼리 비교하면 자릿수에 따라 결과가 뒤집힌다.
+          - (mem_srcmark_times.stdout_lines[0] | int) > (mem_srcmark_times.stdout_lines[1] | int)
+          - (mem_srcmark_times.stdout_lines[0] | int) > (mem_srcmark_times.stdout_lines[2] | int)
+        fail_msg: >-
+          src_valid_mark 선언이 마지막 부팅보다 나중에 쓰였다. 지금 값이 0이어도 **재부팅 뒤
+          유지되는지는 확인되지 않았다.** host를 한 번 재부팅하고 이 playbook을 다시 돌린다.
+          부팅 시각={{ mem_srcmark_times.stdout_lines[0] }},
+          선언 수정 시각={{ mem_srcmark_times.stdout_lines[1:] }} (epoch)
+        success_msg: >-
+          선언보다 나중에 부팅했고 현재 값이 0이다 — 재부팅 뒤 유지가 이 부팅으로 확인됐다.
+
+    # ── tailnet L3와 노드 주소 ───────────────────────────────────────────────
+
+    - name: tailscale0 주소와 MTU 읽기
+      ansible.builtin.command:
+        cmd: "sh -c 'ip -o -4 addr show tailscale0 | awk \"{print \\$4}\"; ip -o link show tailscale0 | awk \"{print \\$NF}\"'"
+      changed_when: false
+      check_mode: false
+      failed_when: false
+      register: mem_tailscale_iface
+
+    - name: tailscale0이 올라와 있는지 확인
+      ansible.builtin.assert:
+        that:
+          - mem_tailscale_iface.rc == 0
+          - mem_tailscale_iface.stdout_lines | length >= 2
+        fail_msg: >-
+          tailscale0 인터페이스가 없거나 주소가 없다. `tailscale up`을 사람이 먼저 실행한다
+          (20-tailscale은 등록하지 않는다).
+
+    # underlay MTU 하나만 본다. Pod route MTU는 Cilium이 Join 뒤에 설정하므로 여기서
+    # 확인할 수 없다 — 두 값을 같은 것으로 취급하지 않는다.
+    #
+    # MTU는 **마지막 줄**로 읽는다. 위 명령이 주소를 먼저, MTU를 나중에 출력하고 주소가 둘
+    # 이상일 수 있어서, 고정 색인 [1]을 쓰면 두 번째 주소를 MTU로 읽을 수 있다.
+    - name: tailscale0 MTU가 Cilium underlay 기준과 같은지 확인
+      ansible.builtin.assert:
+        that:
+          - mem_tailscale_iface.stdout_lines[-1] | int == mem_expected_tailscale_mtu | int
+        fail_msg: >-
+          tailscale0 MTU가 {{ mem_tailscale_iface.stdout_lines[-1] }}로 기준값
+          {{ mem_expected_tailscale_mtu }}와 다르다. Cilium underlay는 여유가 0이라, 이 값이
+          크면 Pod 트래픽의 큰 패킷이 조용히 잘린다.
+
+    - name: kubelet node-ip 후보가 tailscale0 주소와 같은지 확인
+      ansible.builtin.assert:
+        that:
+          - mem_tailscale_iface.stdout_lines[0] | regex_replace('/.*$', '') == mem_intended_node_ip
+        fail_msg: >-
+          의도한 node-ip({{ mem_intended_node_ip }})가 tailscale0의 실제 주소
+          ({{ mem_tailscale_iface.stdout_lines[0] }})와 다르다. 이 상태로 Join하면 kubelet이
+          VPC 주소를 InternalIP로 등록하고, CP → kubelet 10250 경로가 tailnet을 지나지 않는다.
+      when: mem_intended_node_ip | length > 0
+
+    - name: node-ip 값이 주어지지 않은 경우를 기록
+      ansible.builtin.debug:
+        msg: >-
+          mem_intended_node_ip가 비어 있어 대조를 건너뛴다. tailscale0의 실제 주소는
+          {{ mem_tailscale_iface.stdout_lines[0] | default('(없음)') }}다. Join 명령에
+          `--node-ip`로 넘길 값을 정해 이 playbook을 다시 돌린다 — 기본값에 맡기면 kubelet이
+          VPC 주소를 고른다.
+      when: mem_intended_node_ip | length == 0
+
+    # direct 연결인지 DERP 중계인지 구분해 기록한다. DERP로도 통신은 되지만 지연이 커져
+    # 축출 실험의 타임스탬프 해석이 달라진다. 실패로 만들지는 않는다.
+    # 플래그를 붙이지 않는다. 기본 동작이 direct 경로가 잡히면 멈추고 아니면 DERP 결과를
+    # 출력하는 것이라 필요한 그대로이고, 이 저장소의 Join 계획도 같은 형태로 쓴다. 검증하지
+    # 않은 플래그 표기를 넣어 실행 시점에 사용법 오류로 죽는 쪽이 더 나쁘다.
+    - name: control plane까지 tailnet L3 확인
+      ansible.builtin.command:
+        cmd: "tailscale ping {{ mem_control_plane_tailnet_ip }}"
+      changed_when: false
+      check_mode: false
+      failed_when: false
+      register: mem_tailnet_ping
+      when: mem_control_plane_tailnet_ip | length > 0
+
+    - name: tailnet L3가 성립하는지 단정
+      ansible.builtin.assert:
+        that:
+          - mem_tailnet_ping.rc == 0
+        fail_msg: >-
+          control plane({{ mem_control_plane_tailnet_ip }})까지 tailnet ping이 실패했다.
+          route 승인과 `tailscale status`를 확인한다. 이 확인은 L3까지만 증명하며, 통과해도
+          Pod 간 통신을 뜻하지 않는다.
+      when: mem_control_plane_tailnet_ip | length > 0
+
+    # Join은 CP의 6443으로 나가는 연결이다. 포트 도달만 본다 — TLS SAN과 CA 검증은 Join
+    # 명령이 하며, 그 검증을 건너뛰는 옵션은 쓰지 않는다.
+    - name: control plane API 6443 도달 확인
+      ansible.builtin.wait_for:
+        host: "{{ mem_control_plane_tailnet_ip }}"
+        port: 6443
+        timeout: 10
+      when: mem_control_plane_tailnet_ip | length > 0
+
+    # CP의 Cilium health endpoint. 여기까지 닿으면 tailnet 위에서 Cilium이 응답한다는
+    # 뜻이지만, 이 노드의 VXLAN 경로를 증명하지는 않는다(이 노드에는 agent가 아직 없다).
+    - name: control plane Cilium health 4240 도달 확인
+      ansible.builtin.wait_for:
+        host: "{{ mem_control_plane_tailnet_ip }}"
+        port: 4240
+        timeout: 10
+      when: mem_control_plane_tailnet_ip | length > 0
+
+    # host 방화벽이 kubelet 10250 수신과 VXLAN 8472를 막고 있지 않은지 **읽는다**.
+    # 이것은 도달성 확인이 아니다 — 실제 경로는 CP에서 확인한다(마지막 task 참고).
+    - name: host 방화벽 상태 읽기
+      ansible.builtin.command:
+        cmd: "sh -c 'command -v ufw >/dev/null && ufw status || echo \"ufw 없음\"; command -v nft >/dev/null && nft list ruleset | head -20 || echo \"nft 없음\"'"
+      changed_when: false
+      check_mode: false
+      failed_when: false
+      register: mem_join_firewall
+
+    # 값을 받지 않고 존재 여부만 본다. 유효한지도, 만료되지 않았는지도 알려주지 않는다.
+    - name: join token이 환경에 주어졌는지만 확인 (값은 읽지 않는다)
+      ansible.builtin.assert:
+        that:
+          - lookup('ansible.builtin.env', 'KUBEADM_TOKEN') | length > 0
+        fail_msg: >-
+          KUBEADM_TOKEN 환경변수가 비어 있다. Join을 실행할 사람이 그 자리에서 넘긴다.
+          이 playbook은 값을 저장하거나 출력하지 않으며 유효성·만료도 확인하지 않는다.
+        success_msg: "join token 환경변수가 비어 있지 않다(값·유효성은 확인하지 않았다)."
+      when: lookup('ansible.builtin.env', 'KUBEADM_TOKEN') is defined
+
+    - name: Join 전 증거 표시
+      ansible.builtin.debug:
+        msg:
+          versions: "{{ mem_join_versions.stdout_lines }}"
+          containerd: "{{ mem_join_containerd.stdout_lines }}"
+          src_valid_mark: "{{ mem_srcmark_now.stdout | trim }}"
+          tailscale0: "{{ mem_tailscale_iface.stdout_lines | default(['(없음)']) }}"
+          tailnet_ping: "{{ mem_tailnet_ping.stdout_lines | default(['(건너뜀)']) }}"
+          firewall: "{{ mem_join_firewall.stdout_lines }}"
+
+    # 여기서 확인할 수 없는 것을 "확인했다"로 남기지 않는다. Join 뒤 사람이 실행할 항목을
+    # 명령과 기대값까지 함께 출력한다.
+    - name: Join 뒤에 확인할 항목 (이 playbook이 확인하지 못한 것)
+      ansible.builtin.debug:
+        msg:
+          kubelet_10250: >-
+            **control plane에서** 이 노드의 tailnet 주소로
+            `nc -z <node-tailnet-ip> 10250`을 실행한다. 이 노드에서 자기 포트로 접속하는 것은
+            loopback이라 tailnet 경로를 지나지 않아 같은 확인이 아니다.
+          cilium_vxlan_8472: >-
+            UDP라 연결 확인이 성립하지 않는다. Join 뒤 `cilium-dbg status`와 두 노드 Pod 간
+            실제 트래픽으로 판단한다.
+          coredns: >-
+            이 노드에 스케줄한 Pod 안에서 클러스터 도메인을 질의한다. Pod netns 밖에서는
+            의미가 없다.
+          pod_to_pod_mtu: >-
+            이 노드의 Pod에서 다른 노드의 Pod로 크기를 올려 가며 확인한다:
+            1200 → {{ mem_expected_pod_route_mtu }} → 1250 → {{ mem_expected_tailscale_mtu }}.
+            기대값은 Pod route {{ mem_expected_pod_route_mtu }}이며, underlay
+            {{ mem_expected_tailscale_mtu }}와 **다른 값이다** — 두 숫자를 섞지 않는다.
+            underlay가 전부 맞아도 여기서 깨질 수 있고, 그 경로를 미리 확인하는 것이 이 노드의
+            네트워크 리허설 목적이다.
+          note: >-
+            이 playbook은 Join하지 않는다. 통과는 "Join을 실행할 수 있다"까지다.

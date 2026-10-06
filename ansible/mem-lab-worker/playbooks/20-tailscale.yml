@@ -1,0 +1,163 @@
+---
+# Tailscale **패키지 설치와 src_valid_mark 재적용 장치까지만** 한다. `tailscale up`,
+# auth key 전달, subnet route 광고·수락, SNAT 설정은 이 playbook이 하지 않는다.
+#
+# 왜 등록을 사람에게 남기는가: auth key는 한 번 쓰면 끝나는 단기 비밀이다. playbook이나
+# inventory에 담으면 Ansible 로그·`--diff` 출력·셸 히스토리에 남고, 그 흔적을 되돌릴 방법이
+# 없다. route 승인도 tailnet 관리 화면에서 사람이 눌러야 유효해진다.
+- name: Install Tailscale and pin src_valid_mark against tailscaled
+  hosts: mem_lab_nodes
+  gather_facts: true
+  become: true
+  any_errors_fatal: true
+
+  vars:
+    # tailscaled가 기동 뒤 src_valid_mark를 1로 켜는 시점이 고정돼 있지 않아, 일정 시간
+    # 반복해서 0으로 되돌린다. 홈 노드에서 이 길이로 안정화된 값이다.
+    mem_srcmark_reapply_seconds: 30
+
+  tasks:
+    - name: Ubuntu 24.04 amd64 대상만 변경 허용
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.distribution == 'Ubuntu'
+          - ansible_facts.distribution_major_version == '24'
+          - ansible_facts.architecture == 'x86_64'
+        fail_msg: >-
+          검토하지 않은 OS나 architecture에는 패키지를 설치하지 않는다.
+
+    - name: keyring 디렉터리 준비
+      ansible.builtin.file:
+        path: /usr/share/keyrings
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Tailscale apt 저장소 키 등록
+      ansible.builtin.get_url:
+        url: https://pkgs.tailscale.com/stable/ubuntu/noble.noarmor.gpg
+        dest: /usr/share/keyrings/tailscale-archive-keyring.gpg
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Tailscale apt 저장소 등록
+      ansible.builtin.apt_repository:
+        repo: >-
+          deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg]
+          https://pkgs.tailscale.com/stable/ubuntu noble main
+        filename: tailscale
+        state: present
+
+    - name: Tailscale 설치
+      ansible.builtin.apt:
+        name: tailscale
+        state: present
+        update_cache: true
+
+    - name: tailscaled drop-in 디렉터리 준비
+      ansible.builtin.file:
+        path: /etc/systemd/system/tailscaled.service.d
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    # ── tailscaled가 켠 src_valid_mark를 되돌린다 ───────────────────────────
+    #
+    # 10-base의 /etc/sysctl.d/99-cilium-srcmark.conf는 **부팅 시점** 값만 담당한다.
+    # tailscaled는 그보다 나중에 기동해 이 값을 1로 다시 켜므로, 그 뒤를 이 drop-in이 맡는다.
+    #
+    # **이미 실패한 두 가지를 다시 시도하지 않는다** (홈 노드 적용 기록):
+    #
+    #  1. `ExecStartPost`로 **한 번만** 0을 쓰는 방식 → tailscaled가 그보다 늦은 시점에
+    #     1로 켜서 소용이 없었다. 그래서 한 번이 아니라 일정 시간 반복한다.
+    #  2. `TS_DISABLE_SRC_VALID_MARK` 환경변수 → tailscale 1.102.2에서 아무 효과가 없었다.
+    #     이 값을 읽는 코드 경로가 없다. 환경변수로 해결하려 하지 않는다.
+    #
+    # `-` 접두사로 실패를 무시한다. 이 루프가 실패해도 tailscaled 자체는 떠 있어야 하고,
+    # 값이 잘못된 것은 아래 assert와 40-join-preflight가 판정한다.
+    #
+    # 알려진 비용: 루프가 끝날 때까지 `systemctl restart tailscaled`가
+    # {{ mem_srcmark_reapply_seconds }}초 동안 반환하지 않는다. 배포를 막는 값이 아니라
+    # 예상해야 하는 값이다.
+    - name: tailscaled 기동 뒤 src_valid_mark를 반복 재적용하는 drop-in 설치
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/tailscaled.service.d/10-cilium-srcmark.conf
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          # tailscaled가 기동 시 net.ipv4.conf.all.src_valid_mark를 1로 켜면 Cilium DNS
+          # 프록시 패킷이 IP_LOCAL_SOURCE로 조용히 버려진다(cilium/cilium#48706).
+          # 켜는 시점이 고정돼 있지 않아 한 번 쓰는 것으로는 부족하다 — 반복해서 되돌린다.
+          [Service]
+          ExecStartPost=-/bin/sh -c 'for _ in $(seq 1 {{ mem_srcmark_reapply_seconds }}); do sysctl -qw net.ipv4.conf.all.src_valid_mark=0; sleep 1; done'
+      register: mem_srcmark_dropin
+
+    - name: drop-in이 바뀐 경우에만 systemd 재적용
+      ansible.builtin.systemd_service:
+        daemon_reload: true
+      when: mem_srcmark_dropin.changed
+
+    # 서비스는 켜 두지만 tailnet에 등록하지는 않는다. `tailscaled`가 떠 있어도
+    # `tailscale up` 없이는 어떤 네트워크에도 붙지 않는다.
+    - name: tailscaled 서비스 활성화 (등록은 하지 않음)
+      ansible.builtin.systemd_service:
+        name: tailscaled
+        state: started
+        enabled: true
+      register: mem_tailscaled_service
+
+    # drop-in이 새로 들어왔다면 이미 돌고 있는 tailscaled는 그것을 적용하지 않은 상태다.
+    # 아래 검증이 **실효값**을 보므로, 검증 전에 재시작을 끝내야 한다.
+    - name: drop-in이 바뀌었으면 tailscaled 재시작
+      ansible.builtin.systemd_service:
+        name: tailscaled
+        state: restarted
+      when: mem_srcmark_dropin.changed and not mem_tailscaled_service.changed
+
+    # 재적용 루프가 1초 간격으로 돌아, 재시작 직후에는 tailscaled가 켠 1이 잠시 보일 수 있다.
+    # 그래서 한 번 읽고 판정하지 않고 0이 될 때까지 기다린다. 끝까지 0이 되지 않으면 실패다.
+    - name: src_valid_mark가 0으로 수렴하는지 확인
+      ansible.builtin.command:
+        cmd: sysctl -n net.ipv4.conf.all.src_valid_mark
+      changed_when: false
+      check_mode: false
+      register: mem_srcmark_effective
+      until: mem_srcmark_effective.stdout | trim == '0'
+      retries: "{{ mem_srcmark_reapply_seconds }}"
+      delay: 1
+
+    - name: src_valid_mark 실효값 단정
+      ansible.builtin.assert:
+        that:
+          - mem_srcmark_effective.stdout | trim == '0'
+        fail_msg: >-
+          src_valid_mark가 {{ mem_srcmark_effective.stdout | trim }}로 남아 있다. tailscaled가
+          켠 값을 drop-in 루프가 되돌리지 못했다. 이 상태로 Join하면 Cilium DNS 프록시 경로가
+          로그 없이 끊긴다. drop-in 경로와 `journalctl -u tailscaled`를 확인한다.
+        success_msg: >-
+          src_valid_mark=0 (재적용 루프 뒤 값이다. **재부팅 뒤에도 유지되는지는 아직 확인되지
+          않았다** — 40-join-preflight가 그것을 따로 판정한다.)
+
+    - name: 등록 상태 읽기 (등록하지 않는다)
+      ansible.builtin.command:
+        cmd: tailscale status --json
+      changed_when: false
+      check_mode: false
+      failed_when: false
+      register: mem_tailscale_status
+
+    - name: 다음 단계는 사람이 실행한다
+      ansible.builtin.debug:
+        msg: >-
+          패키지 설치와 src_valid_mark 재적용 장치까지 끝났다. tailnet 등록은 이 playbook이
+          하지 않는다. host에서 사람이 직접 `tailscale up --accept-routes`를 실행하고 auth key를
+          그 자리에서 입력한다. auth key를 이 playbook·inventory·vars·셸 인자에 넣지 않는다.
+          CP 쪽 `--advertise-routes`·`--snat-subnet-routes=false`와 route 승인도 사람이 한다.
+          등록 뒤 **한 번 재부팅하고** 40-join-preflight를 돌린다 — 그 playbook이 재부팅 뒤
+          src_valid_mark 유지를 판정한다.
+          현재 등록 상태 조회 결과의 exit code: {{ mem_tailscale_status.rc }}
+          (등록 전에는 0이 아닌 값이 정상이다)
