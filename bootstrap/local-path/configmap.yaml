@@ -7,6 +7,15 @@ data:
   # DEFAULT_PATH_FOR_NON_LISTED_NODES를 두지 않는다.
   # 목록에 없는 노드에서는 프로비저닝이 실패하므로, 워크로드에 nodeSelector를
   # 빠뜨려도 엉뚱한 노드에 볼륨이 생기지 않는다.
+  #
+  # persona-gpu-01은 명시해서 허용한다. vLLM 모델 캐시를 GPU 노드의 로컬 디스크에 두기
+  # 위해서다(인터넷에서 매번 받지 않고, GPU 노드에 고정된 PVC에서 읽는다). control-plane처럼
+  # 목록에 없는 노드는 계속 실패해야 한다 — 기본 경로를 두면 nodeSelector가 빠진 PVC가
+  # control-plane 디스크에 조용히 생긴다.
+  #
+  # 이 파일은 bootstrap이라 Argo가 적용하지 않는다. Git에 고친 것만으로는 클러스터에 반영되지
+  # 않는다 — control-plane에서 반영한 뒤 GPU 노드에 고정한 PVC가 Bound되는지 확인해야 한다.
+  # scripts/validate-local-path-bootstrap.sh가 이 목록과 StorageClass 기준을 검사한다.
   config.json: |-
     {
       "nodePathMap": [
@@ -16,6 +25,10 @@ data:
         },
         {
           "node": "k8s-worker2",
+          "paths": ["/opt/local-path-provisioner"]
+        },
+        {
+          "node": "persona-gpu-01",
           "paths": ["/opt/local-path-provisioner"]
         }
       ]

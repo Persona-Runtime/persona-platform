@@ -1,0 +1,12 @@
+# vLLM 서빙: Qwen3-4B-Instruct-2507을 모델 cache PVC에서 read-only로 읽어 서빙한다.
+#
+# 상태: 운영자 제공 결과로 기동·추론·Target UP을 확인했다(2026-09-27). Argo Application은 없다.
+# - Namespace를 만들지 않는다. persona-inference는 이미 있다(kustomize/overlays/prod/persona-model-cache 소유).
+# - 모델 cache PVC(persona-vllm-model-cache)도 그 overlay가 소유한다. 여기서는 이름으로 참조만 한다.
+# - Argo Application이 없다. Gateway LLM mode 전환과 persona-inference NetworkPolicy Sync는 별도 단계다.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - deployment.yaml
+  - service.yaml
+  - podmonitor.yaml

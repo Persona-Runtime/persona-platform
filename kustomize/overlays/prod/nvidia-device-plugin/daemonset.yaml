@@ -1,0 +1,62 @@
+# NVIDIA k8s-device-plugin v0.20.1 static manifest를 기준으로 한다.
+#
+# RuntimeClass/nvidia는 기본 runc를 바꾸지 않고 이 Pod만 host NVIDIA runtime으로 실행한다.
+# nodeSelector와 dedicated taint를 함께 둬 GPU가 없는 홈 워커에 DaemonSet이 배치되거나
+# GPU capacity가 의도치 않게 광고되는 것을 막는다.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: nvidia-device-plugin-daemonset
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: nvidia-device-plugin
+    app.kubernetes.io/component: device-plugin
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: nvidia-device-plugin
+      app.kubernetes.io/component: device-plugin
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: nvidia-device-plugin
+        app.kubernetes.io/component: device-plugin
+    spec:
+      # kubelet device-plugin socket과 GPU capacity를 계속 관리해야 하므로 NVIDIA의
+      # static manifest와 같이 시스템 critical 우선순위를 쓴다. inference Pod 자체에는
+      # 이 우선순위를 주지 않는다.
+      priorityClassName: system-node-critical
+      runtimeClassName: nvidia
+      nodeSelector:
+        personaruntime.xyz/node-pool: gpu
+      tolerations:
+        - key: personaruntime.xyz/dedicated
+          operator: Equal
+          value: gpu-serving
+          effect: NoSchedule
+        # 이후 GPU workload를 보호하려고 nvidia.com/gpu taint를 추가해도 device plugin
+        # 자신이 먼저 Pending으로 밀려나는 것을 막는다.
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: nvidia-device-plugin-ctr
+          image: nvcr.io/nvidia/k8s-device-plugin:v0.20.1
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: kubelet-device-plugins-dir
+              mountPath: /var/lib/kubelet/device-plugins
+      volumes:
+        - name: kubelet-device-plugins-dir
+          hostPath:
+            path: /var/lib/kubelet/device-plugins
+            type: Directory

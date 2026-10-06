@@ -54,8 +54,9 @@ spec:
         - protocol: TCP
           port: 8080
 ---
-# persona-gateway: traefik에서 인입, DB·같은 네임스페이스의 persona-embedding·DNS로만
-# 나간다. persona-embedding 쪽 ingress 허용(allow-embedding)은 별도로 아래에 있다.
+# persona-gateway: traefik에서 인입, DB·같은 네임스페이스의 persona-embedding·DNS·
+# persona-inference의 vLLM으로만 나간다. persona-embedding 쪽 ingress 허용(allow-embedding)은
+# 별도로 아래에 있다.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -107,6 +108,20 @@ spec:
           port: 53
         - protocol: TCP
           port: 53
+    # vLLM 추론(/v1/chat/completions). 받는 쪽 허용은 persona-inference의 allow-vllm-gateway다.
+    # namespaceSelector와 podSelector를 **같은 peer**에 둬야 "persona-inference의 vLLM Pod"(AND)가
+    # 된다. 두 selector를 별도 `-` 항목으로 나누면 OR가 되어 persona-inference 전체 또는 이
+    # namespace의 같은 라벨 Pod로 나가는 허용이 된다.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: persona-inference
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: persona-vllm
+      ports:
+        - protocol: TCP
+          port: 8000
 ---
 # persona-embedding: 같은 네임스페이스의 gateway에서만 인입, egress 규칙을 아예 안 둬서
 # (Egress policyType 자체를 안 씀) default-deny의 전면 egress 차단을 그대로 유지한다 —

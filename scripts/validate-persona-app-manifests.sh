@@ -40,18 +40,21 @@ db_file=$(mktemp "${TMPDIR:-/tmp}/persona-db.XXXXXX.yaml")
 migrate_file=$(mktemp "${TMPDIR:-/tmp}/persona-migrate.XXXXXX.yaml")
 app_file=$(mktemp "${TMPDIR:-/tmp}/persona-app.XXXXXX.yaml")
 ingress_file=$(mktemp "${TMPDIR:-/tmp}/persona-app-ingress.XXXXXX.yaml")
-trap 'rm -f "$db_file" "$migrate_file" "$app_file" "$ingress_file"' EXIT HUP INT TERM
+public_gateway_file=$(mktemp "${TMPDIR:-/tmp}/public-gateway.XXXXXX.yaml")
+trap 'rm -f "$db_file" "$migrate_file" "$app_file" "$ingress_file" "$public_gateway_file"' EXIT HUP INT TERM
 
 kubectl kustomize "$repo_dir/kustomize/overlays/prod/persona-db"            > "$db_file"
 kubectl kustomize "$repo_dir/kustomize/overlays/prod/persona-migrate"       > "$migrate_file"
 kubectl kustomize "$repo_dir/kustomize/overlays/prod/persona-app"           > "$app_file"
 kubectl kustomize "$repo_dir/kustomize/overlays/prod/persona-app-ingress"   > "$ingress_file"
+kubectl kustomize "$repo_dir/kustomize/overlays/prod/public-gateway"        > "$public_gateway_file"
 
 ruby -ryaml - \
-  "$db_file" "$migrate_file" "$app_file" "$ingress_file" \
+  "$db_file" "$migrate_file" "$app_file" "$ingress_file" "$public_gateway_file" \
   "$repo_dir/argocd/persona-db.yaml" \
   "$repo_dir/argocd/persona-app.yaml" \
   "$repo_dir/argocd/persona-app-ingress.yaml" \
+  "$repo_dir/argocd/public-gateway.yaml" \
   "$repo_dir/argocd/persona-app-netpol.yaml" \
   "$repo_dir/argocd/persona-db-netpol.yaml" \
   "$repo_dir/bootstrap/namespaces/persona-data.yaml" \
@@ -59,7 +62,8 @@ ruby -ryaml - \
   "$repo_dir/db/grants/persona_minimal.sql" \
   "$repo_dir/bootstrap/traefik/values.yaml" \
   "$repo_dir/kustomize/base/persona-migrate/kustomization.yaml" \
-  "$repo_dir/argocd" <<'RUBY'
+  "$repo_dir/argocd" \
+  "$repo_dir/kustomize/overlays/prod" <<'RUBY'
 # encoding: utf-8
 #
 # 로케일이 UTF-8이 아닌 환경(cron, 다른 셸 설정 등)에서 실행하면 Ruby가 이 heredoc 소스를
@@ -68,17 +72,29 @@ ruby -ryaml - \
 # 기본 인코딩(Encoding.default_external)에는 영향을 주지 않으므로 별도로 UTF-8로 고정한다.
 Encoding.default_external = Encoding::UTF_8
 
-db_path, migrate_path, app_path, ingress_path,
-  app_db, app_apps, app_ingress, app_app_netpol, app_db_netpol,
-  ns_data_path, ns_app_path, grants_path, traefik_values_path,
-  migrate_base_path, argocd_dir = ARGV
+require "json"
+require "digest"
 
-# 0005 전용 최종 Gateway 이미지(persona-gateway PR #20 머지 뒤 게시, SUPPORTED=0005). 0005
-# migration은 적용·Complete됐다(Job은 history/). 바꿀 때는 kustomize/base/persona-gateway/
-# deployment.yaml의 image를 함께 바꾼다.
+db_path, migrate_path, app_path, ingress_path, public_gateway_path,
+  app_db, app_apps, app_ingress, app_public_gateway, app_app_netpol, app_db_netpol,
+  ns_data_path, ns_app_path, grants_path, traefik_values_path,
+  migrate_base_path, argocd_dir, prod_overlays_dir = ARGV
+
+# 3ee5534 = A-1 인증 bridge(SUPPORTED=0005·0006) + Q-1 프롬프트 v2 Gateway 이미지(persona-gateway
+# develop 3ee5534 뒤 게시). 0006 migration Job이 활성 렌더에 있다(아래 MIGRATION_IMAGES["0006-auth-
+# sessions"]). 캐릭터 삭제용 DELETE 권한은 아래 grant 계약이 검사한다. 바꿀 때는 kustomize/base/
+# persona-gateway/deployment.yaml의 image를 함께 바꾼다.
 # 아래 MIGRATION_IMAGES["0004-chat"]은 이 값과 다르지만 그게 맞다 — 그쪽은 이미 만들어진
 # Job이 쓴 이미지라 바꿀 수 없다(다음 주석 참고).
-GATEWAY_IMAGE = "ghcr.io/persona-runtime/persona-minimal-api@sha256:5438d8a80acf414704242901a428c7ef3154bb5496709d3d2d7bea1e9e63f436"
+GATEWAY_IMAGE = "ghcr.io/persona-runtime/persona-minimal-api@sha256:76d389d6ce0edf83d61b2240c54801c98a68fdc866cd9a7a201220607f5a07e5"
+# llm 모드 prompt 예산(BUDGET_4096)이 들어가기 전 이미지들. 이 이미지는 mode와 무관하게
+# BUDGET_8192로 prompt를 조립해 vLLM --max-model-len 4096을 넘기 쉽다. llm 모드 선언이 이
+# 이미지를 쓰면 막는다 — 모드 전환만 먼저 배포되는 것을 막는 가드다.
+GATEWAY_IMAGES_WITHOUT_LLM_BUDGET = [
+  "ghcr.io/persona-runtime/persona-minimal-api@sha256:5438d8a80acf414704242901a428c7ef3154bb5496709d3d2d7bea1e9e63f436",
+].freeze
+VLLM_BASE_URL = "http://persona-vllm.persona-inference.svc.cluster.local:8000"
+VLLM_MODEL = "Qwen/Qwen3-4B-Instruct-2507"
 
 # migration Job의 승인 이미지는 revision별로 따로 적는다.
 #
@@ -100,8 +116,13 @@ MIGRATION_IMAGES = {
   # 허용하므로 migration 앞뒤로 같은 이미지가 Ready이고, migration 코드와 앱 코드가 갈라지지 않는다.
   # 적용·Complete 뒤 history/로 옮겼지만 이력으로 남긴다(0001·0003·0004와 같은 정책).
   "0005-generation-lease" => "ghcr.io/persona-runtime/persona-minimal-api@sha256:26dcf9e0f2b64aa49c7683bab37ba6a937027b92b0ba2fa1f1f6ed21f53d311e",
+  # 0006 Job도 운영 Gateway와 같은 bridge 이미지(gateway 3ee5534)를 쓴다 — 0005·0006을 둘 다
+  # 허용하므로 migration 앞뒤로 같은 이미지가 Ready이고, migration 코드와 앱 코드가 갈라지지 않는다.
+  "0006-auth-sessions" => "ghcr.io/persona-runtime/persona-minimal-api@sha256:76d389d6ce0edf83d61b2240c54801c98a68fdc866cd9a7a201220607f5a07e5",
 }
-WEB_IMAGE     = "ghcr.io/persona-runtime/persona-web@sha256:a8232f5a2541e044f4db0d7efa94003a880f0cf48bf390edce4f07540689a9ed"
+# W-0 디자인 시스템 전환 Web 이미지(persona-web develop 2c4d61a, 기능 변경 없음). 바꿀 때는
+# kustomize/base/persona-web/deployment.yaml의 image를 함께 바꾼다.
+WEB_IMAGE     = "ghcr.io/persona-runtime/persona-web@sha256:b821e139594b9306e67258dc7e0459b859811c615fe8f282690ef15ed0431a70"
 EMBEDDING_IMAGE = "ghcr.io/persona-runtime/persona-embedding-service@sha256:a0165c1c16c96c7525f36af013aee1fa635501aad9b7f2aab05cfee31be1e887"
 HOME_WORKERS  = ["k8s-worker1", "k8s-worker2"]
 
@@ -353,16 +374,20 @@ raise "[안전] DB timeout 예산을 명시해야 한다" unless (gcontainer["en
 # 켜도 안전한 근거(헤더 덮어쓰기·헤더 제거)는 deployment.yaml 주석에 있다.
 raise "[안전] ForwardAuth가 꺼지면 공개 경로가 정적 토큰 요구로 돌아간다" unless (gcontainer["env"] || []).any? { |e| e["name"] == "PERSONA_FORWARD_AUTH_ENABLED" && e["value"] == "true" }
 
-# 채팅 추론 모드와 mock profile은 **함께** 선언한다(ROLL-01B Hard Node Failure 실험 설정).
-# - profile만 있고 mode가 없으면 기본값·Secret에 따라 모드가 정해져 선언만 보고 동작을 알 수 없다.
-# - mode가 llm이면 profile은 읽히지 않는다 — 실험이 짧은 응답이나 GPU 경로로 조용히 바뀐다.
+# 채팅 추론 모드는 llm이다. 모드와 vLLM 연결값을 **함께** 선언한다.
+# - mode가 없으면 기본값·Secret에 따라 모드가 정해져 선언만 보고 동작을 알 수 없다.
+# - llm인데 BASE_URL·MODEL이 없으면 앱이 기동하지 못하고, 값이 틀리면 모든 채팅이 실패한다.
+# - llm에서는 mock profile을 읽지 않는다. 남겨 두면 적용되는 것처럼 보여 선언이 모호하다.
 # - 같은 이름이 두 번 있으면 뒤의 값이 이기므로 선언이 모호하다.
 gateway_env_names = (gcontainer["env"] || []).map { |e| e["name"] }
 duplicated_env = gateway_env_names.select { |name| gateway_env_names.count(name) > 1 }.uniq
 raise "[안전] Gateway env 이름이 중복됐다: #{duplicated_env.join(", ")}" unless duplicated_env.empty?
 gateway_env = (gcontainer["env"] || []).to_h { |e| [e["name"], e["value"]] }
-raise "[안전] Gateway PERSONA_CHAT_INFERENCE_MODE는 mock으로 명시해야 한다 — 없거나 llm이면 mock profile이 적용되지 않는다" unless gateway_env["PERSONA_CHAT_INFERENCE_MODE"] == "mock"
-raise "[기준선] Gateway PERSONA_CHAT_MOCK_PROFILE은 long이어야 한다(ROLL-01B 실험 설정)" unless gateway_env["PERSONA_CHAT_MOCK_PROFILE"] == "long"
+raise "[안전] Gateway PERSONA_CHAT_INFERENCE_MODE는 llm으로 명시해야 한다" unless gateway_env["PERSONA_CHAT_INFERENCE_MODE"] == "llm"
+raise "[안전] Gateway PERSONA_VLLM_BASE_URL은 persona-vllm Service(/v1 앞까지)여야 한다: #{VLLM_BASE_URL}" unless gateway_env["PERSONA_VLLM_BASE_URL"] == VLLM_BASE_URL
+raise "[안전] Gateway PERSONA_VLLM_MODEL은 vLLM --served-model-name과 같아야 한다: #{VLLM_MODEL}" unless gateway_env["PERSONA_VLLM_MODEL"] == VLLM_MODEL
+raise "[안전] llm 모드에서 PERSONA_CHAT_MOCK_PROFILE을 두지 않는다 — 읽히지 않는 값이다" if gateway_env.key?("PERSONA_CHAT_MOCK_PROFILE")
+raise "[안전] llm 모드 Gateway가 BUDGET_4096 반영 전 이미지를 쓴다 — 예산 수정(persona-gateway PR #21) 이미지 digest로 바꾼다" if GATEWAY_IMAGES_WITHOUT_LLM_BUDGET.include?(gcontainer["image"])
 
 # DB 장애로 재시작되면 안 되므로 startup·liveness는 /healthz여야 한다.
 raise "[안전] Gateway startup probe는 /healthz다" unless gcontainer.dig("startupProbe", "httpGet", "path") == "/healthz"
@@ -476,8 +501,70 @@ raise "[안전] Embedding Service 포트는 8081이다" unless embedding_service
   raise "[안전] nodePort를 지정하면 안 된다" if (item.dig("spec", "ports") || []).any? { |p| p.key?("nodePort") }
 end
 
+# --- 공개 Gateway 단일 소유(Phase 1) ----------------------------------------
+# Gateway persona-app/persona-app은 public-gateway Application 하나만 선언한다. 두 Application이
+# 같은 객체를 선언하면 Argo가 서로 다른 tracking 값으로 번갈아 덮어쓰고, 한쪽에서 prune하면
+# Gateway가 삭제된다. Gateway가 지워지면 cert-manager gateway-shim이 만든 Certificate도
+# ownerReference로 함께 지워져 인증서가 재발급될 수 있다. 그래서 overlay 하나만 보지 않고
+# prod overlay 전체를 렌더해 선언 개수를 센다.
+gateway_declarations = []
+Dir.glob(File.join(prod_overlays_dir, "*", "kustomization.yaml")).sort.each do |kustomization|
+  overlay_dir = File.dirname(kustomization)
+  rendered = IO.popen(["kubectl", "kustomize", overlay_dir], err: [:child, :out], &:read)
+  # 렌더 실패를 "Gateway 0개"로 읽으면 중복 선언을 놓친다. 실패는 그대로 멈춘다.
+  raise "prod overlay 렌더 실패: #{overlay_dir}\n#{rendered}" unless $?.success?
+  YAML.load_stream(rendered).compact.each do |item|
+    next unless item["kind"] == "Gateway" && item.dig("metadata", "name") == "persona-app"
+    gateway_declarations << "#{File.basename(overlay_dir)}(namespace=#{item.dig("metadata", "namespace") || "없음"})"
+  end
+end
+unless gateway_declarations == ["public-gateway(namespace=persona-app)"]
+  raise "[안전] prod overlay 전체에서 Gateway persona-app/persona-app 선언은 public-gateway 하나여야 한다: #{gateway_declarations.inspect}"
+end
+
+public_gateway = load(public_gateway_path)
+# Certificate·Secret persona-app-tls는 gateway-shim이 만든 live 객체를 그대로 둔다. 이 overlay가
+# 그것을 선언하면 Argo가 새로 추적·patch하게 되어 재발급이나 값 덮어쓰기 위험이 생긴다.
+unless public_gateway.map { |item| item["kind"] } == ["Gateway"]
+  raise "[안전] public-gateway 렌더는 Gateway 하나만 담아야 한다(Certificate·Secret 선언 금지): #{public_gateway.map { |i| "#{i["kind"]}/#{i.dig("metadata", "name")}" }}"
+end
+
+# 이동 전(origin/develop ccc014c의 persona-app overlay) Gateway spec 지문. 키를 정렬한 JSON의
+# SHA-256이다. spec이 조금이라도 바뀌면 이관 Sync가 단순 소유권 이전이 아니라 listener·TLS
+# 변경을 함께 반영하게 되므로 막는다. 아래 listener별 검사는 이유를 설명하는 메시지를 주고,
+# 이 지문은 그 검사가 보지 않는 필드(allowedRoutes 등)까지 잡는 최종 안전망이다.
+# spec 변경이 정말 필요하면 소유권 이전과 별도 변경으로 나누고, 그때 이 값을 근거와 함께 바꾼다.
+GATEWAY_SPEC_SHA256_BEFORE_MOVE = "3439425fbe0dbc41ee5462b38f6207ea972917ef0dc73d15426bce1f4e769891"
+canonical = lambda do |value|
+  case value
+  when Hash then value.keys.sort.map { |key| [key, canonical.call(value[key])] }.to_h
+  when Array then value.map { |element| canonical.call(element) }
+  else value
+  end
+end
+gw = resource(public_gateway, "Gateway", "persona-app")
+raise "[안전] Gateway는 persona-app namespace여야 한다" unless gw.dig("metadata", "namespace") == "persona-app"
+gateway_spec_json = JSON.generate(canonical.call(gw.fetch("spec")))
+unless Digest::SHA256.hexdigest(gateway_spec_json) == GATEWAY_SPEC_SHA256_BEFORE_MOVE
+  raise "[안전] Gateway spec이 이동 전(origin/develop ccc014c)과 다르다 — 소유권 이전과 spec 변경을 섞지 않는다. 현재 spec: #{gateway_spec_json}"
+end
+# issuer annotation이 바뀌면 gateway-shim이 Certificate를 다른 issuer로 다시 발급한다.
+cert_manager_annotations = (gw.dig("metadata", "annotations") || {}).select { |key, _| key.start_with?("cert-manager.io/") }
+unless cert_manager_annotations == { "cert-manager.io/cluster-issuer" => "letsencrypt-prod" }
+  raise "[안전] Gateway cert-manager annotation이 이동 전과 다르다(cluster-issuer=letsencrypt-prod만 허용): #{cert_manager_annotations}"
+end
+# Application에 syncPolicy가 없어도 리소스 annotation의 sync-options는 그 리소스에 따로 적용된다.
+# Replace=true는 Gateway를 지우고 다시 만들 수 있고(UID 변경 → Certificate cascade 삭제), Force=true도
+# 같은 삭제·재생성 경로를 연다. 이관 대상 Gateway에는 둘 다 허용하지 않는다.
+gateway_sync_options = gw.dig("metadata", "annotations", "argocd.argoproj.io/sync-options").to_s.split(",").map(&:strip)
+forbidden_sync_options = gateway_sync_options & ["Replace=true", "Force=true"]
+unless forbidden_sync_options.empty?
+  raise "[안전] Gateway persona-app에 삭제·재생성을 일으키는 sync-options가 있다: #{forbidden_sync_options}"
+end
+raise "[안전] persona-app 렌더에 Gateway가 남아 있다 — public-gateway로 옮겼다" if app.any? { |i| i["kind"] == "Gateway" }
+raise "[안전] persona-app-ingress 렌더에 Gateway가 있으면 안 된다" if ingress.any? { |i| i["kind"] == "Gateway" }
+
 # --- Traefik 라우팅 -------------------------------------------------------
-gw = resource(app, "Gateway", "persona-app")
 raise "[안전] Gateway는 Traefik이 처리한다" unless gw.dig("spec", "gatewayClassName") == "traefik"
 listeners = gw.dig("spec", "listeners") || []
 raise "[안전] Gateway listener는 http·https 두 개여야 한다: #{listeners.length}개" unless listeners.length == 2
@@ -543,7 +630,7 @@ check_v1_and_root_rules(
 public_route = resource(ingress, "HTTPRoute", "persona-app-public")
 raise "[안전] 공개 HTTPRoute는 https listener에 붙어야 한다" unless public_route.dig("spec", "parentRefs", 0, "sectionName") == "https"
 raise "[안전] 공개 HTTPRoute hostname이 공개 진입 도메인과 다르다" unless public_route.dig("spec", "hostnames") == ["app.personaruntime.xyz"]
-raise "[안전] 공개 HTTPRoute: 규칙은 /oauth2·/v1·/ 세 개다" unless public_route.dig("spec", "rules")&.length == 3
+raise "[안전] 공개 HTTPRoute: 규칙은 /oauth2·SSE·/v1·/ 네 개다" unless public_route.dig("spec", "rules")&.length == 4
 check_v1_and_root_rules(
   public_route.dig("spec", "rules"), "persona-app-public HTTPRoute",
   # security-headers가 맨 앞 — Traefik 체인은 앞선 미들웨어일수록 뒤 미들웨어의 응답까지
@@ -556,6 +643,54 @@ check_v1_and_root_rules(
     "/" => ["security-headers", "rate-limit", "oauth-forward"],
   },
 )
+
+# 채팅 SSE rule — body-limit(buffering)만 빠지고 인증·rate-limit·보안 헤더와 backend는 /v1과 같다.
+# buffering은 응답까지 모아 보내므로 SSE가 생성 끝까지 도착하지 않는다(httproute-public.yaml 주석).
+SSE_MATCHES = [
+  { "method" => "POST", "path" => { "type" => "Exact", "value" => "/v1/chat/completions" } },
+  { "method" => "POST", "path" => { "type" => "RegularExpression", "value" => "^/v1/generations/[^/]+/retry$" } },
+].freeze
+sse_rule = public_route.dig("spec", "rules").find { |r| r["matches"] == SSE_MATCHES } ||
+  raise("[안전] 공개 HTTPRoute: SSE rule(POST chat/completions Exact + POST retry 앵커 정규식)이 없다")
+sse_filters = (sse_rule["filters"] || []).map do |filter|
+  raise "[안전] SSE rule: filters는 traefik.io Middleware ExtensionRef만 허용한다" unless filter["type"] == "ExtensionRef" &&
+    filter.dig("extensionRef", "group") == "traefik.io" && filter.dig("extensionRef", "kind") == "Middleware"
+  filter.dig("extensionRef", "name")
+end
+raise "[안전] SSE rule에 body-limit(buffering)을 두면 SSE 응답이 끝까지 모였다가 나간다" if sse_filters.include?("body-limit")
+raise "[안전] SSE rule 필터는 security-headers·rate-limit·oauth-forward 순서다 (실제 #{sse_filters})" unless sse_filters == ["security-headers", "rate-limit", "oauth-forward"]
+raise "[안전] SSE rule은 persona-gateway:8080으로 간다" unless sse_rule["backendRefs"] == [{ "name" => "persona-gateway", "port" => 8080 }]
+
+# 정규식이 retry 경로만 잡는지 샘플로 확인한다. Traefik PathRegexp(Go regexp)는 부분 일치라,
+# 앵커가 빠지거나 넓어지면 다른 /v1 경로가 이 rule로 빠져 body-limit을 우회한다.
+# 이 패턴은 Go와 Ruby에서 뜻이 같은 문법만 쓴다.
+retry_regex = Regexp.new(SSE_MATCHES[1].dig("path", "value"))
+["/v1/generations/0f8fad5b-d9cb-469f-a165-70867728950e/retry"].each do |sample|
+  raise "[안전] SSE retry 정규식이 retry 경로를 놓친다: #{sample}" unless retry_regex.match?(sample)
+end
+["/v1/generations/x/retry/extra", "/v1/generations//retry", "/v1/generations/x/cancel",
+ "/v1/generations/a/b/retry", "/prefix/v1/generations/x/retry"].each do |sample|
+  raise "[안전] SSE retry 정규식이 다른 경로까지 잡는다: #{sample}" if retry_regex.match?(sample)
+end
+
+# Traefik v3.7 Gateway provider의 router priority 공식(buildMatchRule)을 옮겨 SSE 매치가 /v1
+# PathPrefix보다 먼저 평가되는지 확인한다. rule 목록 순서는 동점일 때만 영향을 준다.
+# hostname 가중치는 같은 route의 모든 매치에 똑같이 더해지므로 비교에서 뺀다.
+traefik_priority = lambda do |match|
+  type = match.dig("path", "type")
+  value = match.dig("path", "value")
+  base = case type
+         when "Exact" then 100_000
+         when "PathPrefix" then value == "/" ? 1 : 10_000 + value.length * 100
+         when "RegularExpression" then 10_000 + value.length * 100
+         else raise "[안전] 공개 HTTPRoute: 지원하지 않는 path type #{type}"
+         end
+  base + (match["method"] ? 1_000 : 0)
+end
+v1_rule = public_route.dig("spec", "rules").find { |r| r.dig("matches", 0, "path", "value") == "/v1" }
+SSE_MATCHES.each do |match|
+  raise "[안전] SSE 매치가 /v1 PathPrefix보다 우선순위가 낮다: #{match}" unless traefik_priority.call(match) > traefik_priority.call(v1_rule.dig("matches", 0))
+end
 
 oauth_rule = public_route.dig("spec", "rules").find { |r| r.dig("matches", 0, "path", "value") == "/oauth2" } ||
   raise("[안전] 공개 HTTPRoute: /oauth2 규칙이 없다")
@@ -612,6 +747,7 @@ raise "[안전] persona-app-ingress 렌더에 strip-auth-header가 있으면 안
   app_db          => ["persona-db", "kustomize/overlays/prod/persona-db", "persona-data"],
   app_apps        => ["persona-app", "kustomize/overlays/prod/persona-app", "persona-app"],
   app_ingress     => ["persona-app-ingress", "kustomize/overlays/prod/persona-app-ingress", "persona-app"],
+  app_public_gateway => ["public-gateway", "kustomize/overlays/prod/public-gateway", "persona-app"],
   app_app_netpol  => ["persona-app-netpol", "kustomize/overlays/prod/persona-app-netpol", "persona-app"],
   app_db_netpol   => ["persona-db-netpol", "kustomize/overlays/prod/persona-db-netpol", "persona-data"],
 }.each do |path, (name, source_path, namespace)|
@@ -624,6 +760,11 @@ raise "[안전] persona-app-ingress 렌더에 strip-auth-header가 있으면 안
   raise "[안전] #{name}: 대상 namespace가 다르다" unless spec.dig("destination", "namespace") == namespace
   # 순서는 사람이 단계별로 Sync해서 만든다. 자동 Sync를 켜면 그 순서가 사라진다.
   raise "[안전] #{name}: 자동 Sync를 켜면 안 된다" if spec.key?("syncPolicy")
+end
+# Application 삭제가 관리 리소스 삭제로 이어지는 finalizer를 공개 Gateway 소유자에 붙이지 않는다.
+# 붙어 있으면 Application 정리가 Gateway → Certificate 연쇄 삭제가 된다.
+unless YAML.load_file(app_public_gateway).dig("metadata", "finalizers").nil?
+  raise "[안전] public-gateway Application에 finalizers를 두지 않는다 — Application 삭제가 Gateway 삭제로 번진다"
 end
 
 # 위 루프는 이름을 아는 Application만 본다. 여기서는 argocd/ 아래 파일 전부를 훑어
@@ -666,6 +807,26 @@ raise "[안전] 기본 권한으로 UPDATE를 주면 alembic_version에도 붙�
 raise "[안전] alembic_version은 SELECT만 줘야 한다" unless grants =~ /GRANT SELECT ON persona_minimal\.alembic_version/i
 raise "[안전] alembic_version 쓰기 권한을 명시적으로 회수해야 한다" unless grants =~ /REVOKE[^;]*ON persona_minimal\.alembic_version/im
 raise "[안전] platform이 테이블 정의를 복제하면 안 된다" if grants =~ /CREATE TABLE/i
+
+# 캐릭터 삭제(DELETE /v1/personas/{id}, persona-gateway 4eaa9cc)가 한 트랜잭션에서 지우는 표.
+# 하나라도 DELETE가 빠지면 삭제 요청이 permission denied(500)로 끝나고 트랜잭션이 통째로
+# 롤백된다. 권한 검사는 지울 행이 없어도 문장 단위로 하므로 대화 없는 캐릭터도 실패한다.
+PERSONA_DELETE_TABLES = %w[
+  idempotency_records material_versions material_sources material_chunks
+  conversations user_messages generations chat_idempotency_records
+].freeze
+grant_privileges = lambda do |table|
+  grants.scan(/GRANT\s+([A-Z,\s]+?)\s+ON\s+persona_minimal\.#{table}\s+TO\s+persona_runtime/i)
+        .flat_map { |(privileges)| privileges.split(",").map { |p| p.strip.upcase } }
+end
+PERSONA_DELETE_TABLES.each do |table|
+  raise "[안전] 캐릭터 삭제가 지우는 #{table}에 runtime DELETE 권한이 없다" unless grant_privileges.call(table).include?("DELETE")
+end
+# 캐릭터 행은 tombstone으로 남아 멱등 기록이 가리킨다. 사용자 행도 지우는 코드가 없다.
+%w[users personas].each do |table|
+  raise "[안전] #{table}에 runtime DELETE를 주지 않는다 — 캐릭터 삭제는 tombstone이다" if grant_privileges.call(table).include?("DELETE")
+end
+raise "[안전] runtime에 TRUNCATE를 주지 않는다" if grants =~ /GRANT[^;]*TRUNCATE[^;]*TO persona_runtime/im
 
 puts "persona-app 렌더와 매니페스트 정책 검사 통과"
 RUBY

@@ -13,6 +13,15 @@
 --
 -- 적용 방법(값은 사용자가 CP에서):
 --   psql "$MIGRATOR_DATABASE_URL" -v ON_ERROR_STOP=1 -f db/grants/persona_minimal.sql
+--
+-- 이 파일은 GRANT/REVOKE만 담고 여러 번 적용해도 결과가 같다. 권한을 넓히는 변경은
+-- 그 권한을 쓰는 Gateway 이미지를 Sync하기 **전에** 적용한다 — 이전 이미지는 추가 권한을
+-- 쓰지 않으므로 먼저 적용해도 동작이 바뀌지 않지만, 순서가 반대면 새 이미지의 해당
+-- 요청이 permission denied로 실패한다.
+--
+-- 예외 — 새 테이블을 만드는 migration(예: 0006의 credentials·sessions)은 위 "테이블이 없으면
+-- 실패" 규칙 때문에 **migration을 적용한 뒤에만** 이 파일을 실행할 수 있다. 그 사이 새 테이블을
+-- 쓰는 경로만 permission denied이고, 그래서 migration 직후 곧바로 적용한다.
 
 \set ON_ERROR_STOP on
 
@@ -29,13 +38,18 @@ REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 GRANT CONNECT ON DATABASE persona_app TO persona_runtime;
 GRANT USAGE ON SCHEMA persona_minimal TO persona_runtime;
 
--- 3. 앱 테이블. DELETE를 주지 않는다 — 이 코드는 행을 지우지 않고
---    캐릭터 삭제도 deleted_at을 세우는 논리 삭제다.
+-- 3. 앱 테이블. users·personas에는 DELETE를 주지 않는다 — 캐릭터 삭제
+--    (DELETE /v1/personas/{id}, persona-gateway 4eaa9cc)는 캐릭터 행을 지우지 않고
+--    이름을 비운 tombstone으로 남긴다(deleted_at·deletion_id). 생성·삭제 멱등 기록이
+--    그 행을 가리켜야 옛 키 재전송이 새 캐릭터를 만들지 않기 때문이다.
 --    users는 ON CONFLICT DO UPDATE 때문에 UPDATE가 필요하고,
 --    SELECT ... FOR UPDATE(사용자별 생성 직렬화)도 UPDATE 권한을 요구한다.
 GRANT SELECT, INSERT, UPDATE ON persona_minimal.users            TO persona_runtime;
 GRANT SELECT, INSERT, UPDATE ON persona_minimal.personas         TO persona_runtime;
-GRANT SELECT, INSERT, UPDATE ON persona_minimal.idempotency_records TO persona_runtime;
+--    idempotency_records는 캐릭터 삭제가 초안 관련 멱등 기록(생성·삭제 외 operation)을
+--    지운다. 권한 검사는 지울 행이 없어도 문장 단위로 하므로, DELETE가 없으면 대화가 없는
+--    캐릭터 삭제도 permission denied(500)로 실패한다.
+GRANT SELECT, INSERT, UPDATE, DELETE ON persona_minimal.idempotency_records TO persona_runtime;
 
 -- 3-1. 초안과 그 자료(0002_persona_draft). **여기에만 DELETE를 준다.**
 --      초안 폐기와 자료 제거는 행을 지운다. 참조만 끊으면 본문이 그대로 남아 원문 quota가
@@ -48,23 +62,26 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON persona_minimal.material_sources  TO per
 --      넣음). UPDATE 권한이 없으면 그 경로를 우회해 행 하나만 몰래 고치는 코드를 못 짠다.
 GRANT SELECT, INSERT, DELETE ON persona_minimal.material_chunks TO persona_runtime;
 
--- 3-3. 대화(0004_chat). **DELETE를 주지 않는다.**
---      계약 3절이 대화 삭제·응답 편집 API를 만들지 않기로 정했고(별도 설계 대상),
---      캐릭터 삭제는 논리 삭제라 대화 행을 지우지 않는다. 지울 코드가 없는데 권한만
---      있으면 사고나 잘못된 코드가 기록을 지울 수 있다 — 필요해지면 그때 근거와 함께 연다.
+-- 3-3. 대화(0004_chat). DELETE는 캐릭터 삭제 때문에만 준다.
+--      대화 하나를 지우거나 응답을 편집하는 API는 여전히 없다(계약 3절). 캐릭터 삭제는
+--      그 캐릭터의 대화·질문·생성 기록과 대화 멱등 기록을 한 트랜잭션에서 지운다 —
+--      캐릭터가 없어진 뒤에도 원문에서 나온 대화 본문이 DB에 남지 않게 하려는 것이다.
+--      이 권한이 없으면 대화가 있는 캐릭터 삭제가 permission denied(500)로 실패한다.
+--      TRUNCATE는 주지 않는다.
 --      UPDATE가 필요한 이유는 표마다 다르다:
 --        conversations — updated_at 갱신(마지막 활동 시각)
 --        generations   — 상태 전이(queued→running→terminal)와 heartbeat·본문 누적
 --      user_messages는 한 번 쓰면 바뀌지 않지만, 표 사이 권한을 들쭉날쭉하게 두면
 --      다음 사람이 규칙을 못 읽는다. 여기서는 "대화 3표는 같은 조합"으로 맞추고
 --      불변성은 코드와 CHECK 제약이 지킨다.
-GRANT SELECT, INSERT, UPDATE ON persona_minimal.conversations  TO persona_runtime;
-GRANT SELECT, INSERT, UPDATE ON persona_minimal.user_messages  TO persona_runtime;
-GRANT SELECT, INSERT, UPDATE ON persona_minimal.generations    TO persona_runtime;
+GRANT SELECT, INSERT, UPDATE, DELETE ON persona_minimal.conversations  TO persona_runtime;
+GRANT SELECT, INSERT, UPDATE, DELETE ON persona_minimal.user_messages  TO persona_runtime;
+GRANT SELECT, INSERT, UPDATE, DELETE ON persona_minimal.generations    TO persona_runtime;
 --      멱등 키 기록은 한 번 쓰고 읽기만 한다 — 접수 시점에 result_id까지 한 번에 INSERT하고
 --      그 뒤로는 같은 키 재전송에 같은 결과를 돌려주기 위해 읽기만 한다. UPDATE를 빼서
---      "이미 접수한 키의 결과를 나중에 바꾸는" 경로 자체를 막는다.
-GRANT SELECT, INSERT ON persona_minimal.chat_idempotency_records TO persona_runtime;
+--      "이미 접수한 키의 결과를 나중에 바꾸는" 경로 자체를 막는다. DELETE는 캐릭터 삭제가
+--      지운 대화·생성을 가리키던 기록을 함께 지우기 위해서만 준다.
+GRANT SELECT, INSERT, DELETE ON persona_minimal.chat_idempotency_records TO persona_runtime;
 
 -- 4. migration 상태는 읽기만. readiness가 required revision을 확인할 때 필요하다.
 GRANT SELECT ON persona_minimal.alembic_version TO persona_runtime;
@@ -73,3 +90,12 @@ REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON persona_minimal.alembic_version FROM 
 
 -- 5. 시퀀스 권한은 주지 않는다. 0001·0002에는 시퀀스가 없다.
 --    id는 앱이 만든 uuid이고 시각은 now() 기본값이다. 시퀀스가 생기면 이 주석도 고친다.
+
+-- 6. 계정·세션(0006_auth_sessions, A-1). **0006 적용 뒤에만** 실행한다 — 그 전에는 테이블이 없어
+--    이 줄에서 멈춘다(ON_ERROR_STOP). 그래서 파일 맨 끝에 둔다: 0006 전에 이 파일을 다시 적용해도
+--    1~5절은 이미 끝난 뒤라 기존 권한은 그대로 확정된다.
+--    DELETE는 주지 않는다 — 로그아웃은 sessions.revoked_at UPDATE이고, 계정을 지우는 API는 없다.
+--    credentials의 UPDATE는 로그인 실패 횟수·잠금 갱신과 SELECT ... FOR UPDATE(같은 계정의
+--    동시 로그인 직렬화)에, sessions의 UPDATE는 revoked_at·last_seen_at 갱신에 필요하다.
+GRANT SELECT, INSERT, UPDATE ON persona_minimal.credentials TO persona_runtime;
+GRANT SELECT, INSERT, UPDATE ON persona_minimal.sessions    TO persona_runtime;

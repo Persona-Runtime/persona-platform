@@ -16,7 +16,13 @@
   any_errors_fatal: true
 
   vars:
-    # control plane에서 읽은 값을 넘긴다. 비어 있으면 버전 대조를 건너뛰고 그 사실을 남긴다.
+    # 둘 다 Join 직전에 클러스터에서 읽어 넘긴다(README "버전 입력의 의미"). 비어 있으면 실패한다 —
+    # 버전 대조 없이 Join하지 않는다.
+    # - api_server_version: `kubectl version -o json`의 serverVersion.gitVersion(예: v1.36.4).
+    #   kubelet skew 판정의 기준이다.
+    # - control_plane_kubelet_version: CP Node의 status.nodeInfo.kubeletVersion(예: v1.36.2).
+    #   API server와 patch가 다를 수 있다 — 비교 기준이 아니라 drift 기록용이다.
+    api_server_version: ""
     control_plane_kubelet_version: ""
 
   tasks:
@@ -35,30 +41,62 @@
           Join 전제 binary가 빠졌다: {{ gpu_join_binaries.stdout_lines }}.
           10-base·20-tailscale·30-gpu-runtime를 먼저 끝낸다.
 
-    - name: kubelet·kubeadm 버전 읽기
+    - name: 버전 대조에 필요한 클러스터 값이 주어졌는지 확인
+      ansible.builtin.assert:
+        that:
+          - api_server_version | length > 0
+          - control_plane_kubelet_version | length > 0
+        fail_msg: >-
+          api_server_version과 control_plane_kubelet_version을 모두 넘긴다(예:
+          `-e api_server_version=v1.36.4 -e control_plane_kubelet_version=v1.36.2`). 버전 대조 없이
+          Join하지 않는다.
+
+    - name: GPU host의 kubeadm·kubelet 버전 읽기
       ansible.builtin.command:
         cmd: "sh -c 'kubeadm version -o short; kubelet --version'"
       changed_when: false
       check_mode: false
       register: gpu_join_versions
 
-    # CP보다 새 minor를 설치했으면 Join이 거부되거나 이후 동작이 보장되지 않는다.
-    - name: control plane 버전과 대조
+    # 판정은 controller의 스크립트가 한다(files/kube_version_gate.py, 테스트 있음). 이전 판은
+    # control-plane kubelet 문자열이 출력에 **포함되는지**만 봐서, 기준(API server)이 틀렸고
+    # v1.36.2가 v1.36.21에도 걸렸다. 지금 규칙: GPU kubeadm·kubelet의 major.minor = API server,
+    # GPU kubelet patch ≤ API server patch. CP kubelet과의 차이는 drift로 보고만 한다.
+    # controller에서 돌리므로 become을 끈다.
+    - name: API server 기준 버전 skew 판정
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ playbook_dir }}/../files/kube_version_gate.py"
+          - join
+          - --api-server
+          - "{{ api_server_version }}"
+          - --cp-kubelet
+          - "{{ control_plane_kubelet_version }}"
+          - --gpu-kubeadm
+          - "{{ gpu_join_versions.stdout_lines[0] | default('') }}"
+          - --gpu-kubelet
+          - "{{ gpu_join_versions.stdout_lines[1] | default('') }}"
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      check_mode: false
+      # 위반이어도 여기서 멈추지 않는다 — 네 버전과 drift를 먼저 출력한 뒤 아래 assert가 멈춘다.
+      failed_when: false
+      register: gpu_join_version_gate
+
+    - name: 네 버전의 patch와 drift 출력(통과·실패와 무관)
+      ansible.builtin.debug:
+        # 스크립트가 아예 실행되지 못하면 stdout이 비므로 stderr를 대신 보여 준다.
+        msg: "{{ (gpu_join_version_gate.stdout | from_json) if gpu_join_version_gate.stdout | length > 0 else gpu_join_version_gate.stderr }}"
+
+    - name: 버전 skew 판정 통과 확인
       ansible.builtin.assert:
         that:
-          - control_plane_kubelet_version in gpu_join_versions.stdout
+          - gpu_join_version_gate.rc == 0
         fail_msg: >-
-          host의 kube 버전이 control plane({{ control_plane_kubelet_version }})과 다르다.
-          실제 값: {{ gpu_join_versions.stdout_lines }}
-      when: control_plane_kubelet_version | length > 0
-
-    - name: control plane 버전이 주어지지 않은 경우를 기록
-      ansible.builtin.debug:
-        msg: >-
-          control_plane_kubelet_version이 비어 있어 버전 대조를 건너뛴다.
-          Join 전에 CP에서 실제 값을 읽어 `-e control_plane_kubelet_version=v1.36.2` 형태로
-          넘겨 다시 실행한다. 대조 없이 Join하지 않는다.
-      when: control_plane_kubelet_version | length == 0
+          버전 판정 실패(rc={{ gpu_join_version_gate.rc }}: 1=skew 위반, 2=형식 오류).
+          판정: {{ gpu_join_version_gate.stdout }}{{ gpu_join_version_gate.stderr }}
 
     - name: swap이 꺼져 있는지 확인
       ansible.builtin.assert:
@@ -116,7 +154,7 @@
       ansible.builtin.debug:
         msg:
           binaries: "{{ gpu_join_binaries.stdout_lines | default(['모두 존재']) }}"
-          versions: "{{ gpu_join_versions.stdout_lines }}"
+          versions: "{{ (gpu_join_version_gate.stdout | from_json) if gpu_join_version_gate.stdout | length > 0 else gpu_join_version_gate.stderr }}"
           containerd: "{{ gpu_join_containerd.stdout_lines }}"
           firewall: "{{ gpu_join_firewall.stdout_lines }}"
           note: >-

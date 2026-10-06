@@ -11,6 +11,8 @@ metadata:
     # 뒤 prod로 바꾸는 것은 별도 커밋(runbooks/public-ingress.md Gate 3 CP 적용 순서 참고).
     cert-manager.io/cluster-issuer: letsencrypt-prod
     # Middleware(-1) → Gateway(0) → HTTPRoute(1) — 내부 순서 고정(Sync 통제, 2026-09-19).
+    # public-gateway로 옮긴 뒤에는 이 Application에 다른 리소스가 없어 순서 의미는 없다.
+    # 그래도 값을 지우지 않는다 — 이관 중 live metadata 차이를 tracking 정보로만 한정하려는 것이다.
     argocd.argoproj.io/sync-wave: "0"
 spec:
   gatewayClassName: traefik

@@ -1,15 +1,17 @@
 ---
-# NVIDIA driver와 NVIDIA Container Toolkit 설치·검증.
+# NVIDIA driver(R580 기준선)와 NVIDIA Container Toolkit 설치·검증.
 #
-# driver 분기를 왜 변수로 받고 기본값을 비워 두는가: 이 조합은 vLLM image가 요구하는 것에
-# 묶여 있다. `v0.29.0-cu129-ubuntu2404`의 `NVIDIA_REQUIRE_CUDA`가 허용하는 분기는
-# 535·550·560·565·570뿐이고 그 중 가장 높은 570 LTS를 고른다(근거는
-# terraform/envs/prod/vllm-node-join-plan.md §4). 패키지 이름·patch는 실행 직전에 실제
-# 저장소에서 읽어 넘긴다 — 여기서 추측하지 않는다.
+# 기준선: Ubuntu `nvidia-driver-580-server`를 **정확한 package version**으로 설치하고 hold한다.
+# version은 이 host에서 `apt-cache madison nvidia-driver-580-server`가 보여 준 값만 받는다.
+# R570(`nvidia-driver-570-server`·`cuda-drivers-570`) 전환 경로는 폐기했다 — Ubuntu 24.04의
+# 570-server는 580-server로 이어지는 전환 package이고, 폐기 근거는
+# terraform/envs/prod/vllm-node-join-plan.md §4 "폐기된 선택: R570"에 있다.
 #
-# 재부팅을 조건부로 두는 이유: driver는 kernel module이라 적재 중인 버전을 교체하려면
-# 재부팅이 필요하다. 매 실행마다 재부팅하면 두 번째 실행이 멱등하지 않고, 운영 중 노드를
-# 이유 없이 내린다. 그래서 "설치가 실제로 바뀐 경우"에만 재부팅을 요청한다.
+# 설치 여부는 controller의 판정 스크립트(files/nvidia_driver_gate.py, 테스트 있음)가 host 출력으로
+# 정한다. R580이 이미 정상(요청 version + 적재 + 실행 중 kernel용 DKMS)이면 driver를 재설치하거나
+# 재부팅하지 않고 Toolkit과 containerd nvidia runtime만 검증한다. driver가 없으면 설치하고 그때만
+# 재부팅한다. 다른 branch·다른 patch·미적재·DKMS 불일치는 아무것도 바꾸지 않고 멈춘다 — driver
+# 교체는 재부팅을 동반하므로 사람이 원인을 보고 결정한다.
 - name: Install the NVIDIA driver and container toolkit
   hosts: gpu_nodes
   gather_facts: true
@@ -17,10 +19,12 @@
   any_errors_fatal: true
 
   vars:
-    # 예: "570". 비어 있으면 아무것도 설치하지 않고 끝낸다.
-    nvidia_driver_branch: ""
+    # 예: "580.95.05-0ubuntu0.24.04.2". 비어 있으면 현재 상태와 저장소 후보만 보여 주고 멈춘다.
+    nvidia_driver_package_version: ""
     # 예: "1.20.1-1". 비어 있으면 저장소의 현재 버전을 쓴다(실행 기록에 실제 값을 남긴다).
     nvidia_container_toolkit_version: ""
+    # 기준선 branch. 입력이 아니라 상수다 — 다른 branch를 넘기면 아래에서 멈춘다.
+    gpu_driver_package: nvidia-driver-580-server
 
   tasks:
     - name: Ubuntu 24.04 amd64 대상만 변경 허용
@@ -32,20 +36,30 @@
         fail_msg: >-
           검토하지 않은 OS나 architecture에는 GPU runtime을 설치하지 않는다.
 
-    - name: driver 분기가 주어지지 않았음을 알린다
-      ansible.builtin.debug:
-        msg: >-
-          nvidia_driver_branch가 비어 있어 아무것도 설치하지 않고 끝낸다. 실제 저장소에서
-          패키지 이름과 patch를 읽어 `-e nvidia_driver_branch=570` 형태로 넘긴 뒤 다시
-          실행한다. 570을 고른 근거는 vllm-node-join-plan.md §4에 있다.
-      when: nvidia_driver_branch | length == 0
+    # 예전 입력(nvidia_driver_branch=570 등)을 그대로 넘기면 조용히 580을 설치하지 않고 멈춘다.
+    - name: driver branch는 R580 기준선만 받는다
+      ansible.builtin.assert:
+        that:
+          - nvidia_driver_branch is not defined or (nvidia_driver_branch | string) == '580'
+        fail_msg: >-
+          nvidia_driver_branch={{ nvidia_driver_branch | default('') }}는 받지 않는다. GPU host 기준선은
+          R580({{ gpu_driver_package }})이고 R570 전환 경로는 폐기했다(vllm-node-join-plan.md §4).
 
-    - name: driver 분기가 주어지지 않으면 여기서 멈춘다
-      ansible.builtin.meta: end_host
-      when: nvidia_driver_branch | length == 0
+    # --- 현재 driver 상태 읽기(전부 읽기라 check mode에서도 돈다) ---------------------------
+    - name: 설치된 NVIDIA driver package 읽기
+      ansible.builtin.command:
+        argv:
+          - dpkg-query
+          - -W
+          - "-f=${Package}\t${db:Status-Abbrev}\t${Version}\t${Depends}\n"
+          - "nvidia-driver-*"
+      changed_when: false
+      check_mode: false
+      # 일치하는 package가 하나도 없으면 rc=1이다. 빈 출력으로 판정한다.
+      failed_when: false
+      register: gpu_driver_packages
 
-    # 이미 설치된 driver를 먼저 읽는다. 같은 분기가 이미 있으면 재설치하지 않는다.
-    - name: 설치된 NVIDIA driver 확인
+    - name: 적재된 NVIDIA driver version 읽기
       ansible.builtin.command:
         cmd: nvidia-smi --query-gpu=driver_version --format=csv,noheader
       changed_when: false
@@ -53,18 +67,111 @@
       failed_when: false
       register: gpu_driver_before
 
-    - name: 현재 driver 상태 표시
-      ansible.builtin.debug:
-        msg: >-
-          driver 조회 rc={{ gpu_driver_before.rc }},
-          값={{ gpu_driver_before.stdout | default('(없음)') | trim }}
+    - name: DKMS module 상태 읽기
+      ansible.builtin.command:
+        cmd: dkms status
+      changed_when: false
+      check_mode: false
+      failed_when: false
+      register: gpu_dkms_before
 
-    - name: NVIDIA driver 설치
+    - name: 실행 중인 kernel 읽기
+      ansible.builtin.command:
+        cmd: uname -r
+      changed_when: false
+      check_mode: false
+      register: gpu_kernel_before
+
+    # 저장소가 실제로 내놓는 R580 package version. 목록 갱신은 cache만 바꾸므로 읽기로 본다.
+    - name: 저장소의 nvidia-driver-580-server 후보 읽기
+      ansible.builtin.shell:
+        cmd: "apt-get update -qq && apt-cache madison {{ gpu_driver_package }}"
+      changed_when: false
+      check_mode: false
+      register: gpu_driver_candidates
+
+    - name: package version이 없으면 현재 상태와 후보만 보여 주고 멈춘다
+      ansible.builtin.debug:
+        msg:
+          note: >-
+            nvidia_driver_package_version이 비어 있어 driver를 바꾸지 않는다. 아래 후보에서 정확한
+            version을 골라 `-e nvidia_driver_package_version=...`로 다시 실행한다.
+          installed_packages: "{{ gpu_driver_packages.stdout_lines }}"
+          loaded_driver: "{{ gpu_driver_before.stdout_lines }}"
+          dkms: "{{ gpu_dkms_before.stdout_lines }}"
+          candidates: "{{ gpu_driver_candidates.stdout_lines }}"
+      when: nvidia_driver_package_version | length == 0
+
+    - name: package version이 없으면 여기서 멈춘다
+      ansible.builtin.meta: end_host
+      when: nvidia_driver_package_version | length == 0
+
+    # madison 줄 형식: " nvidia-driver-580-server | 580.95.05-0ubuntu0.24.04.2 | http://... Packages".
+    # 구분자까지 맞춰 580.95.05가 580.95.051 같은 값에 걸리지 않게 한다. Jinja 문자열 escape에
+    # 기대지 않도록 backslash 없이 쓴다.
+    - name: 넘긴 driver package version이 저장소 후보에 있는지 확인
+      ansible.builtin.assert:
+        that:
+          - >-
+            gpu_driver_candidates.stdout_lines
+            | select('search', '^ *' ~ gpu_driver_package ~ ' *[|] *' ~ (nvidia_driver_package_version | regex_escape) ~ ' *[|]')
+            | list | length > 0
+        fail_msg: >-
+          {{ gpu_driver_package }} {{ nvidia_driver_package_version }}이 저장소 후보에 없다.
+          후보: {{ gpu_driver_candidates.stdout_lines }}
+
+    # 판정은 controller의 스크립트가 한다. host가 아니라 controller에서 돌리므로 become을 끈다.
+    - name: R580 기준선 대비 driver 상태 판정
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ playbook_dir }}/../files/nvidia_driver_gate.py"
+          - --package-version
+          - "{{ nvidia_driver_package_version }}"
+          - --dpkg-output
+          - "{{ gpu_driver_packages.stdout }}"
+          - --nvidia-smi-rc
+          - "{{ gpu_driver_before.rc }}"
+          - --nvidia-smi-output
+          - "{{ gpu_driver_before.stdout }}"
+          - --dkms-output
+          - "{{ gpu_dkms_before.stdout }}"
+          - --kernel
+          - "{{ gpu_kernel_before.stdout }}"
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      check_mode: false
+      # blocked여도 여기서 멈추지 않는다 — 판정 근거를 먼저 출력한 뒤 아래 assert가 멈춘다.
+      failed_when: false
+      register: gpu_driver_gate
+
+    - name: driver 판정 출력(통과·중단과 무관)
+      ansible.builtin.debug:
+        # 스크립트가 아예 실행되지 못하면 stdout이 비므로 stderr를 대신 보여 준다.
+        msg: "{{ (gpu_driver_gate.stdout | from_json) if gpu_driver_gate.stdout | length > 0 else gpu_driver_gate.stderr }}"
+
+    - name: 기준선과 다른 driver 상태면 아무것도 바꾸지 않고 멈춘다
+      ansible.builtin.assert:
+        that:
+          - gpu_driver_gate.rc == 0
+        fail_msg: >-
+          driver 판정이 중단이다(rc={{ gpu_driver_gate.rc }}: 1=기준선과 다른 상태, 2=입력 형식 오류).
+          자동으로 전환·재설치하지 않는다. 판정: {{ gpu_driver_gate.stdout }}{{ gpu_driver_gate.stderr }}
+
+    # healthy면 이 task는 건너뛰어진다 — 이미 정상인 R580을 재설치하거나 재부팅하지 않는다.
+    - name: driver가 없을 때만 R580을 정확한 version으로 설치
       ansible.builtin.apt:
-        name: "nvidia-driver-{{ nvidia_driver_branch }}-server"
+        name: "{{ gpu_driver_package }}={{ nvidia_driver_package_version }}"
         state: present
-        update_cache: true
       register: gpu_driver_install
+      when: (gpu_driver_gate.stdout | from_json).action == 'install'
+
+    # hold는 driver 파일을 바꾸지 않는다. unattended-upgrades가 다른 patch로 올리는 것을 막는다.
+    - name: R580 driver package hold
+      ansible.builtin.dpkg_selections:
+        name: "{{ gpu_driver_package }}"
+        selection: hold
 
     - name: NVIDIA Container Toolkit apt 저장소 키 등록
       ansible.builtin.get_url:
@@ -98,6 +205,17 @@
         state: present
         update_cache: true
       register: gpu_toolkit_install
+      # check mode에서는 바로 앞의 NVIDIA 저장소 선언도 실제 파일로 쓰지 않는다. 이때
+      # apt가 패키지를 찾지 못하는 것은 host 결함이 아니라 dry-run의 순서 제약이다.
+      # 실제 실행에서 저장소를 만든 뒤 설치·검증한다.
+      when: not ansible_check_mode
+
+    - name: check mode에서 NVIDIA Toolkit 설치 검사를 보류한다
+      ansible.builtin.debug:
+        msg: >-
+          --check에서는 NVIDIA APT 저장소를 실제로 추가하지 않으므로 Toolkit 패키지
+          조회·설치를 보류한다. 실제 실행은 저장소 등록 뒤 같은 task에서 설치한다.
+      when: ansible_check_mode
 
     # containerd에 nvidia runtime을 등록한다. `--set-as-default`는 쓰지 않는다 — 모든
     # container가 GPU runtime을 거치게 하면 GPU를 요청하지 않은 Pod까지 영향을 받는다.
@@ -158,43 +276,115 @@
           위 "nvidia runtime이 없으면 등록" task의 skipped/changed 표시로 판단한다.
       when: ansible_check_mode
 
-    - name: driver나 toolkit이 바뀐 경우에만 재부팅
+    # driver를 새로 설치한 경우에만 재부팅한다. Toolkit·containerd 변경은 재부팅이 필요 없다.
+    - name: driver를 설치한 경우에만 재부팅
       ansible.builtin.reboot:
         reboot_timeout: 600
         msg: "NVIDIA driver 적재를 위해 Ansible이 재부팅한다"
-      when: gpu_driver_install.changed
+      when: gpu_driver_install is changed
 
-    - name: 재부팅 뒤 driver 확인
+    # --- 사후 판정: 설치했든 건너뛰었든 같은 기준으로 healthy인지 본다 ----------------------
+    - name: 사후 driver package 읽기
+      ansible.builtin.command:
+        argv:
+          - dpkg-query
+          - -W
+          - "-f=${Package}\t${db:Status-Abbrev}\t${Version}\t${Depends}\n"
+          - "nvidia-driver-*"
+      changed_when: false
+      check_mode: false
+      failed_when: false
+      register: gpu_driver_packages_after
+      # driver 설치는 --check에서 실제로 일어나지 않는다. dry-run을 실패로 보이지 않게 한다.
+      when: not ansible_check_mode
+
+    - name: 사후 GPU·driver 읽기
       ansible.builtin.command:
         cmd: nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader
       changed_when: false
       check_mode: false
+      failed_when: false
       register: gpu_driver_after
+      when: not ansible_check_mode
 
-    # GPU가 정확히 1장인지 확인한다. 0장이면 driver가 적재되지 않았거나 인스턴스가
-    # 계획과 다르고, 2장 이상이면 기준선 전제가 깨진다.
-    - name: GPU 1장과 driver 분기 확인
+    - name: 사후 적재 driver version 읽기
+      ansible.builtin.command:
+        cmd: nvidia-smi --query-gpu=driver_version --format=csv,noheader
+      changed_when: false
+      check_mode: false
+      failed_when: false
+      register: gpu_driver_version_after
+      when: not ansible_check_mode
+
+    - name: 사후 DKMS·kernel 읽기
+      ansible.builtin.command:
+        cmd: sh -c 'dkms status; echo "KERNEL=$(uname -r)"'
+      changed_when: false
+      check_mode: false
+      failed_when: false
+      register: gpu_dkms_after
+      when: not ansible_check_mode
+
+    - name: 사후 R580 기준선 판정
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ playbook_dir }}/../files/nvidia_driver_gate.py"
+          - --package-version
+          - "{{ nvidia_driver_package_version }}"
+          - --dpkg-output
+          - "{{ gpu_driver_packages_after.stdout }}"
+          - --nvidia-smi-rc
+          - "{{ gpu_driver_version_after.rc }}"
+          - --nvidia-smi-output
+          - "{{ gpu_driver_version_after.stdout }}"
+          - --dkms-output
+          - "{{ gpu_dkms_after.stdout_lines | reject('match', '^KERNEL=') | join('\n') }}"
+          - --kernel
+          - "{{ gpu_dkms_after.stdout_lines | select('match', '^KERNEL=') | first | default('KERNEL=') | regex_replace('^KERNEL=', '') }}"
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      check_mode: false
+      failed_when: false
+      register: gpu_driver_gate_after
+      when: not ansible_check_mode
+
+    # GPU가 정확히 1장이고 driver가 R580 기준선(healthy)인지 확인한다. 0장이면 driver가 적재되지
+    # 않았거나 인스턴스가 계획과 다르고, 2장 이상이면 기준선 전제가 깨진다.
+    - name: GPU 1장과 R580 기준선 확인
       ansible.builtin.assert:
         that:
+          - gpu_driver_after.rc == 0
           - gpu_driver_after.stdout_lines | length == 1
-          - nvidia_driver_branch in gpu_driver_after.stdout
+          - gpu_driver_gate_after.rc == 0
+          - (gpu_driver_gate_after.stdout | from_json).state == 'healthy'
         fail_msg: >-
-          GPU가 1장이 아니거나 driver 분기가 요청값({{ nvidia_driver_branch }})과 다르다.
-          실제 값: {{ gpu_driver_after.stdout | default('(없음)') }}
+          GPU가 1장이 아니거나 driver가 R580 기준선이 아니다.
+          GPU: {{ gpu_driver_after.stdout | default('(없음)') }}.
+          판정: {{ gpu_driver_gate_after.stdout | default('') }}{{ gpu_driver_gate_after.stderr | default('') }}
+      when: not ansible_check_mode
 
     - name: GPU runtime 증거 표시
       ansible.builtin.debug:
         msg:
-          driver_before: "{{ gpu_driver_before.stdout | default('(없음)') | trim }}"
-          driver_after: "{{ gpu_driver_after.stdout_lines }}"
-          toolkit_changed: "{{ gpu_toolkit_install.changed }}"
+          driver_gate_before: "{{ (gpu_driver_gate.stdout | from_json).state }}"
+          driver_installed_now: "{{ gpu_driver_install is changed }}"
+          driver_after: "{{ gpu_driver_after.stdout_lines | default([]) }}"
+          driver_gate_after: "{{ gpu_driver_gate_after.stdout | default('') }}"
+          toolkit_changed: "{{ gpu_toolkit_install.changed | default(false) }}"
           nvidia_runtime_was_registered: "{{ gpu_nvidia_runtime_before.rc == 0 }}"
           note: >-
             container 안에서의 GPU 실행과 Kubernetes device plugin 배포는 이 playbook의
             범위가 아니다. `nvidia.com/gpu: 1` allocatable 확인은 Join 뒤 별도 단계다.
+      when: not ansible_check_mode
 
-# 실제 host에서 확인할 것 (개발 환경에 ansible이 없어 실행하지 못했다)
+# 실제 host에서 확인할 것 (문법 검사·판정 스크립트 단위 테스트만 했고 실제 host에서는 실행하지 않았다)
 #
+# 0. **R580 정상 host**: 이미 R580 + DKMS가 정상인 host에서 실행하면 판정이 healthy이고, driver
+#    설치·재부팅 task가 skipped여야 한다(hold만 적용). 570-server 전환 package가 남아 있으면 drift로
+#    보고된다. 2026-09-27 관측 host의 입력: `nvidia_driver_package_version=580.178.04-0ubuntu0.24.04.1`,
+#    `nvidia_container_toolkit_version=1.20.1-1`(DKMS module 이름은 `nvidia-srv`).
 # 1. **재실행 수렴**: 연속으로 두 번 실행해 두 번째가 `changed=0`인지 본다. driver·toolkit이
 #    이미 맞고 nvidia runtime도 등록돼 있으면 재부팅도 등록도 일어나지 않아야 한다.
 # 2. **drift 복구**: `/etc/containerd/config.toml`에서 `runtimes.nvidia` 블록을 일부러 지운 뒤

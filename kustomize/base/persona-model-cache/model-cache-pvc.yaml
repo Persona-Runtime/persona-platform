@@ -1,0 +1,29 @@
+# vLLM 모델 cache. GPU 노드(persona-gpu-01)의 local-path에 생긴다.
+#
+# local-path 성질에서 오는 제약:
+# - WaitForFirstConsumer: 첫 Pod(seed Job)가 스케줄된 노드에 PV가 생기고 그 노드에 고정된다.
+#   그래서 seed Job과 vLLM은 같은 GPU node selector·toleration을 쓴다.
+# - Retain: PVC를 지워도 PV와 노드 디스크의 디렉터리가 남는다. 다시 만들기 전에 수동으로 정리해야
+#   하고, 남아 있으면 오래된 모델을 그대로 읽을 수 있다.
+# - allowVolumeExpansion: false — 크기는 생성 시 영구 확정이다.
+# - 요청 용량은 강제되지 않는다. 실제 상한은 노드 디스크(gp3 100 GiB)다.
+# - EC2 stop/start에는 cache가 남지만 terminate하면 루트 볼륨과 함께 사라진다
+#   (delete_on_termination=true). 그때는 다시 seed한다.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: persona-vllm-model-cache
+  labels:
+    app.kubernetes.io/name: persona-vllm
+    app.kubernetes.io/component: model-cache
+    app.kubernetes.io/part-of: persona-platform
+spec:
+  # RWO다. seed Job과 vLLM을 동시에 실행하지 않는다 — 순서는 seed 완료 → vLLM 시작이다.
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      # Qwen3-4B-Instruct-2507 @ cdbee75 전체 파일이 약 7.5 GiB다(2026-09-27 upstream metadata).
+      # staging에서 받은 뒤 rename하므로 추가 복사는 없지만, 다른 revision을 함께 둘 여유로 잡는다.
+      storage: 40Gi

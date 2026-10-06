@@ -33,6 +33,14 @@ DELETE_KEY = :delete_key
 GATEWAY_DEPLOYMENT = "kustomize/base/persona-gateway/deployment.yaml"
 GATEWAY_PDB = "kustomize/base/persona-gateway/pdb.yaml"
 GATEWAY_ENV = ["spec", "template", "spec", "containers", 0, "env"]
+# 공개 HTTPRoute rule 순서: 0 /oauth2, 1 채팅 SSE, 2 /v1, 3 /.
+PUBLIC_ROUTE = "kustomize/overlays/prod/persona-app-ingress/httproute-public.yaml"
+SSE_RULE = ["spec", "rules", 1]
+V1_RULE = ["spec", "rules", 2]
+PUBLIC_GATEWAY = "kustomize/overlays/prod/public-gateway/gateway.yaml"
+middleware_filters = lambda do |*names|
+  names.map { |name| { "type" => "ExtensionRef", "extensionRef" => { "group" => "traefik.io", "kind" => "Middleware", "name" => name } } }
+end
 # 각 사례는 원래 파일로 되돌린 뒤 다음 사례를 실행한다. 검증 실패뿐 아니라 의도한 오류도 확인한다.
 cases = [
   ["kustomize/base/persona-db/cluster.yaml", ["spec", "priorityClassName"], "persona-critical", "DB: 커스텀 PriorityClass"],
@@ -79,14 +87,35 @@ cases = [
   # revision 단위 분산이 사라지면 롤아웃 뒤 새 Pod 둘이 한 워커에 남을 수 있다.
   [GATEWAY_DEPLOYMENT, ["spec", "template", "spec", "topologySpreadConstraints", 0, "matchLabelKeys"], DELETE_KEY, "Gateway topology spread matchLabelKeys는 [pod-template-hash]다"],
   [GATEWAY_DEPLOYMENT, ["spec", "template", "spec", "topologySpreadConstraints", 0, "matchLabelKeys"], ["controller-revision-hash"], "Gateway topology spread matchLabelKeys는 [pod-template-hash]다"],
-  # 채팅 mode·mock profile은 함께 선언한다(ROLL-01B). 조용히 짧은 응답이나 llm 경로로 바뀌는 것을 막는다.
-  [GATEWAY_DEPLOYMENT, GATEWAY_ENV + [{ "name" => "PERSONA_CHAT_INFERENCE_MODE" }, "value"], "llm", "Gateway PERSONA_CHAT_INFERENCE_MODE는 mock으로 명시해야 한다"],
-  [GATEWAY_DEPLOYMENT, GATEWAY_ENV + [{ "name" => "PERSONA_CHAT_INFERENCE_MODE" }], DELETE_KEY, "Gateway PERSONA_CHAT_INFERENCE_MODE는 mock으로 명시해야 한다"],
-  [GATEWAY_DEPLOYMENT, GATEWAY_ENV + [{ "name" => "PERSONA_CHAT_MOCK_PROFILE" }, "value"], "short", "Gateway PERSONA_CHAT_MOCK_PROFILE은 long이어야 한다"],
-  [GATEWAY_DEPLOYMENT, GATEWAY_ENV + [{ "name" => "PERSONA_CHAT_MOCK_PROFILE" }], DELETE_KEY, "Gateway PERSONA_CHAT_MOCK_PROFILE은 long이어야 한다"],
+  # 채팅 mode와 vLLM 연결값은 함께 선언한다. 조용히 mock으로 돌아가거나 연결값이 비는 것을 막는다.
+  [GATEWAY_DEPLOYMENT, GATEWAY_ENV + [{ "name" => "PERSONA_CHAT_INFERENCE_MODE" }, "value"], "mock", "Gateway PERSONA_CHAT_INFERENCE_MODE는 llm으로 명시해야 한다"],
+  [GATEWAY_DEPLOYMENT, GATEWAY_ENV + [{ "name" => "PERSONA_CHAT_INFERENCE_MODE" }], DELETE_KEY, "Gateway PERSONA_CHAT_INFERENCE_MODE는 llm으로 명시해야 한다"],
+  [GATEWAY_DEPLOYMENT, GATEWAY_ENV + [{ "name" => "PERSONA_VLLM_BASE_URL" }], DELETE_KEY, "Gateway PERSONA_VLLM_BASE_URL은 persona-vllm Service"],
+  [GATEWAY_DEPLOYMENT, GATEWAY_ENV + [{ "name" => "PERSONA_VLLM_BASE_URL" }, "value"], "http://persona-vllm.persona-inference.svc.cluster.local:8000/v1", "Gateway PERSONA_VLLM_BASE_URL은 persona-vllm Service"],
+  [GATEWAY_DEPLOYMENT, GATEWAY_ENV + [{ "name" => "PERSONA_VLLM_MODEL" }, "value"], "Qwen/Qwen3-4B", "Gateway PERSONA_VLLM_MODEL은 vLLM --served-model-name과 같아야 한다"],
   # 적용이 끝나 history/로 옮긴 Job을 다시 연결하면 Job 수는 1이라 개수 검사를 통과한다.
   # 경로 검사가 막는지 본다(완료된 0005 Job을 되살리는 경로).
   ["kustomize/base/persona-migrate/kustomization.yaml", ["resources"], ["history/job-0005-generation-lease.yaml"], "history/의 과거 선언을 활성 렌더에 연결했다"],
+  # 채팅 SSE rule — buffering이 다시 붙거나 인증·rate-limit이 빠지는 경로, 매치가 넓어지는 경로.
+  [PUBLIC_ROUTE, SSE_RULE + ["filters"], middleware_filters.call("security-headers", "rate-limit", "body-limit", "oauth-forward"), "SSE rule에 body-limit(buffering)을 두면"],
+  [PUBLIC_ROUTE, SSE_RULE + ["filters"], middleware_filters.call("security-headers", "rate-limit"), "SSE rule 필터는 security-headers·rate-limit·oauth-forward 순서다"],
+  [PUBLIC_ROUTE, SSE_RULE + ["filters"], middleware_filters.call("security-headers", "oauth-forward"), "SSE rule 필터는 security-headers·rate-limit·oauth-forward 순서다"],
+  [PUBLIC_ROUTE, SSE_RULE + ["matches", 1, "path", "value"], "/v1/generations/[^/]+/retry", "SSE rule(POST chat/completions Exact + POST retry 앵커 정규식)이 없다"],
+  [PUBLIC_ROUTE, SSE_RULE + ["matches", 0, "method"], DELETE_KEY, "SSE rule(POST chat/completions Exact + POST retry 앵커 정규식)이 없다"],
+  [PUBLIC_ROUTE, SSE_RULE + ["backendRefs", 0, "name"], "persona-web", "SSE rule은 persona-gateway:8080으로 간다"],
+  # 일반 /v1 API에는 2 MiB body-limit이 그대로 있어야 한다.
+  [PUBLIC_ROUTE, V1_RULE + ["filters"], middleware_filters.call("security-headers", "rate-limit", "oauth-forward"), "persona-app-public HTTPRoute /v1: Middleware 필터 순서가 다르다"],
+  # 공개 Gateway 단일 소유(Phase 1) — persona-app이 Gateway를 다시 선언하면 두 Application이
+  # 같은 객체를 추적한다. 렌더는 성공하므로 개수 검사가 막아야 한다.
+  ["kustomize/overlays/prod/persona-app/kustomization.yaml", ["resources"],
+   ["../../../base/persona-gateway", "../../../base/persona-web", "../../../base/persona-embedding", "httproute.yaml", "middlewares.yaml", "../public-gateway"],
+   "Gateway persona-app/persona-app 선언은 public-gateway 하나여야 한다"],
+  # listener별 검사가 보지 않는 필드(allowedRoutes)를 바꿔도 이동 전 spec 지문이 잡는지 본다.
+  [PUBLIC_GATEWAY, ["spec", "listeners", 0, "allowedRoutes", "namespaces", "from"], "All",
+   "Gateway spec이 이동 전(origin/develop ccc014c)과 다르다"],
+  # 리소스 annotation으로 Replace=true를 붙이면 Application syncPolicy 검사를 우회한다.
+  [PUBLIC_GATEWAY, ["metadata", "annotations", "argocd.argoproj.io/sync-options"], "Replace=true",
+   "Gateway persona-app에 삭제·재생성을 일으키는 sync-options가 있다"],
 ]
 # migration Job 사례는 **활성 렌더에 연결된 파일**에서 뽑는다. 경로를 고정하면 다음 배포에서
 # 다른 Job이 활성화됐을 때 이 검사가 렌더되지 않는 파일을 건드리며 조용히 통과한다.
@@ -133,5 +162,37 @@ cases.each do |relative_path, keys, value, message|
     File.write(path, original)
   end
 end
-puts "스케줄링 음성 테스트 #{cases.length}건 통과"
+# grants는 YAML이 아니라 SQL이라 위 키 경로 방식으로 바꿀 수 없다. 문장 하나를 통째로 바꿔
+# 캐릭터 삭제 권한이 빠지거나(대화·멱등 기록) tombstone 원칙이 깨지는 경로를 재현한다.
+GRANTS = "db/grants/persona_minimal.sql"
+grant_cases = [
+  ["GRANT SELECT, INSERT, UPDATE, DELETE ON persona_minimal.idempotency_records TO persona_runtime;",
+   "GRANT SELECT, INSERT, UPDATE ON persona_minimal.idempotency_records TO persona_runtime;",
+   "캐릭터 삭제가 지우는 idempotency_records에 runtime DELETE 권한이 없다"],
+  ["GRANT SELECT, INSERT, UPDATE, DELETE ON persona_minimal.generations    TO persona_runtime;",
+   "GRANT SELECT, INSERT, UPDATE ON persona_minimal.generations    TO persona_runtime;",
+   "캐릭터 삭제가 지우는 generations에 runtime DELETE 권한이 없다"],
+  ["GRANT SELECT, INSERT, DELETE ON persona_minimal.chat_idempotency_records TO persona_runtime;",
+   "GRANT SELECT, INSERT ON persona_minimal.chat_idempotency_records TO persona_runtime;",
+   "캐릭터 삭제가 지우는 chat_idempotency_records에 runtime DELETE 권한이 없다"],
+  ["GRANT SELECT, INSERT, UPDATE ON persona_minimal.personas         TO persona_runtime;",
+   "GRANT SELECT, INSERT, UPDATE, DELETE ON persona_minimal.personas         TO persona_runtime;",
+   "personas에 runtime DELETE를 주지 않는다"],
+]
+grant_cases.each do |from, to, message|
+  path = File.join(root, GRANTS)
+  original = File.read(path)
+  begin
+    raise "사례의 원래 문장을 grants에서 찾지 못했다: #{from}" unless original.include?(from)
+    File.write(path, original.sub(from, to))
+    output_path = File.join(root, "result.log")
+    success = system("sh", File.join(root, "scripts/validate-persona-app-manifests.sh"), out: output_path, err: [:child, :out])
+    raise "회귀 검사가 결함을 놓쳤다: #{message}" if success
+    raise "예상과 다른 검사 오류다: #{message}" unless File.read(output_path).include?(message)
+    puts "검출: #{message}"
+  ensure
+    File.write(path, original)
+  end
+end
+puts "스케줄링 음성 테스트 #{cases.length + grant_cases.length}건 통과"
 RUBY

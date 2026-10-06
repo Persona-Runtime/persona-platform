@@ -1,0 +1,13 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# 공개 진입 Gateway(persona-app/persona-app) 하나만 렌더한다. persona 앱을 폐기해도
+# Gateway·TLS가 함께 지워지지 않도록 앱 Application(persona-app)에서 소유권만 분리했다.
+#
+# - gateway.yaml은 persona-app overlay에서 옮긴 단일 정본이다. 복사본을 다른 overlay에 두지 않는다.
+# - Certificate·Secret persona-app-tls는 Git에 선언하지 않는다. cert-manager gateway-shim이
+#   Gateway의 annotation·https listener를 보고 만든 현재 객체를 그대로 둔다. Git에 넣으면 Argo가
+#   그 객체를 새로 추적하게 되고 spec 차이로 재발급이 일어날 수 있다.
+# - namespace는 bootstrap/namespaces/persona-app.yaml이 소유한다. Namespace를 넣지 않는다.
+namespace: persona-app
+resources:
+  - gateway.yaml

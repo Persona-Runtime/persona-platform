@@ -1,0 +1,24 @@
+# GPU Operator를 도입하지 않고 DCGM exporter만 독립 Helm Application으로 관리한다.
+# Application 등록과 Sync는 수동이며, GPU runtime을 먼저 Sync해 RuntimeClass/nvidia가
+# 존재하는 상태에서만 이 chart를 Sync한다.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: dcgm-exporter
+  namespace: argocd
+spec:
+  project: default
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  sources:
+    - repoURL: https://nvidia.github.io/dcgm-exporter/helm-charts
+      chart: dcgm-exporter
+      targetRevision: 4.8.4
+      helm:
+        releaseName: dcgm-exporter
+        valueFiles:
+          - $values/helm/values/dcgm-exporter.yaml
+    - repoURL: https://github.com/Persona-Runtime/persona-platform.git
+      targetRevision: develop
+      ref: values

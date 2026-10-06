@@ -5,9 +5,10 @@ Sync 통제 원칙(`runbooks/public-ingress.md` Gate 3-7 상단, 2026-09-18): "A
 Application이 정확히 무엇을 반영하는지 이름만으로 헷갈리지 않게 하려는 것이다 — **한
 Application = 한 종류의 변경**을 목표로 2026-09-19에 `persona-app`·`persona-db`를 나눴다.
 
-모든 Application은 `targetRevision: develop`, `syncPolicy` 키 없음(자동 Sync·prune 없음,
-`scripts/validate-*.sh`가 assert)이 원칙이다. Sync 전에는 `scripts/argo-preflight.sh <app>`로
-승인 SHA·전체 diff·선행 조건을 확인한다.
+Git source를 쓰는 모든 Application은 `targetRevision: develop`, `syncPolicy.automated` 없음
+(자동 Sync·prune 없음, `scripts/validate-*.sh`가 assert)이 원칙이다. Helm chart source는 검토한
+chart version을 고정한다. Sync 전에는 `scripts/argo-preflight.sh <app>`로 승인 SHA·전체 diff·
+선행 조건을 확인한다.
 
 ## Application
 
@@ -19,13 +20,17 @@ Application = 한 종류의 변경**을 목표로 2026-09-19에 `persona-app`·`
 | `cert-manager-issuers` | `kustomize/overlays/prod/cert-manager-issuers` | `cert-manager` | ClusterIssuer(staging·prod) | `cert-manager` Sync 먼저(CRD) |
 | `persona-db` | `kustomize/overlays/prod/persona-db` | `persona-data` | CNPG Cluster(DB)만 | CNPG operator 설치됨(`bootstrap/cnpg/`) |
 | `persona-db-netpol` | `kustomize/overlays/prod/persona-db-netpol` | `persona-data` | NetworkPolicy·CiliumNetworkPolicy만 | 다른 네임스페이스 정책을 먼저 확인·적용한 뒤 **맨 마지막**(운영 중인 DB에 영향, Gate 4-2·4-6) |
-| `persona-app` | `kustomize/overlays/prod/persona-app` | `persona-app` | Gateway·Web 워크로드, Gateway 객체(http+https listener), 내부(Tailnet/Serve) HTTPRoute, `strip-auth-header` Middleware | **Traefik이 `kubernetesCRD` 프로바이더를 켠 뒤에만**(`bootstrap/traefik/values.yaml`) — 내부 HTTPRoute도 Middleware를 ExtensionRef로 참조해 그 프로바이더가 없으면 거부된다 |
-| `persona-app-ingress` | `kustomize/overlays/prod/persona-app-ingress` | `persona-app` | 인터넷 진입 HTTPRoute(`persona-app-public`) + Middleware 4개(`oauth-forward`·`rate-limit`·`security-headers`·`body-limit`) | `persona-app` Sync 먼저(Gateway https listener 필요), Secret `persona-app-tls` Ready, Service `oauth2-proxy.persona-edge` 존재, ReferenceGrant 존재 |
+| `persona-app` | `kustomize/overlays/prod/persona-app` | `persona-app` | Gateway·Web 워크로드, 내부(Tailnet/Serve) HTTPRoute, `strip-auth-header` Middleware(Gateway 객체는 `public-gateway`로 이동) | **Traefik이 `kubernetesCRD` 프로바이더를 켠 뒤에만**(`bootstrap/traefik/values.yaml`) — 내부 HTTPRoute도 Middleware를 ExtensionRef로 참조해 그 프로바이더가 없으면 거부된다 |
+| `public-gateway` | `kustomize/overlays/prod/public-gateway` | `persona-app` | 공개 진입 Gateway 객체 `persona-app`(http+https listener)만. Certificate·TLS Secret `persona-app-tls`는 cert-manager gateway-shim이 만들며 Git에 선언하지 않음 | 기존 객체를 같은 UID로 넘겨받는 이관 절차(`runbooks/transition/phase1/README.md`, 로컬)를 따른다. Phase 0 live 소유 관계 확인 전에는 Sync하지 않는다 |
+| `persona-app-ingress` | `kustomize/overlays/prod/persona-app-ingress` | `persona-app` | 인터넷 진입 HTTPRoute(`persona-app-public`) + Middleware 4개(`oauth-forward`·`rate-limit`·`security-headers`·`body-limit`) | Gateway https listener 존재(`public-gateway` 소유), Secret `persona-app-tls` Ready, Service `oauth2-proxy.persona-edge` 존재, ReferenceGrant 존재 |
 | `persona-app-netpol` | `kustomize/overlays/prod/persona-app-netpol` | `persona-app` | NetworkPolicy만 | Cilium 상태 ok, 대상 Pod Ready |
 | `persona-edge` | `kustomize/overlays/prod/persona-edge` | `persona-edge` | DDNS CronJob + oauth2-proxy + 그 NetworkPolicy(**아직 분리 안 함** — 이번 라운드는 persona-app·persona-db만) | Secret `oauth2-proxy`·`cloudflare-dns-token` 존재 |
 | `csi-driver-nfs` | (Helm) | `kube-system` | NFS CSI 드라이버 | 없음 |
 | `persona-nfs-storage` | `kustomize/overlays/prod/nfs-storage` | `default` | StorageClass | `csi-driver-nfs` 준비됨 |
 | `monitoring-stack` | (Helm `kube-prometheus-stack`) | `monitoring` | Prometheus·Grafana | 없음(유일하게 `syncOptions: [ServerSideApply=true]` — CRD가 커서, `automated`는 아님) |
+| `gpu-runtime` | `kustomize/overlays/prod/gpu-runtime` | `kube-system` | `RuntimeClass/nvidia`만 | `persona-gpu-01` Ready, `node-pool=gpu`, GPU 전용 taint 확인 |
+| `dcgm-exporter` | (Helm `dcgm-exporter`) | `monitoring` | GPU 전용 DCGM exporter DaemonSet·Service·ServiceMonitor | `gpu-runtime` Sync 뒤 `RuntimeClass/nvidia` 존재, monitoring Prometheus Available, ServiceMonitor CRD 존재 |
+| `nvidia-device-plugin` | `kustomize/overlays/prod/nvidia-device-plugin` | `kube-system` | GPU capacity를 광고하는 NVIDIA device plugin DaemonSet만 | `RuntimeClass/nvidia`, GPU Node Ready, DCGM exporter available=1 |
 
 ## Argo 밖(수동 `kubectl apply -k`/de-registered)
 
@@ -41,8 +46,8 @@ Argo Application이 없는 이유까지 같이 적는다 — "왜 여기 없는�
 ## 신규 Application 추가 시
 
 1. `kustomize/overlays/prod/<name>/`에 그 종류의 리소스만 넣는다(다른 종류를 섞지 않는다).
-2. `argocd/<name>.yaml`을 기존 단일 source Application 모양(`persona-app.yaml` 등)으로
-   만든다 — `syncPolicy` 키를 넣지 않는다.
+2. `argocd/<name>.yaml`을 기존 Application 모양으로 만든다. Helm chart와 Git values를 함께
+   쓸 때는 `monitoring-stack`처럼 multi-source로 두고, `syncPolicy.automated`를 넣지 않는다.
 3. 이 표에 행을 추가한다.
 4. `scripts/argo-preflight.sh`의 선행 조건 표에 그 Application의 조건을 추가한다.
 5. 관련 `scripts/validate-*.sh`가 새 경로를 렌더·검사하도록 확장한다.
