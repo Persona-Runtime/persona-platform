@@ -28,7 +28,7 @@ C = POD + ["containers", 0]
 INIT = POD + ["initContainers", 0]
 MODEL_DIR = "/models/Qwen/Qwen3-4B-Instruct-2507/cdbee75f17c01a7cc42f958dc650907174af0554"
 BASE_ARGS = ["--host", "0.0.0.0", "--port", "8000", "--served-model-name", "Qwen/Qwen3-4B-Instruct-2507",
-             "--max-model-len", "4096", "--gpu-memory-utilization", "0.85", "--no-enable-log-requests"]
+             "--max-model-len", "8192", "--gpu-memory-utilization", "0.85", "--no-enable-log-requests"]
 
 # [파일, 키 경로, 값, 기대 오류 문구]. 키 경로의 Hash는 배열에서 필드가 같은 원소를 고른다.
 cases = [
@@ -53,7 +53,9 @@ cases = [
   # 인자·env
   [DEP, C + ["args"], BASE_ARGS - ["--no-enable-log-requests"] + ["--disable-log-requests"], "--disable-log-requests는 vLLM v0.29.0에 없는 인자다"],
   [DEP, C + ["args"], BASE_ARGS - ["--no-enable-log-requests"] + ["--enable-log-requests"], "--enable-log-requests 금지"],
-  [DEP, C + ["args"], BASE_ARGS.map { |a| a == "4096" ? "262144" : a }, "--max-model-len은 4096"],
+  [DEP, C + ["args"], BASE_ARGS.map { |a| a == "8192" ? "262144" : a }, "--max-model-len은 8192"],
+  # 이전 기준선(4096)으로 되돌린 선언도 승인 값이 아니므로 검증기가 막아야 한다.
+  [DEP, C + ["args"], BASE_ARGS.map { |a| a == "8192" ? "4096" : a }, "--max-model-len은 8192"],
   [DEP, C + ["env", { "name" => "HF_HUB_OFFLINE" }], DELETE_KEY, "HF_HUB_OFFLINE=1"],
   [DEP, C + ["env", { "name" => "VLLM_NO_USAGE_STATS" }, "value"], "0", "VLLM_NO_USAGE_STATS=1"],
   # 보안·볼륨
