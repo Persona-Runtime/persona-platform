@@ -118,7 +118,7 @@ raise "[안전] vLLM은 로컬 절대 모델 경로로 serve한다" unless c["co
 args = c["args"] || []
 raise "[안전] --served-model-name은 #{SERVED_NAME}다" unless flag_value(args, "--served-model-name") == SERVED_NAME
 raise "[안전] vLLM port는 8000이다" unless flag_value(args, "--port") == "8000"
-raise "[기준선] --max-model-len은 8192다(4096 BLOCKED 뒤 승인한 비교 기준선)" unless flag_value(args, "--max-model-len") == "8192"
+raise "[기준선] --max-model-len은 16384다(8192 run 경계 문항 400 뒤 승인한 16K 비교 기준선)" unless flag_value(args, "--max-model-len") == "16384"
 raise "[기준선] --gpu-memory-utilization 초기값은 0.85다" unless flag_value(args, "--gpu-memory-utilization") == "0.85"
 raise "[안전] --disable-log-requests는 vLLM v0.29.0에 없는 인자다 — 기동이 실패한다" if args.include?("--disable-log-requests")
 raise "[안전] 요청 로그를 켜지 않는다(--enable-log-requests 금지)" if args.include?("--enable-log-requests")
