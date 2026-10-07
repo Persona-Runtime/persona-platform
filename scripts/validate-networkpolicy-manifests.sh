@@ -2,10 +2,13 @@
 
 set -eu
 
-# Gate 4 §3 NetworkPolicy(persona-app·persona-data·persona-edge·traefik) 선언이 합의한
+# NetworkPolicy(persona-app의 준비 중 페이지·persona-edge·traefik·persona-inference) 선언이 합의한
 # 계약을 지키는지 로컬에서만 검사한다. 홈 API를 호출하지 않는다.
-# scripts/validate-persona-app-manifests.sh와 같은 패턴([안전] 태그, kubectl kustomize
+# scripts/validate-public-gateway-manifests.sh와 같은 패턴([안전] 태그, kubectl kustomize
 # 렌더 + ruby 검사)을 쓴다.
+#
+# persona 앱·DB를 폐기하면서(2026-10-07) persona-app-netpol·persona-db-netpol 검사를 지웠다.
+# persona-app namespace에는 준비 중 페이지(maintenance-page overlay)의 정책만 남는다.
 #
 # 이 스크립트는 "네임스페이스마다 default-deny 정확히 1개 + policyTypes 둘 다"라는
 # 안전 하한선과, 문서화한 허용 규칙의 모양(누가 누구에게 어느 포트로)을 확인한다.
@@ -19,24 +22,21 @@ for tool in kubectl ruby mktemp; do
 done
 
 repo_dir=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
-app_file=$(mktemp "${TMPDIR:-/tmp}/persona-app.XXXXXX.yaml")
-data_file=$(mktemp "${TMPDIR:-/tmp}/persona-data.XXXXXX.yaml")
+maintenance_file=$(mktemp "${TMPDIR:-/tmp}/maintenance-page.XXXXXX.yaml")
 edge_file=$(mktemp "${TMPDIR:-/tmp}/persona-edge.XXXXXX.yaml")
 traefik_file=$(mktemp "${TMPDIR:-/tmp}/traefik.XXXXXX.yaml")
 inference_file=$(mktemp "${TMPDIR:-/tmp}/persona-inference.XXXXXX.yaml")
-trap 'rm -f "$app_file" "$data_file" "$edge_file" "$traefik_file" "$inference_file"' EXIT HUP INT TERM
+trap 'rm -f "$maintenance_file" "$edge_file" "$traefik_file" "$inference_file"' EXIT HUP INT TERM
 
-# persona-app·persona-db는 이제 NetworkPolicy를 안 갖는다 — Sync 분리(2026-09-19)로
-# 각각 persona-app-netpol·persona-db-netpol이 관리한다(argocd/README.md 참고).
-kubectl kustomize "$repo_dir/kustomize/overlays/prod/persona-app-netpol"      > "$app_file"
-kubectl kustomize "$repo_dir/kustomize/overlays/prod/persona-db-netpol"       > "$data_file"
+# persona-app namespace 정책은 준비 중 페이지 overlay에 함께 들어 있다(워크로드와 같은 Application).
+kubectl kustomize "$repo_dir/kustomize/overlays/prod/maintenance-page"      > "$maintenance_file"
 kubectl kustomize "$repo_dir/kustomize/overlays/prod/persona-edge"            > "$edge_file"
 kubectl kustomize "$repo_dir/kustomize/overlays/prod/traefik-networkpolicy"   > "$traefik_file"
 # persona-inference는 Argo Application 없이 사람이 kubectl로 적용한다. Argo가 Sync 전에
 # 막아 주지 않으므로 적용 전에 이 검사로 렌더와 정책 모양을 확인한다.
 kubectl kustomize "$repo_dir/kustomize/overlays/prod/persona-inference-netpol" > "$inference_file"
 
-ruby -ryaml - "$app_file" "$data_file" "$edge_file" "$traefik_file" "$inference_file" <<'RUBY'
+ruby -ryaml - "$maintenance_file" "$edge_file" "$traefik_file" "$inference_file" <<'RUBY'
 # encoding: utf-8
 #
 # heredoc로 넘긴 Ruby 소스는 파일이 아니라 stdin이라, 로케일이 UTF-8이 아니면(LC_ALL=C,
@@ -47,7 +47,7 @@ ruby -ryaml - "$app_file" "$data_file" "$edge_file" "$traefik_file" "$inference_
 # 외부 매니페스트의 인코딩이다.
 Encoding.default_external = Encoding::UTF_8
 
-app_path, data_path, edge_path, traefik_path, inference_path = ARGV
+maintenance_path, edge_path, traefik_path, inference_path = ARGV
 
 def load(path)
   YAML.load_stream(File.read(path)).compact
@@ -70,8 +70,8 @@ end
 # 네임스페이스마다 default-deny가 정확히 1개, podSelector가 전체({}), Ingress·Egress
 # 둘 다 policyTypes에 있어야 한다 — 이게 이 검사 전체의 안전 하한선이다. 다른 개별 허용
 # 규칙이 틀려도 이 하나가 지켜지면 "뚫린 채로 방치"는 아니다.
-def check_default_deny(all, context)
-  policy = resource(all, "NetworkPolicy", "default-deny")
+def check_default_deny(all, context, name = "default-deny")
+  policy = resource(all, "NetworkPolicy", name)
   raise "[안전] #{context} default-deny: podSelector가 네임스페이스 전체(빈 값)가 아니다" unless policy.dig("spec", "podSelector") == {}
   raise "[안전] #{context} default-deny: policyTypes에 Ingress·Egress 둘 다 있어야 한다" unless policy.dig("spec", "policyTypes")&.sort == %w[Egress Ingress]
 end
@@ -96,117 +96,29 @@ def check_single_and_peer(rule, namespace, pod_labels, context)
 end
 
 # 내부 순서 고정(2026-09-19): allow-*(wave 0) → default-deny(wave 1). 허용 규칙이 먼저
-# 들어가야 차단이 걸리는 순간에도 기존 통신이 안 끊긴다. persona-app·persona-data만
-# 대상이다(persona-edge·traefik은 이번에 안 건드림).
+# 들어가야 차단이 걸리는 순간에도 기존 통신이 안 끊긴다. persona-app(준비 중 페이지)·
+# persona-inference가 대상이다(persona-edge·traefik은 이번에 안 건드림).
 def check_sync_wave(policy, expected, context)
   actual = policy.dig("metadata", "annotations", "argocd.argoproj.io/sync-wave")
   raise "[안전] #{context}: sync-wave가 #{expected}가 아니다(실제: #{actual.inspect})" unless actual == expected
 end
 
-# --- persona-app -------------------------------------------------------------
-app = load(app_path)
-check_default_deny(app, "persona-app")
-check_sync_wave(resource(app, "NetworkPolicy", "default-deny"), "1", "persona-app default-deny")
-
-web = resource(app, "NetworkPolicy", "allow-web")
-check_sync_wave(web, "0", "persona-app allow-web")
-raise "[안전] allow-web: Egress policyType을 두면 안 된다 — 이 컴포넌트는 egress 없음" if web.dig("spec", "policyTypes")&.include?("Egress")
-raise "[안전] allow-web: traefik에서만 인입해야 한다" unless rule_from_namespaces(web.dig("spec", "ingress", 0)) == ["traefik"]
-raise "[안전] allow-web: 포트가 8080이 아니다" unless rule_ports(web.dig("spec", "ingress", 0)) == [["TCP", 8080]]
-
-gw = resource(app, "NetworkPolicy", "allow-gateway")
-check_sync_wave(gw, "0", "persona-app allow-gateway")
-raise "[안전] allow-gateway: traefik에서만 인입해야 한다" unless rule_from_namespaces(gw.dig("spec", "ingress", 0)) == ["traefik"]
-
-# egress는 DB·embedding·DNS·vLLM 네 규칙뿐이다. vLLM 추가 전부터 있던 세 규칙은 구조까지
-# 그대로여야 한다 — 대상 이름 목록만 비교하면 포트 변경이나 selector 확장을 놓친다.
-gw_existing_egress = [
-  { "to" => [{ "namespaceSelector" => { "matchLabels" => ns("persona-data") } }],
-    "ports" => [{ "protocol" => "TCP", "port" => 5432 }] },
-  { "to" => [{ "podSelector" => { "matchLabels" => { "app.kubernetes.io/name" => "persona-embedding" } } }],
-    "ports" => [{ "protocol" => "TCP", "port" => 8081 }] },
-  { "to" => [{ "namespaceSelector" => { "matchLabels" => ns("kube-system") }, "podSelector" => { "matchLabels" => { "k8s-app" => "kube-dns" } } }],
-    "ports" => [{ "protocol" => "UDP", "port" => 53 }, { "protocol" => "TCP", "port" => 53 }] },
-]
-gw_egress_rules = gw.dig("spec", "egress")
-raise "[안전] allow-gateway egress 규칙은 DB·embedding·DNS·vLLM 4개여야 한다(실제: #{gw_egress_rules.length}개)" unless gw_egress_rules.length == 4
-gw_existing_egress.each do |expected|
-  raise "[안전] allow-gateway의 기존 egress 규칙이 바뀌었다(DB 5432·embedding 8081·DNS 53은 그대로 둔다): #{expected.inspect}" unless gw_egress_rules.include?(expected)
+# --- persona-app(준비 중 페이지) ---------------------------------------------------
+# persona 정리 순서 동안 persona-app-netpol의 default-deny와 같은 이름을 쓰면 두 Application이
+# 같은 객체를 추적한다. 그래서 maintenance- 접두사를 쓴다.
+maintenance = load(maintenance_path)
+check_default_deny(maintenance, "persona-app(maintenance)", "maintenance-default-deny")
+check_sync_wave(resource(maintenance, "NetworkPolicy", "maintenance-default-deny"), "1", "persona-app maintenance-default-deny")
+page = resource(maintenance, "NetworkPolicy", "maintenance-allow-traefik")
+check_sync_wave(page, "0", "persona-app maintenance-allow-traefik")
+raise "[안전] maintenance-allow-traefik는 준비 중 페이지 Pod만 골라야 한다" unless page.dig("spec", "podSelector") == { "matchLabels" => { "app.kubernetes.io/name" => "maintenance-page" } }
+raise "[안전] maintenance-allow-traefik ingress 규칙이 정확히 1개여야 한다" unless (page.dig("spec", "ingress") || []).length == 1
+raise "[안전] 준비 중 페이지는 traefik에서만 인입해야 한다" unless rule_from_namespaces(page.dig("spec", "ingress", 0)) == ["traefik"]
+raise "[안전] 준비 중 페이지 인입 포트가 8080이 아니다" unless rule_ports(page.dig("spec", "ingress", 0)) == [["TCP", 8080]]
+# 정적 페이지는 밖으로 나갈 일이 없다. egress 허용이 생기면 default-deny의 전면 차단이 풀린다.
+maintenance.select { |item| item["kind"] == "NetworkPolicy" }.each do |policy|
+  raise "[안전] persona-app #{policy.dig("metadata", "name")}: egress 허용을 두지 않는다" if (policy.dig("spec", "egress") || []).any?
 end
-
-# Gateway → vLLM. persona-inference의 vLLM Pod 하나, TCP 8000 하나만 연다.
-gw_vllm_rules = gw_egress_rules.reject { |rule| gw_existing_egress.include?(rule) }
-raise "[안전] allow-gateway의 vLLM egress 규칙이 정확히 1개가 아니다(#{gw_vllm_rules.length}개)" unless gw_vllm_rules.length == 1
-gw_vllm_rule = gw_vllm_rules.fetch(0)
-check_single_and_peer(gw_vllm_rule, "persona-inference", { "app.kubernetes.io/name" => "persona-vllm" }, "allow-gateway → vLLM egress")
-raise "[안전] allow-gateway → vLLM egress 포트가 TCP 8000 하나가 아니다(실제: #{rule_ports(gw_vllm_rule).inspect})" unless rule_ports(gw_vllm_rule) == [["TCP", 8000]]
-
-embedding = resource(app, "NetworkPolicy", "allow-embedding")
-check_sync_wave(embedding, "0", "persona-app allow-embedding")
-raise "[안전] allow-embedding: Egress policyType을 두면 안 된다 — 이 컴포넌트는 egress 없음(오프라인 모델)" if embedding.dig("spec", "policyTypes")&.include?("Egress")
-embedding_sources = embedding.dig("spec", "ingress").flat_map { |rule| (rule["from"] || []).map { |peer| peer.dig("podSelector", "matchLabels", "app.kubernetes.io/name") } }.compact
-raise "[안전] allow-embedding: persona-gateway Pod에서만 인입해야 한다" unless embedding_sources == ["persona-gateway"]
-raise "[안전] allow-embedding: 포트가 8081이 아니다" unless rule_ports(embedding.dig("spec", "ingress", 0)) == [["TCP", 8081]]
-
-migrate = resource(app, "NetworkPolicy", "allow-migrate")
-check_sync_wave(migrate, "0", "persona-app allow-migrate")
-raise "[안전] allow-migrate: Ingress policyType을 두면 안 된다 — Job은 인바운드를 받지 않는다" if migrate.dig("spec", "policyTypes")&.include?("Ingress")
-migrate_egress_targets = migrate.dig("spec", "egress").flat_map { |rule| (rule["to"] || []).map { |peer| peer.dig("namespaceSelector", "matchLabels", "kubernetes.io/metadata.name") } }
-raise "[안전] allow-migrate egress 대상이 다르다(persona-data·kube-system이어야 한다)" unless migrate_egress_targets.sort == %w[kube-system persona-data]
-
-# monitoring이 PodMonitor(kustomize/base/persona-gateway/podmonitor.yaml)로 Gateway의
-# /metrics를 직접 스크레이프한다. Gateway는 API와 /metrics를 같은 8080에서 내므로
-# 전용 metrics 포트가 없다 — 그래서 from을 monitoring 하나로 좁히는 것이 특히 중요하다.
-# 이 허용이 없으면 default-deny에 막혀 타깃이 down으로 남는다(traefik에서 실측:
-# runbooks/gate3-4-apply-record-2026-09-19.md §2-13, 같은 패턴의 allow-ingress-metrics).
-gw_metrics = resource(app, "NetworkPolicy", "allow-gateway-metrics")
-check_sync_wave(gw_metrics, "0", "persona-app allow-gateway-metrics")
-raise "[안전] allow-gateway-metrics: Egress policyType을 두면 안 된다 — 관측은 인입만 연다" if gw_metrics.dig("spec", "policyTypes")&.include?("Egress")
-raise "[안전] allow-gateway-metrics: persona-gateway Pod만 대상이어야 한다" unless gw_metrics.dig("spec", "podSelector") == { "matchLabels" => { "app.kubernetes.io/name" => "persona-gateway" } }
-gw_metrics_rules = gw_metrics.dig("spec", "ingress")
-raise "[안전] allow-gateway-metrics: ingress 규칙이 정확히 1개여야 한다" unless gw_metrics_rules.length == 1
-raise "[안전] allow-gateway-metrics: monitoring에서만 인입해야 한다" unless rule_from_namespaces(gw_metrics_rules.fetch(0)) == ["monitoring"]
-raise "[안전] allow-gateway-metrics: 포트가 8080이 아니다" unless rule_ports(gw_metrics_rules.fetch(0)) == [["TCP", 8080]]
-# 관측을 연다는 이유로 서비스 경로 규칙이 느슨해지지 않았는지 함께 본다 — 둘은 별도
-# 정책이어야 하고, allow-gateway의 인입은 traefik 한 곳(8080)으로 남아야 한다.
-raise "[안전] allow-gateway: ingress 규칙이 정확히 1개여야 한다 — 관측 허용은 allow-gateway-metrics로 분리한다" unless gw.dig("spec", "ingress").length == 1
-raise "[안전] allow-gateway: 포트가 8080이 아니다" unless rule_ports(gw.dig("spec", "ingress", 0)) == [["TCP", 8080]]
-
-# --- persona-data --------------------------------------------------------------
-data = load(data_path)
-check_default_deny(data, "persona-data")
-check_sync_wave(resource(data, "NetworkPolicy", "default-deny"), "1", "persona-data default-deny")
-
-db_in = resource(data, "NetworkPolicy", "allow-db-ingress")
-check_sync_wave(db_in, "0", "persona-data allow-db-ingress")
-db_in_sources = db_in.dig("spec", "ingress").flat_map { |rule| (rule["from"] || []).map { |peer| peer.dig("namespaceSelector", "matchLabels", "kubernetes.io/metadata.name") } }.uniq
-raise "[안전] persona-db ingress 출처가 다르다(persona-app·cnpg-system·monitoring이어야 한다)" unless db_in_sources.sort == %w[cnpg-system monitoring persona-app].sort
-
-db_egress = resource(data, "NetworkPolicy", "allow-db-egress")
-check_sync_wave(db_egress, "0", "persona-data allow-db-egress")
-db_egress_targets = db_egress.dig("spec", "egress").flat_map { |rule| (rule["to"] || []).map { |peer| peer.dig("namespaceSelector", "matchLabels", "kubernetes.io/metadata.name") } }.uniq
-raise "[안전] persona-db egress 대상이 다르다(kube-system·cnpg-system이어야 한다)" unless db_egress_targets.sort == %w[cnpg-system kube-system]
-
-replication = resource(data, "NetworkPolicy", "allow-db-replication")
-check_sync_wave(replication, "0", "persona-data allow-db-replication")
-raise "[안전] 복제 정책은 Ingress·Egress 둘 다 있어야 한다(양방향 스트리밍 복제)" unless replication.dig("spec", "policyTypes")&.sort == %w[Egress Ingress]
-raise "[안전] 복제 ingress가 같은 Cluster Pod(cnpg.io/cluster: persona-db)를 셀렉트하지 않는다" unless replication.dig("spec", "ingress", 0, "from", 0, "podSelector", "matchLabels") == { "cnpg.io/cluster" => "persona-db" }
-# 5432=스트리밍 복제, 8000=CNPG instance manager 상태 조회(인스턴스↔인스턴스, 2026-09-20
-# Hubble 실측 — 8000 없이는 Policy denied DROPPED가 반복됐다). ingress·egress 둘 다 확인해
-# 한쪽만 고치고 다른 쪽을 빠뜨리는 것을 잡는다.
-raise "[안전] 복제 ingress 포트가 5432·8000이 아니다" unless rule_ports(replication.dig("spec", "ingress", 0)).sort == [["TCP", 5432], ["TCP", 8000]]
-raise "[안전] 복제 egress가 같은 Cluster Pod(cnpg.io/cluster: persona-db)를 셀렉트하지 않는다" unless replication.dig("spec", "egress", 0, "to", 0, "podSelector", "matchLabels") == { "cnpg.io/cluster" => "persona-db" }
-raise "[안전] 복제 egress 포트가 5432·8000이 아니다" unless rule_ports(replication.dig("spec", "egress", 0)).sort == [["TCP", 5432], ["TCP", 8000]]
-
-# CNPG instance manager가 Cluster status·Secret/ConfigMap·승격 판단·readiness에
-# kube-apiserver를 직접 호출한다(cnpg-system:8000 — operator↔instance manager 상태
-# 포트 — 와는 별개 경로다). 이게 없으면 지금 운영 중인 CNPG 2 인스턴스의 failover가
-# 불가능해진다(리뷰 차단 사유).
-db_apiserver = resource(data, "CiliumNetworkPolicy", "allow-egress-kube-apiserver")
-check_sync_wave(db_apiserver, "0", "persona-data allow-egress-kube-apiserver")
-raise "[안전] persona-db endpointSelector가 cnpg.io/cluster: persona-db가 아니다" unless db_apiserver.dig("spec", "endpointSelector", "matchLabels") == { "cnpg.io/cluster" => "persona-db" }
-raise "[안전] persona-db의 kube-apiserver egress가 예약 엔티티 kube-apiserver를 쓰지 않는다(하드코딩 IP는 노드 교체 때 끊긴다)" unless db_apiserver.dig("spec", "egress", 0, "toEntities") == ["kube-apiserver"]
-raise "[안전] persona-db의 kube-apiserver egress 포트가 6443이 아니다" unless db_apiserver.dig("spec", "egress", 0, "toPorts", 0, "ports", 0, "port") == "6443"
 
 # --- persona-edge ----------------------------------------------------------------
 edge = load(edge_path)
@@ -342,5 +254,5 @@ inference.each do |item|
   end
 end
 
-puts "networkpolicy(persona-app·persona-data·persona-edge·traefik·persona-inference) 렌더와 매니페스트 정책 검사 통과"
+puts "networkpolicy(persona-app 준비 중 페이지·persona-edge·traefik·persona-inference) 렌더와 매니페스트 정책 검사 통과"
 RUBY

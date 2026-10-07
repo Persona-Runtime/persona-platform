@@ -46,7 +46,7 @@ cases = [
   [PVC, ["spec", "resources", "requests", "storage"], "20Gi", "PVC 크기는 40Gi다"],
   [PVC, ["spec", "storageClassName"], "standard", "StorageClass는 local-path다"],
   [PVC, ["spec", "accessModes"], ["ReadWriteMany"], "ReadWriteOnce만 쓴다"],
-  ["argocd/persona-app.yaml", ["spec", "source", "path"], "kustomize/overlays/prod/persona-model-cache", "persona-model-cache overlay를 참조한다"],
+  ["argocd/maintenance-page.yaml", ["spec", "source", "path"], "kustomize/overlays/prod/persona-model-cache", "persona-model-cache overlay를 참조한다"],
 ]
 
 lookup = lambda do |node, key|

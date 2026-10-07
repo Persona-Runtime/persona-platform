@@ -2,7 +2,8 @@
 
 operator 설치와 DB Cluster 생성은 **다른 단계**다. operator는 클러스터 전역 자원(CRD,
 `cnpg-system` namespace, ClusterRole)을 만들기 때문에 Argo가 관리하지 않고 여기 절차로만 다룬다.
-DB Cluster는 `kustomize/base/persona-db/`가 소유하며 Argo가 관리한다.
+persona DB Cluster(`kustomize/base/persona-db/`)는 2026-10-07 폐기했다. 다음 서비스의 DB Cluster는
+그 서비스의 overlay가 소유하며 Argo가 관리한다.
 
 실행 위치: **홈 CP(`k8s-cp`)**. 노트북에서 실행하지 않는다.
 [실행 위치·접속 정책](../../runbooks/execution-locations.md)을 따른다.

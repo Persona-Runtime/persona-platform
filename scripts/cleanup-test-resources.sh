@@ -685,7 +685,8 @@ stage_verify() {
   echo "--- Application ---"
   $K -n argocd get applications.argoproj.io \
     -o custom-columns='NAME:.metadata.name,SYNC:.status.sync.status,HEALTH:.status.health.status'
-  echo "  기대: csi-driver-nfs / monitoring-stack / persona-app / persona-db / persona-nfs-storage"
+  # persona 앱·DB·NFS Application은 2026-10-07 폐기했다(chore/retire-persona). 정리 뒤 남는 것만 적는다.
+  echo "  기대(persona 폐기 뒤): public-gateway / maintenance-page / persona-edge / monitoring-stack / 공용 Application"
   echo "  monitoring-stack 의 OutOfSync 는 이번 범위 밖의 기존 상태다"
   echo "--- 서비스 ---"
   $K -n "$APP_NS"     get pod -o wide

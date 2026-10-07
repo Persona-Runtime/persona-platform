@@ -18,16 +18,9 @@ chart version을 고정한다. Sync 전에는 `scripts/argo-preflight.sh <app>`�
 | `metallb-config` | `kustomize/overlays/prod/metallb-config` | `metallb-system` | IPAddressPool·L2Advertisement | `metallb` Sync 먼저(CRD) |
 | `cert-manager` | (Helm `jetstack/cert-manager`) | `cert-manager` | cert-manager 컨트롤러·CRD | `bootstrap/namespaces/cert-manager.yaml` 먼저 적용 |
 | `cert-manager-issuers` | `kustomize/overlays/prod/cert-manager-issuers` | `cert-manager` | ClusterIssuer(staging·prod) | `cert-manager` Sync 먼저(CRD) |
-| `persona-db` | `kustomize/overlays/prod/persona-db` | `persona-data` | CNPG Cluster(DB)만 | CNPG operator 설치됨(`bootstrap/cnpg/`) |
-| `persona-db-netpol` | `kustomize/overlays/prod/persona-db-netpol` | `persona-data` | NetworkPolicy·CiliumNetworkPolicy만 | 다른 네임스페이스 정책을 먼저 확인·적용한 뒤 **맨 마지막**(운영 중인 DB에 영향, Gate 4-2·4-6) |
-| `persona-app` | `kustomize/overlays/prod/persona-app` | `persona-app` | Gateway·Web 워크로드, 내부(Tailnet/Serve) HTTPRoute, `strip-auth-header` Middleware(Gateway 객체는 `public-gateway`로 이동) | **Traefik이 `kubernetesCRD` 프로바이더를 켠 뒤에만**(`bootstrap/traefik/values.yaml`) — 내부 HTTPRoute도 Middleware를 ExtensionRef로 참조해 그 프로바이더가 없으면 거부된다 |
-| `public-gateway` | `kustomize/overlays/prod/public-gateway` | `persona-app` | 공개 진입 Gateway 객체 `persona-app`(http+https listener)만. Certificate·TLS Secret `persona-app-tls`는 cert-manager gateway-shim이 만들며 Git에 선언하지 않음 | 기존 객체를 같은 UID로 넘겨받는 이관 절차(`runbooks/transition/phase1/README.md`, 로컬)를 따른다. Phase 0 live 소유 관계 확인 전에는 Sync하지 않는다 |
+| `public-gateway` | `kustomize/overlays/prod/public-gateway` | `persona-app` | 공개 진입 Gateway 객체 `persona-app`(http+https listener)만. Certificate·TLS Secret `persona-app-tls`는 cert-manager gateway-shim이 만들며 Git에 선언하지 않음 | 소유권 이관(Phase 1) 완료 상태여야 한다 — live Gateway tracking-id가 `public-gateway`, Certificate 소유자가 현재 Gateway(`scripts/argo-preflight.sh public-gateway`) |
 | `maintenance-page` | `kustomize/overlays/prod/maintenance-page` | `persona-app` | 정적 준비 중 페이지(nginx Deployment·Service·ConfigMap), 공개(https)·내부(http) HTTPRoute, `maintenance-security-headers` Middleware, persona-app NetworkPolicy(`maintenance-` 접두사) | Traefik `kubernetesCRD` 프로바이더, Gateway Programmed, Certificate `persona-app-tls` Ready. 다음 서비스 공개(M8) 때 backendRef를 바꾸고 정리한다 |
-| `persona-app-ingress` | `kustomize/overlays/prod/persona-app-ingress` | `persona-app` | 인터넷 진입 HTTPRoute(`persona-app-public`) + Middleware 4개(`oauth-forward`·`rate-limit`·`security-headers`·`body-limit`) | Gateway https listener 존재(`public-gateway` 소유), Secret `persona-app-tls` Ready, Service `oauth2-proxy.persona-edge` 존재, ReferenceGrant 존재 |
-| `persona-app-netpol` | `kustomize/overlays/prod/persona-app-netpol` | `persona-app` | NetworkPolicy만 | Cilium 상태 ok, 대상 Pod Ready |
-| `persona-edge` | `kustomize/overlays/prod/persona-edge` | `persona-edge` | DDNS CronJob + oauth2-proxy + 그 NetworkPolicy(**아직 분리 안 함** — 이번 라운드는 persona-app·persona-db만) | Secret `oauth2-proxy`·`cloudflare-dns-token` 존재 |
-| `csi-driver-nfs` | (Helm) | `kube-system` | NFS CSI 드라이버 | 없음 |
-| `persona-nfs-storage` | `kustomize/overlays/prod/nfs-storage` | `default` | StorageClass | `csi-driver-nfs` 준비됨 |
+| `persona-edge` | `kustomize/overlays/prod/persona-edge` | `persona-edge` | DDNS CronJob + oauth2-proxy + 그 NetworkPolicy(**아직 분리 안 함**) | Secret `oauth2-proxy`·`cloudflare-dns-token` 존재 |
 | `monitoring-stack` | (Helm `kube-prometheus-stack`) | `monitoring` | Prometheus·Grafana | 없음(유일하게 `syncOptions: [ServerSideApply=true]` — CRD가 커서, `automated`는 아님) |
 | `gpu-runtime` | `kustomize/overlays/prod/gpu-runtime` | `kube-system` | `RuntimeClass/nvidia`만 | `persona-gpu-01` Ready, `node-pool=gpu`, GPU 전용 taint 확인 |
 | `dcgm-exporter` | (Helm `dcgm-exporter`) | `monitoring` | GPU 전용 DCGM exporter DaemonSet·Service·ServiceMonitor | `gpu-runtime` Sync 뒤 `RuntimeClass/nvidia` 존재, monitoring Prometheus Available, ServiceMonitor CRD 존재 |
@@ -42,7 +35,16 @@ Argo Application이 없는 이유까지 같이 적는다 — "왜 여기 없는�
 | `kustomize/overlays/prod/traefik-networkpolicy` | `kubectl apply -k`(CP 수동) | Traefik 본체가 `helm --create-namespace`로 Argo 밖에 설치돼 있어(`bootstrap/traefik/`), 그 NetworkPolicy도 같은 방식으로 다룬다 |
 | `kustomize/overlays/prod/traefik-observability` | `kubectl apply -k`(CP 수동) | 위와 같은 이유(Traefik 부속) |
 | `kustomize/overlays/prod/mock-sse` | 없음(2026-09-16 de-registered) | 완료된 실험 자원 정리 — 재등록 절차는 `runbooks/test-resource-cleanup.md`(로컬) |
-| `kustomize/overlays/prod/persona-migrate` | 없음(2026-09-16 de-registered) | migration Job은 일회성이라 상시 Application 목록에 안 둔다 — Job 계약 검증은 `scripts/validate-persona-app-manifests.sh`가 계속 한다 |
+
+## 폐기한 Application (2026-10-07)
+
+`persona-app`·`persona-app-ingress`·`persona-app-netpol`·`persona-db`·`persona-db-netpol`·
+`csi-driver-nfs`·`persona-nfs-storage`와 de-registered였던 `persona-migrate` overlay를 Git에서 뺐다
+(브랜치 `chore/retire-persona`). 모두 수동 Sync·prune 없음이라 **Git에서 빠져도 클러스터 리소스는
+남는다**. 실제 삭제는 사람이 삭제 runbook 순서(공개 Route → 앱 → DB → PVC/PV → 노드 디렉터리 →
+NetworkPolicy·NFS → Application)로 실행하고, 그 뒤 이 변경을 머지한다.
+남긴 것: `public-gateway`(Gateway·TLS), `persona-edge`, vLLM·모델 캐시·inference NetworkPolicy(Argo 밖),
+Traefik, 공용 Application.
 
 ## 신규 Application 추가 시
 
