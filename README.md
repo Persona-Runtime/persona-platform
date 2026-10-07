@@ -74,6 +74,8 @@ sh scripts/validate-networkpolicy-manifests.sh
 # mafest 데이터 층(DB draft·PodMonitor·적재 Job·Application·권한 SQL)과 그 음성 테스트
 sh scripts/validate-mafest-data-manifests.sh
 sh scripts/test-mafest-data-manifests.sh
+# M3 vLLM 예산 측정 스크립트를 가짜 kubectl·가짜 vLLM으로 확인한다(실측은 사람이 CP에서).
+bash scripts/test-vllm-budget.sh
 bash scripts/argo-preflight.sh --self-test
 # persona 폐기 인벤토리(읽기 전용, CP에서 실행) 스크립트를 가짜 kubectl로 확인한다.
 bash scripts/test-inventory-persona-retire.sh
