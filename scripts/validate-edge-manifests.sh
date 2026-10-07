@@ -4,8 +4,8 @@ set -eu
 
 # 공개 진입 Gate 3~4의 kustomize 경로(MetalLB 설정·cert-manager ClusterIssuer·DDNS·
 # oauth2-proxy)가 렌더되고 핵심 계약을 지키는지 로컬에서만 검사한다. 홈 API를 호출하지 않는다.
-# scripts/validate-persona-app-manifests.sh와 같은 패턴([안전] 태그, kubectl kustomize 렌더 +
-# ruby 검사)을 쓰되, 이 파일은 persona-app 렌더를 다루지 않는다(그건 위 스크립트의 범위다).
+# scripts/validate-public-gateway-manifests.sh와 같은 패턴([안전] 태그, kubectl kustomize 렌더 +
+# ruby 검사)을 쓰되, 이 파일은 공개 Gateway·준비 중 페이지를 다루지 않는다(그건 위 스크립트의 범위다).
 
 for tool in kubectl ruby mktemp; do
   if ! command -v "$tool" > /dev/null 2>&1; then

@@ -1,5 +1,5 @@
 #!/bin/sh
-# NetworkPolicy 선언의 복사본에 Gateway ↔ vLLM·Prometheus → vLLM 계약 위반을 하나씩 넣어
+# NetworkPolicy 선언의 복사본에 준비 중 페이지·Gateway → vLLM·Prometheus → vLLM 계약 위반을 하나씩 넣어
 # validate-networkpolicy-manifests.sh가 실패하는지 확인한다. 원본 선언·클러스터는 바꾸지 않는다.
 set -eu
 for tool in kubectl ruby mktemp cp mkdir rm; do
@@ -18,7 +18,8 @@ ruby -ryaml - "$test_dir" <<'RUBY'
 # encoding: utf-8
 Encoding.default_external = Encoding::UTF_8
 root = ARGV.fetch(0)
-APP = "kustomize/base/networkpolicy/persona-app/network-policy.yaml"
+# persona-app namespace에는 준비 중 페이지 정책만 남았다(persona 폐기, 2026-10-07).
+MNT = "kustomize/overlays/prod/maintenance-page/network-policy.yaml"
 INF = "kustomize/base/networkpolicy/persona-inference/network-policy.yaml"
 
 def ns_peer(name)
@@ -29,39 +30,20 @@ def pod_peer(labels)
   { "podSelector" => { "matchLabels" => labels } }
 end
 
-VLLM = { "app.kubernetes.io/name" => "persona-vllm" }
 GATEWAY = { "app.kubernetes.io/name" => "persona-gateway" }
 PROMETHEUS = { "app.kubernetes.io/name" => "prometheus", "app.kubernetes.io/instance" => "monitoring-stack-kube-prom-prometheus" }
 
-# Gateway egress 중 vLLM 규칙(persona-inference를 가리키는 것)을 찾는다.
-gateway_vllm_rule = lambda do |policy|
-  policy.dig("spec", "egress").find { |rule| rule["to"].any? { |peer| peer.dig("namespaceSelector", "matchLabels", "kubernetes.io/metadata.name") == "persona-inference" } }
-end
-
 # [파일, 정책 이름, 복사본을 바꾸는 함수, 기대 오류 문구]
 cases = [
-  # Gateway → vLLM egress (persona-app allow-gateway)
-  [APP, "allow-gateway", ->(p) { gateway_vllm_rule.call(p)["to"] = [ns_peer("persona-inference")] },
-   "allow-gateway → vLLM egress: persona-inference namespace AND"],
-  [APP, "allow-gateway", ->(p) { gateway_vllm_rule.call(p)["to"] = [pod_peer(VLLM)] },
-   "allow-gateway → vLLM egress: persona-inference namespace AND"],
-  [APP, "allow-gateway", ->(p) { gateway_vllm_rule.call(p)["to"] = [ns_peer("persona-inference"), pod_peer(VLLM)] },
-   "allow-gateway → vLLM egress: peer가 정확히 1개가 아니다"],
-  [APP, "allow-gateway", ->(p) { gateway_vllm_rule.call(p)["ports"] = [{ "protocol" => "TCP", "port" => 8001 }] },
-   "vLLM egress 포트가 TCP 8000 하나가 아니다"],
-  [APP, "allow-gateway", ->(p) { gateway_vllm_rule.call(p)["ports"] << { "protocol" => "TCP", "port" => 443 } },
-   "vLLM egress 포트가 TCP 8000 하나가 아니다"],
-  [APP, "allow-gateway", ->(p) { gateway_vllm_rule.call(p)["to"] << { "ipBlock" => { "cidr" => "0.0.0.0/0" } } },
-   "allow-gateway → vLLM egress: peer가 정확히 1개가 아니다"],
-  [APP, "allow-gateway", ->(p) { p.dig("spec", "egress").delete(gateway_vllm_rule.call(p)) },
-   "DB·embedding·DNS·vLLM 4개여야 한다"],
-  # 기존 Gateway egress 보존
-  [APP, "allow-gateway", ->(p) { p.dig("spec", "egress", 0, "ports", 0)["port"] = 5433 },
-   "기존 egress 규칙이 바뀌었다"],
-  [APP, "allow-gateway", ->(p) { p.dig("spec", "egress", 2)["ports"].pop },
-   "기존 egress 규칙이 바뀌었다"],
-  [APP, "allow-gateway", ->(p) { p.dig("spec", "egress").delete_at(2) },
-   "DB·embedding·DNS·vLLM 4개여야 한다"],
+  # 준비 중 페이지(persona-app) — traefik 8080만 들어오고, 나가는 길은 없다
+  [MNT, "maintenance-allow-traefik", ->(p) { p.dig("spec", "ingress", 0)["from"] = [ns_peer("monitoring")] },
+   "준비 중 페이지는 traefik에서만 인입해야 한다"],
+  [MNT, "maintenance-allow-traefik", ->(p) { p.dig("spec", "ingress", 0)["ports"] = [{ "protocol" => "TCP", "port" => 8081 }] },
+   "준비 중 페이지 인입 포트가 8080이 아니다"],
+  [MNT, "maintenance-allow-traefik", ->(p) { p["spec"]["egress"] = [{ "to" => [ns_peer("kube-system")], "ports" => [{ "protocol" => "UDP", "port" => 53 }] }] },
+   "egress 허용을 두지 않는다"],
+  [MNT, "maintenance-default-deny", ->(p) { p["spec"]["podSelector"] = { "matchLabels" => { "app.kubernetes.io/name" => "maintenance-page" } } },
+   "default-deny: podSelector가 네임스페이스 전체"],
   # vLLM ingress from Gateway (persona-inference allow-vllm-gateway)
   [INF, "allow-vllm-gateway", ->(p) { p.dig("spec", "ingress", 0)["from"] = [ns_peer("persona-app")] },
    "Gateway → vLLM ingress: persona-app namespace AND"],

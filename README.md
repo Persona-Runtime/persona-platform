@@ -40,9 +40,12 @@ Prometheus local-path는 worker2에 종속되며 DB 복제로 해결되지 않�
   그 파일 자체의 주석에 있다(추적 대상이라 이 checkout만으로도 확인 가능). **신규 구축·논리
   복원 뒤에도 이 권한이 남는지는 실제로 다시 구축·복원해 보기 전까지 미검증이다.**
 - 복제본 초기 추격·승격·쓰기 유실 검증은 아직 완료하지 않았다.
-- `kustomize/base/persona-embedding/`은 선언만 돼 있고 `overlays/prod/persona-app`에서는
-  빠져 있다 — 이미지를 아직 GHCR에 push하지 않아 digest가 자리표시자다. push·digest 확정
-  뒤 overlay의 `kustomization.yaml`에 그 리소스 줄을 되돌려야 한다.
+- **persona 폐기(2026-10-07, 브랜치 `chore/retire-persona`)**: persona 앱(Gateway·Web·embedding)·
+  persona DB·그 NetworkPolicy·공개 Route와 NFS(`csi-driver-nfs`·`persona-nfs-storage`)의 Argo
+  Application·선언을 Git에서 뺐다. 위 운영 구성 표와 DB 관련 항목은 폐기 전 기록이다.
+  공개 Gateway(`public-gateway`)·TLS·`persona-edge`·vLLM·모델 캐시는 남기고, 다음 서비스 공개
+  전까지 공개 주소에는 `maintenance-page`(정적 준비 중 페이지, 503)를 붙인다. 실제 리소스 삭제는
+  사람이 runbook 순서로 따로 실행한다 — Argo가 수동 Sync·prune 없음이라 Git에서 빠져도 리소스는 남는다.
 
 복구 실험에서 확인한 기존 캐릭터 ID 보존을 전체 데이터 무결성이나 RPO 0 보장으로 확대하지 않는다.
 Operator의 CP 배치는 일반 앱 CP 배치 금지 원칙의 제한적 예외다.
@@ -62,9 +65,15 @@ Operator의 CP 배치는 일반 앱 CP 배치 금지 원칙의 제한적 예외�
 각 스크립트가 요구하는 도구가 필요하다. 아래 명령은 운영 Sync를 수행하지 않는다.
 
 ```sh
-kubectl kustomize kustomize/overlays/prod/persona-db
-sh scripts/validate-persona-app-manifests.sh
-bash scripts/test-persona-scheduling.sh
+kubectl kustomize kustomize/overlays/prod/maintenance-page
+# 공개 Gateway 단일 소유·TLS·준비 중 페이지·persona-edge·Argo 공통 규칙
+sh scripts/validate-public-gateway-manifests.sh
+# 위 검사가 Gateway·TLS·edge 제거와 준비 중 페이지 결함을 실제로 잡는지 복사본으로 확인한다.
+sh scripts/test-public-gateway-manifests.sh
+sh scripts/validate-networkpolicy-manifests.sh
+bash scripts/argo-preflight.sh --self-test
+# persona 폐기 인벤토리(읽기 전용, CP에서 실행) 스크립트를 가짜 kubectl로 확인한다.
+bash scripts/test-inventory-persona-retire.sh
 # monitoring-stack만 Helm chart를 네트워크로 받아 렌더한다. 오프라인에서는 돌지 않는다.
 sh scripts/validate-monitoring-manifests.sh
 # mem-lab 노드 선언: public Kubernetes port와 GPU runtime 유입을 막는다.

@@ -1,0 +1,15 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# persona 폐기 뒤 공개 주소(Gateway persona-app/persona-app)에 "준비 중" 페이지를 붙인다.
+# - Gateway는 public-gateway Application이 소유한다. 여기서는 listener를 이름으로 참조만 한다.
+#   Gateway listener가 allowedRoutes Same이라 HTTPRoute는 같은 persona-app namespace에 둔다.
+# - namespace는 bootstrap/namespaces/persona-app.yaml이 소유한다. Namespace를 넣지 않는다.
+# - 이름은 persona 리소스(default-deny·security-headers)와 겹치지 않게 maintenance- 접두사를 쓴다.
+#   persona 정리 전에 이 Application을 먼저 Sync해도 두 Application이 같은 객체를 추적하지 않는다.
+# - 다음 서비스 공개(M8) 때는 HTTPRoute backendRef만 바꾸고 이 overlay를 정리한다.
+namespace: persona-app
+resources:
+  - ../../../base/maintenance-page
+  - middlewares.yaml
+  - httproute.yaml
+  - network-policy.yaml

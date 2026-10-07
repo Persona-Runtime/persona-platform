@@ -14,7 +14,6 @@ trap 'rm -rf "$work"' EXIT HUP INT TERM
 kubectl kustomize "$repo_dir/kustomize/overlays/prod/persona-vllm" > "$work/vllm.yaml"
 kubectl kustomize "$repo_dir/kustomize/overlays/prod/persona-inference-netpol" > "$work/netpol.yaml"
 kubectl kustomize "$repo_dir/kustomize/overlays/prod/persona-model-cache" > "$work/model-cache.yaml"
-kubectl kustomize "$repo_dir/kustomize/overlays/prod/persona-app" > "$work/app.yaml"
 
 ruby -ryaml - "$work" "$repo_dir/argocd" <<'RUBY'
 # encoding: utf-8
@@ -24,7 +23,6 @@ load = ->(name) { YAML.load_stream(File.read(File.join(work, name))).compact }
 vllm = load.call("vllm.yaml")
 netpol = load.call("netpol.yaml")
 model_cache = load.call("model-cache.yaml")
-app = load.call("app.yaml")
 
 NAMESPACE = "persona-inference"
 IMAGE = "vllm/vllm-openai@sha256:51b1042786c1bb7ab640fd05e4a2b19ae41662959387cc07e1c3106ae2a851b8"
@@ -176,15 +174,8 @@ pvc = model_cache.find { |r| r["kind"] == "PersistentVolumeClaim" } || {}
 raise "[안전] 모델 cache overlay에 #{PVC} PVC가 없다" unless pvc.dig("metadata", "name") == PVC && pvc.dig("metadata", "namespace") == NAMESPACE
 raise "[안전] vLLM overlay는 Namespace를 만들지 않는다 — 모델 cache overlay가 소유한다" unless model_cache.any? { |r| r["kind"] == "Namespace" && r.dig("metadata", "name") == NAMESPACE }
 
-# Gateway는 llm 모드로 이 vLLM을 부른다. 연결값이 vLLM 선언과 어긋나면 모든 채팅이 실패하므로
-# Service 이름·namespace·포트와 --served-model-name을 여기서 대조한다.
-gateway = app.find { |r| r["kind"] == "Deployment" && r.dig("metadata", "name") == "persona-gateway" } || raise("[안전] persona-gateway Deployment가 없다")
-gateway_env = env_map(gateway.dig("spec", "template", "spec", "containers").first)
-raise "[안전] Gateway PERSONA_CHAT_INFERENCE_MODE는 llm이다" unless gateway_env["PERSONA_CHAT_INFERENCE_MODE"] == "llm"
-expected_base_url = "http://#{service.dig("metadata", "name")}.#{NAMESPACE}.svc.cluster.local:#{service.dig("spec", "ports", 0, "port")}"
-raise "[안전] Gateway PERSONA_VLLM_BASE_URL이 vLLM Service와 다르다(기대: #{expected_base_url})" unless gateway_env["PERSONA_VLLM_BASE_URL"] == expected_base_url
-served_model = args[args.index("--served-model-name") + 1]
-raise "[안전] Gateway PERSONA_VLLM_MODEL이 vLLM --served-model-name(#{served_model})과 다르다" unless gateway_env["PERSONA_VLLM_MODEL"] == served_model
+# persona-gateway(유일한 vLLM 호출자)를 폐기했다(2026-10-07). 호출자 연결값(Service 주소·
+# --served-model-name) 대조는 다음 호출자(mafest API) 선언이 들어올 때 다시 둔다.
 
 Dir.glob(File.join(argocd_dir, "**", "*.{yaml,yml}")).sort.each do |path|
   raise "[안전] Argo 선언이 persona-vllm overlay를 참조한다: #{File.basename(path)}" if File.read(path).include?("overlays/prod/persona-vllm")
