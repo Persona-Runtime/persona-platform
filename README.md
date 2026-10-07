@@ -72,6 +72,8 @@ sh scripts/validate-public-gateway-manifests.sh
 sh scripts/test-public-gateway-manifests.sh
 sh scripts/validate-networkpolicy-manifests.sh
 bash scripts/argo-preflight.sh --self-test
+# persona 폐기 인벤토리(읽기 전용, CP에서 실행) 스크립트를 가짜 kubectl로 확인한다.
+bash scripts/test-inventory-persona-retire.sh
 # monitoring-stack만 Helm chart를 네트워크로 받아 렌더한다. 오프라인에서는 돌지 않는다.
 sh scripts/validate-monitoring-manifests.sh
 # mem-lab 노드 선언: public Kubernetes port와 GPU runtime 유입을 막는다.
