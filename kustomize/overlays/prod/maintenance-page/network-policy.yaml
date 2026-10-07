@@ -1,0 +1,43 @@
+# persona-app namespace의 NetworkPolicy. persona-app-netpol(폐기)의 default-deny와 이름이 겹치지 않게
+# maintenance- 접두사를 쓴다 — 정리 순서 동안 두 Application이 같은 객체를 추적하지 않게 하려는 것.
+# 순서: allow(wave 0) → deny(wave 1). 허용이 먼저 들어가야 차단 순간에도 페이지가 안 끊긴다.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: maintenance-allow-traefik
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: maintenance
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: maintenance-page
+  policyTypes:
+    - Ingress
+  ingress:
+    # Traefik(공개·내부 진입)만 들어온다. kubelet probe는 NetworkPolicy 대상이 아니다.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: traefik
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+# namespace 전체 기본 차단. 정적 페이지는 밖으로 나갈 일이 없어 egress 허용을 두지 않는다(DNS 포함).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: maintenance-default-deny
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: maintenance
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress

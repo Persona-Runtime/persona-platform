@@ -1,0 +1,9 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# persona를 내린 뒤 다음 서비스(mafest) 공개 전환(M8)까지 공개 주소에 띄우는 정적 "준비 중" 페이지.
+# 상태 코드는 503 + Retry-After다 — 검색엔진·모니터가 "일시 중단"으로 읽게 한다.
+# 서비스가 바뀌면 이 base는 지우고 overlay의 HTTPRoute backendRef만 새 서비스로 바꾼다.
+resources:
+  - configmap.yaml
+  - deployment.yaml
+  - service.yaml

@@ -12,7 +12,7 @@ set -eu
 #                                        # persona-db, persona-db-netpol, persona-edge,
 #                                        # metallb, metallb-config, cert-manager,
 #                                        # cert-manager-issuers, gpu-runtime, dcgm-exporter,
-#                                        # nvidia-device-plugin, public-gateway 중 하나
+#                                        # nvidia-device-plugin, public-gateway, maintenance-page 중 하나
 #   scripts/argo-preflight.sh --self-test
 #   PHASE0_RUN_DIR=... scripts/argo-preflight.sh --check-phase0 public-gateway   # 클러스터 없이 선언·Phase 0만
 #
@@ -445,6 +445,31 @@ check_preconditions() {
           return 1
           ;;
       esac
+      ;;
+    maintenance-page)
+      # 준비 중 페이지(persona 폐기 뒤 공개 주소). HTTPRoute가 Middleware를 ExtensionRef로 참조하므로
+      # kubernetesCRD 프로바이더가 필요하고, 공개 Route는 https listener(TLS)에 붙으므로 Gateway·인증서가 정상이어야 한다.
+      args=$(kubectl -n traefik get pods -l app.kubernetes.io/name=traefik \
+        -o jsonpath='{.items[0].spec.containers[0].args}' 2> /dev/null || true)
+      case "$args" in
+        *--providers.kubernetescrd*) : ;;
+        *)
+          echo "선행 조건 실패: maintenance-page → Traefik Pod args에 --providers.kubernetescrd가 없다" >&2
+          return 1
+          ;;
+      esac
+      programmed=$(kubectl -n persona-app get gateway persona-app \
+        -o jsonpath='{.status.conditions[?(@.type=="Programmed")].status}' 2> /dev/null || true)
+      if [ "$programmed" != "True" ]; then
+        echo "선행 조건 실패: maintenance-page → Gateway persona-app이 Programmed=True가 아니다(실제: ${programmed:-없음})" >&2
+        return 1
+      fi
+      ready=$(kubectl -n persona-app get certificate persona-app-tls \
+        -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2> /dev/null || true)
+      if [ "$ready" != "True" ]; then
+        echo "선행 조건 실패: maintenance-page → Certificate persona-app-tls가 Ready=True가 아니다(실제: ${ready:-없음})" >&2
+        return 1
+      fi
       ;;
     public-gateway)
       # Phase 0 입력이 먼저다. 입력이 없으면 live가 정상이어도 APPLY BLOCKED로 끝낸다.

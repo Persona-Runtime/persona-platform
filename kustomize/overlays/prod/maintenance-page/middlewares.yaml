@@ -1,0 +1,19 @@
+# 공개 응답에 붙이는 보안 헤더. 폐기한 persona-app-ingress의 security-headers와 같은 값이다.
+# 인증(oauth-forward)·rate-limit·body-limit는 두지 않는다 — 정적 페이지 하나라 받을 요청 본문도,
+# 보호할 사용자 자원도 없다.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: maintenance-security-headers
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: maintenance
+  annotations:
+    # Middleware(-1) → HTTPRoute(1). HTTPRoute가 이 Middleware를 이름으로 참조한다.
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  headers:
+    stsSeconds: 31536000
+    stsIncludeSubdomains: true
+    contentTypeNosniff: true
+    referrerPolicy: same-origin

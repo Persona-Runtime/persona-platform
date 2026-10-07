@@ -1,0 +1,24 @@
+# persona 폐기 뒤 공개 주소의 "준비 중" 페이지(정적 nginx + HTTPRoute). 다음 서비스 공개(M8)까지만 둔다.
+# Gateway(public-gateway 소유)를 이름으로 참조할 뿐 소유하지 않는다.
+#
+# 선행 조건: public-gateway Synced·Healthy, Traefik kubernetesCRD 프로바이더(ExtensionRef Middleware).
+# scripts/argo-preflight.sh maintenance-page로 확인한다.
+#
+# syncPolicy를 두지 않는다(수동 Sync). finalizer도 두지 않는다.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: maintenance-page
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: maintenance
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/Persona-Runtime/persona-platform.git
+    targetRevision: develop
+    path: kustomize/overlays/prod/maintenance-page
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: persona-app
