@@ -1,0 +1,7 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# 적재 Job(Argo 밖, kubectl apply -k로 사람이 실행). Argo Application을 두지 않는다 — 일회성 작업이
+# 상시 Sync 대상에 섞이지 않게 하려는 것이다. namespace는 bootstrap/namespaces/mafest-app.yaml이 소유한다.
+namespace: mafest-app
+resources:
+  - ../../../base/mafest-load

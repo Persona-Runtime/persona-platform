@@ -1,0 +1,152 @@
+# mafest-data(CNPG Cluster mafest-db) default-deny + 최소 허용. 문서 35 §NetworkPolicy 표를 따른다.
+# 이름은 모두 mafest- 접두사다. 순서: allow(wave 0) → default-deny(wave 1) — 허용이 먼저 들어가야
+# 차단이 걸리는 순간에도 DB 복제·operator 상태 조회가 끊기지 않는다.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mafest-default-deny
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: networkpolicy
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# mafest-db 인바운드:
+#  - 5432: mafest-app의 API(mafest-api)와 적재 Job(mafest-loader)만. namespace와 Pod 라벨을 같은 peer에
+#    둬서 AND가 되게 한다(따로 두면 OR가 되어 mafest-app 전체가 열린다).
+#    라벨은 이 레포의 적재 Job(kustomize/base/mafest-load)과 후속 API 배포가 지켜야 하는 계약이다.
+#  - 8000: cnpg-system의 operator가 instance manager 상태 포트를 조회한다(CNPG 기본값).
+#    operator Pod 라벨은 live에서 확인 전이라 namespace로만 고른다(persona-db와 같은 판단).
+#  - 9187: Prometheus만 exporter를 스크레이프한다. monitoring namespace 전체(Grafana 등)는 열지 않는다.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mafest-allow-db-ingress
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: networkpolicy
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  podSelector:
+    matchLabels:
+      cnpg.io/cluster: mafest-db
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: mafest-app
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: mafest-api
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: mafest-app
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: mafest-loader
+      ports:
+        - protocol: TCP
+          port: 5432
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: cnpg-system
+      ports:
+        - protocol: TCP
+          port: 8000
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+              app.kubernetes.io/instance: monitoring-stack-kube-prom-prometheus
+      ports:
+        - protocol: TCP
+          port: 9187
+---
+# mafest-db 아웃바운드: DNS, cnpg-system 8000(operator ↔ instance manager — 방향이 operator→pod
+# 뿐인지 live에서 확인 전이라 양쪽 다 연다. persona-db 운영 때와 같은 판단, 적용 뒤 Hubble로 좁힌다).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mafest-allow-db-egress
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: networkpolicy
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  podSelector:
+    matchLabels:
+      cnpg.io/cluster: mafest-db
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: cnpg-system
+      ports:
+        - protocol: TCP
+          port: 8000
+---
+# 인스턴스 간 스트리밍 복제(instances: 2). 같은 Cluster Pod끼리 5432(WAL)·8000(instance manager 상태)을
+# 양방향으로 연다. 8000은 persona-db 운영 실측(2026-09-20, Hubble)에서 인스턴스끼리도 쓰는 것을 봤다.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mafest-allow-db-replication
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: networkpolicy
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  podSelector:
+    matchLabels:
+      cnpg.io/cluster: mafest-db
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              cnpg.io/cluster: mafest-db
+      ports:
+        - protocol: TCP
+          port: 5432
+        - protocol: TCP
+          port: 8000
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              cnpg.io/cluster: mafest-db
+      ports:
+        - protocol: TCP
+          port: 5432
+        - protocol: TCP
+          port: 8000

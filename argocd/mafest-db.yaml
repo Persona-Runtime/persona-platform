@@ -1,0 +1,23 @@
+# mafest DB(CNPG Cluster mafest-db·PodMonitor). Sync 전에 CNPG operator가 설치돼 있어야 한다
+# (bootstrap/cnpg/README.md). 선행 조건은 scripts/argo-preflight.sh mafest-db로 확인한다.
+#
+# - syncPolicy를 두지 않는다. 자동 Sync·prune이 없다. DB는 사람이 상태를 보고 올린다.
+# - finalizer를 두지 않는다. Application 삭제가 DB 삭제로 번지지 않게 한다(Cluster에는
+#   Prune=false,Delete=false도 따로 붙어 있다).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: mafest-db
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: database
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/Persona-Runtime/persona-platform.git
+    targetRevision: develop
+    path: kustomize/overlays/prod/mafest-db
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: mafest-data

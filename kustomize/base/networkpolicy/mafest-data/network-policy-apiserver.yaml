@@ -1,0 +1,23 @@
+# CNPG instance manager(Postgres 컨테이너 안 프로세스)는 Cluster status 갱신·Secret 읽기·승격 판단을 위해
+# kube-apiserver를 직접 호출한다. API 서버 엔드포인트는 Pod가 아니라 podSelector로 고를 수 없고 IP를
+# 하드코딩하면 노드 교체 때 끊기므로 Cilium 예약 엔티티 kube-apiserver를 쓴다(persona-db와 같은 방식).
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: mafest-allow-egress-kube-apiserver
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: networkpolicy
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  endpointSelector:
+    matchLabels:
+      cnpg.io/cluster: mafest-db
+  egress:
+    - toEntities:
+        - kube-apiserver
+      toPorts:
+        - ports:
+            - port: "6443"
+              protocol: TCP

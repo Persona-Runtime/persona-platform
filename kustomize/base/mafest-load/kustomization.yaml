@@ -1,0 +1,8 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# 평상시에는 비워 둔다 — 실수로 apply -k 해도 아무 Job도 만들어지지 않는다.
+# runbook(A7)에서 한 단계씩 한 줄만 켜고, 끝나면 다시 비운다(동시에 둘 이상 켜지 않는다).
+#   stage: - job-stage.yaml
+#   graph: - job-graph.yaml
+# 이미지 digest가 자리표시자(0×64)인 동안에는 켜지 않는다(scripts/validate-mafest-data-manifests.sh가 막는다).
+resources: []

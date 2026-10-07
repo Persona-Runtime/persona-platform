@@ -1,0 +1,7 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# mafest-data namespace의 NetworkPolicy만 관리한다(DB Cluster는 mafest-db Application).
+# namespace는 bootstrap/namespaces/mafest-data.yaml이 소유한다.
+namespace: mafest-data
+resources:
+  - ../../../base/networkpolicy/mafest-data

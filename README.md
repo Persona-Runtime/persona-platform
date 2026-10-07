@@ -71,6 +71,9 @@ sh scripts/validate-public-gateway-manifests.sh
 # 위 검사가 Gateway·TLS·edge 제거와 준비 중 페이지 결함을 실제로 잡는지 복사본으로 확인한다.
 sh scripts/test-public-gateway-manifests.sh
 sh scripts/validate-networkpolicy-manifests.sh
+# mafest 데이터 층(DB draft·PodMonitor·적재 Job·Application·권한 SQL)과 그 음성 테스트
+sh scripts/validate-mafest-data-manifests.sh
+sh scripts/test-mafest-data-manifests.sh
 bash scripts/argo-preflight.sh --self-test
 # persona 폐기 인벤토리(읽기 전용, CP에서 실행) 스크립트를 가짜 kubectl로 확인한다.
 bash scripts/test-inventory-persona-retire.sh

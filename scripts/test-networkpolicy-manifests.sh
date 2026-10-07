@@ -20,6 +20,8 @@ Encoding.default_external = Encoding::UTF_8
 root = ARGV.fetch(0)
 # persona-app namespace에는 준비 중 페이지 정책만 남았다(persona 폐기, 2026-10-07).
 MNT = "kustomize/overlays/prod/maintenance-page/network-policy.yaml"
+MFD = "kustomize/base/networkpolicy/mafest-data/network-policy.yaml"
+TRAEFIK = "kustomize/base/networkpolicy/traefik/network-policy.yaml"
 INF = "kustomize/base/networkpolicy/persona-inference/network-policy.yaml"
 
 def ns_peer(name)
@@ -35,6 +37,18 @@ PROMETHEUS = { "app.kubernetes.io/name" => "prometheus", "app.kubernetes.io/inst
 
 # [파일, 정책 이름, 복사본을 바꾸는 함수, 기대 오류 문구]
 cases = [
+  # mafest-data — API·loader는 같은 peer AND, Prometheus만 9187, 복제 5432·8000, deny는 마지막 wave
+  [MFD, "mafest-allow-db-ingress", ->(p) { p.dig("spec", "ingress", 0)["from"] = [ns_peer("mafest-app"), pod_peer({ "app.kubernetes.io/name" => "mafest-api" })] },
+   "mafest-db 5432는 mafest-app의 mafest-api·mafest-loader Pod"],
+  [MFD, "mafest-allow-db-ingress", ->(p) { p.dig("spec", "ingress", 2)["from"] = [ns_peer("monitoring")] },
+   "Prometheus → mafest-db exporter"],
+  [MFD, "mafest-allow-db-replication", ->(p) { p.dig("spec", "ingress", 0)["ports"].pop },
+   "복제 ingress 포트는 5432(WAL)·8000"],
+  [MFD, "mafest-default-deny", ->(p) { p.dig("metadata", "annotations")["argocd.argoproj.io/sync-wave"] = "0" },
+   "mafest-default-deny: sync-wave가 1"],
+  # traefik — 정리한 persona-mock-sse로 다시 나가지 않는다
+  [TRAEFIK, "allow-egress-backends", ->(p) { p.dig("spec", "egress", 0, "to") << ns_peer("persona-mock-sse") },
+   "traefik egress 대상이 다르다"],
   # 준비 중 페이지(persona-app) — traefik 8080만 들어오고, 나가는 길은 없다
   [MNT, "maintenance-allow-traefik", ->(p) { p.dig("spec", "ingress", 0)["from"] = [ns_peer("monitoring")] },
    "준비 중 페이지는 traefik에서만 인입해야 한다"],
