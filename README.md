@@ -71,9 +71,13 @@ sh scripts/validate-public-gateway-manifests.sh
 # 위 검사가 Gateway·TLS·edge 제거와 준비 중 페이지 결함을 실제로 잡는지 복사본으로 확인한다.
 sh scripts/test-public-gateway-manifests.sh
 sh scripts/validate-networkpolicy-manifests.sh
+sh scripts/test-networkpolicy-manifests.sh
 # mafest 데이터 층(DB draft·PodMonitor·적재 Job·Application·권한 SQL)과 그 음성 테스트
 sh scripts/validate-mafest-data-manifests.sh
 sh scripts/test-mafest-data-manifests.sh
+# mafest API·웹(M6 초안: 배치·probe·Secret·환경변수·자리표시 digest·M8 라우트 초안)과 그 음성 테스트
+sh scripts/validate-mafest-app-manifests.sh
+sh scripts/test-mafest-app-manifests.sh
 # M3 vLLM 예산 측정 스크립트를 가짜 kubectl·가짜 vLLM으로 확인한다(실측은 사람이 CP에서).
 bash scripts/test-vllm-budget.sh
 bash scripts/argo-preflight.sh --self-test

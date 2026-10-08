@@ -1,0 +1,18 @@
+# mafest 웹 ClusterIP. Traefik(공개 경로, M8)과 내부 검증이 이 Service로 들어온다.
+apiVersion: v1
+kind: Service
+metadata:
+  name: mafest-web
+  labels:
+    app.kubernetes.io/name: mafest-web
+    app.kubernetes.io/component: web
+    app.kubernetes.io/part-of: persona-platform
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: mafest-web
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP

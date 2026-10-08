@@ -1,0 +1,224 @@
+# **M8(공개 전환)용 초안이다.** kustomization이 없고 어떤 overlay·Argo Application도 이 파일을 가리키지 않는다.
+# M6 Sync 묶음에 넣지 않는다 — 공개 backend 교체는 사람의 별도 승인 뒤 M8에서 한다. 그때까지 공개 주소는
+# 준비 중 페이지(kustomize/overlays/prod/maintenance-page의 public-maintenance)가 받는다.
+#
+# M8에서 할 일(이 파일만으로 끝나지 않는다):
+#   1. 같은 hostname·경로를 받는 public-maintenance를 내리거나 이 Route로 교체한다(둘이 겹치면 우선순위가 갈린다).
+#   2. 이 파일을 overlay로 옮기고(Middleware·HTTPRoute는 persona-app, ReferenceGrant는 mafest-app) Application에 연결한다.
+#   3. traefik-networkpolicy의 allow-egress-backends(mafest-app)와 mafest-app-netpol이 먼저 적용돼 있어야 한다.
+#   4. oauth2-proxy는 쓰지 않는다. persona-edge의 oauth2-proxy·공용 ReferenceGrant 정리는 별도 제안으로 다룬다.
+#
+# 경로 설계(문서 35·39 §2-13·26D):
+#   - 브라우저는 같은 origin의 상대 /v1을 부른다. /v1만 API로, 나머지는 웹으로 보낸다. 그래서 공개 URL의
+#     /metrics·/healthz·/answer는 API가 아니라 웹(404·웹 healthz)으로 끝난다.
+#   - 스트림(POST /v1/search/stream)은 버퍼링 Middleware(body-limit)를 거치지 않는다. buffering은 요청 본문뿐
+#     아니라 응답도 끝까지 모았다가 보내므로, 문장 단위 이벤트가 생성이 끝날 때까지 도착하지 않는다.
+#     그 대가로 이 경로에는 프록시 본문 크기 제한이 없다 — 질문 길이 검사는 API(1000자)가 하고, rate-limit이 남는다.
+#   - retry Middleware를 두지 않는다. 웹이 새 request_id로 1회 다시 요청하므로, 프록시 재시도까지 붙으면 조회·생성이
+#     두 번 실행될 수 있다.
+#   - rate-limit은 문서 35 후보(검색 분당 6·burst 3, 상세 분당 30)이고 ipStrategy depth 0이다 — X-Forwarded-For를
+#     믿지 않고 접속 IP로 센다(Traefik Service externalTrafficPolicy: Local이라 실제 client IP가 보인다).
+#   - Traefik 유휴·응답 시한은 차트 기본값이다(bootstrap/traefik/values.yaml에 timeout 선언 없음). 스트림 전체
+#     30초보다 긴지 M6 런북에서 실측으로 확인한다. 이 초안은 values를 바꾸지 않는다.
+#
+# 우선순위: Traefik Gateway provider는 rule 순서가 아니라 매치 모양으로 router priority를 계산한다
+# (Exact 100000, method +1000, PathPrefix 10000+길이×100). 그래서 두 Exact 규칙이 /v1·/ PathPrefix보다 먼저다.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: mafest-security-headers
+  namespace: persona-app
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: application
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  headers:
+    stsSeconds: 31536000
+    stsIncludeSubdomains: true
+    contentTypeNosniff: true
+    referrerPolicy: same-origin
+---
+# 검색(POST /v1/search·/v1/search/stream): 분당 6·burst 3(문서 35 후보). period를 1m로 둬 "분당"을 그대로 적는다.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: mafest-search-rate-limit
+  namespace: persona-app
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: application
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  rateLimit:
+    average: 6
+    period: 1m
+    burst: 3
+    sourceCriterion:
+      ipStrategy:
+        depth: 0
+---
+# 나머지 /v1(상세·메타): 분당 30(문서 35 후보).
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: mafest-detail-rate-limit
+  namespace: persona-app
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: application
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  rateLimit:
+    average: 30
+    period: 1m
+    burst: 10
+    sourceCriterion:
+      ipStrategy:
+        depth: 0
+---
+# 비스트림 /v1의 요청 본문 상한. 질문은 정리 전 1000자(UTF-8 최대 약 3KB)라 64KiB면 넉넉하다.
+# buffering이라 응답도 모았다가 보낸다 — 스트림 규칙에는 붙이지 않는다.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: mafest-body-limit
+  namespace: persona-app
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: application
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  buffering:
+    maxRequestBodyBytes: 65536
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: mafest-public
+  namespace: persona-app
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: application
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  parentRefs:
+    - name: persona-app
+      sectionName: https
+  hostnames:
+    - app.personaruntime.xyz
+  rules:
+    # 스트림 — body-limit(buffering)·retry 없음.
+    - matches:
+        - method: POST
+          path:
+            type: Exact
+            value: /v1/search/stream
+      filters:
+        - type: ExtensionRef
+          extensionRef:
+            group: traefik.io
+            kind: Middleware
+            name: mafest-security-headers
+        - type: ExtensionRef
+          extensionRef:
+            group: traefik.io
+            kind: Middleware
+            name: mafest-search-rate-limit
+      backendRefs:
+        - name: mafest-api
+          namespace: mafest-app
+          port: 8000
+    # 비스트림 검색 — 검색 rate-limit + 본문 상한.
+    - matches:
+        - method: POST
+          path:
+            type: Exact
+            value: /v1/search
+      filters:
+        - type: ExtensionRef
+          extensionRef:
+            group: traefik.io
+            kind: Middleware
+            name: mafest-security-headers
+        - type: ExtensionRef
+          extensionRef:
+            group: traefik.io
+            kind: Middleware
+            name: mafest-search-rate-limit
+        - type: ExtensionRef
+          extensionRef:
+            group: traefik.io
+            kind: Middleware
+            name: mafest-body-limit
+      backendRefs:
+        - name: mafest-api
+          namespace: mafest-app
+          port: 8000
+    # 나머지 /v1(상세·메타).
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /v1
+      filters:
+        - type: ExtensionRef
+          extensionRef:
+            group: traefik.io
+            kind: Middleware
+            name: mafest-security-headers
+        - type: ExtensionRef
+          extensionRef:
+            group: traefik.io
+            kind: Middleware
+            name: mafest-detail-rate-limit
+        - type: ExtensionRef
+          extensionRef:
+            group: traefik.io
+            kind: Middleware
+            name: mafest-body-limit
+      backendRefs:
+        - name: mafest-api
+          namespace: mafest-app
+          port: 8000
+    # 웹(정적 번들). /metrics·/healthz·/answer도 여기로 와서 API에 닿지 않는다.
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      filters:
+        - type: ExtensionRef
+          extensionRef:
+            group: traefik.io
+            kind: Middleware
+            name: mafest-security-headers
+      backendRefs:
+        - name: mafest-web
+          namespace: mafest-app
+          port: 8080
+---
+# persona-app의 HTTPRoute가 mafest-app Service를 backend로 쓰게 허락한다. 대상 Service 두 개로 좁힌다.
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: persona-app-httproute-to-mafest
+  namespace: mafest-app
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: application
+spec:
+  from:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      namespace: persona-app
+  to:
+    - group: ""
+      kind: Service
+      name: mafest-api
+    - group: ""
+      kind: Service
+      name: mafest-web

@@ -1,0 +1,14 @@
+# 웹 두 대 중 최소 한 대는 자발적 중단 중에도 남긴다(API PDB와 같은 판단, replicas 2와 짝).
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: mafest-web
+  labels:
+    app.kubernetes.io/name: mafest-web
+    app.kubernetes.io/component: web
+    app.kubernetes.io/part-of: persona-platform
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mafest-web

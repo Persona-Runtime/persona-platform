@@ -1,0 +1,174 @@
+# mafest API(FastAPI·Uvicorn). 공개 API(/v1/*)·probe 경로(/healthz·/readyz)·Prometheus /metrics를
+# 모두 아래 containerPort 8000 하나에서 제공한다(mafest Dockerfile CMD: uvicorn … --port 8000 --workers 1).
+#
+# **초안이다.** 아래 값은 P7(공개 API·스트림·프로세스 전용 readiness·drain)과 승인 digest가 정해지기 전의
+# 자리다. overlay(kustomize/overlays/prod/mafest-app)의 resources가 비어 있어 prod 렌더·Argo Sync에 들어가지
+# 않는다. 미확정 항목은 "미확정:"으로 표시했고, scripts/validate-mafest-app-manifests.sh가 placeholder digest가
+# prod 렌더에 들어가면 실패한다.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mafest-api
+  labels:
+    app.kubernetes.io/name: mafest-api
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: persona-platform
+spec:
+  # 두 대, Pod마다 Uvicorn process worker 1(이미지 CMD). 한 Pod 안에 worker를 늘리지 않는다 — 풀·메모리
+  # 예산을 Pod 단위로 세기 때문이다.
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # 새 Pod가 Ready가 된 뒤 기존 Pod를 내린다. 그동안 잠깐 세 대가 되므로 메모리(limit×3)와 DB 연결
+      # (Pod당 SQL 4 + AGE 2 = 6, 세 대 18)을 예산에 넣는다. DB max_connections는 64다.
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mafest-api
+  template:
+    metadata:
+      labels:
+        # 이 라벨이 mafest-data의 mafest-allow-db-ingress(5432)와 맞물리는 계약이다. 바꾸면 DB 접속이 막힌다.
+        app.kubernetes.io/name: mafest-api
+        app.kubernetes.io/component: api
+        app.kubernetes.io/part-of: persona-platform
+    spec:
+      # 이 앱은 Kubernetes API를 호출하지 않는다.
+      automountServiceAccountToken: false
+      # private GHCR package. 이 Secret은 Git 밖에서 사람이 만든다(값은 커밋·출력하지 않는다).
+      imagePullSecrets:
+        - name: mafest-ghcr
+      # 전체 요청 시한 30초(mafest REQUEST_TIMEOUT_S)보다 길게 준다. 후보 45초.
+      # 미확정: P7의 SIGTERM 처리(readiness false → 남은 요청 마무리 → registry·풀 닫기)가 들어와야 이 시간이
+      # 의미가 있다. 지금 main에는 drain이 없다.
+      terminationGracePeriodSeconds: 45
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      # 정상 시 두 Pod를 서로 다른 워커에 둔다. 워커 하나가 빠지면 남은 워커에 함께 놓일 수 있다(분산보다
+      # 서비스 유지 우선). DB의 required anti-affinity는 복사하지 않는다 — 워커 하나만 남으면 두 번째 API가
+      # 영원히 Pending이 된다.
+      # - nodeTaintsPolicy: Honor — cordon·NotReady taint가 붙은 노드를 분산 계산에서 뺀다.
+      # - minDomains를 두지 않는다(=1). 2면 워커 하나만 남았을 때 두 번째 Pod가 늘 Pending이다.
+      # - matchLabelKeys: pod-template-hash — 롤아웃 중 이전 revision Pod를 세지 않아 새 Pod끼리 나뉜다.
+      topologySpreadConstraints:
+        - topologyKey: kubernetes.io/hostname
+          maxSkew: 1
+          whenUnsatisfiable: DoNotSchedule
+          nodeTaintsPolicy: Honor
+          matchLabelKeys:
+            - pod-template-hash
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: mafest-api
+      # CP·GPU 노드에는 두지 않는다. 위 분산은 이 두 워커 안에서만 계산된다.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - k8s-worker1
+                      - k8s-worker2
+      containers:
+        - name: api
+          # 미확정: P7을 담은 새 앱 릴리스 이미지의 linux/amd64 digest. 최초 적재용 digest(sha256:dda935a2…)로
+          # P7 API를 배포하지 않는다. 아래 전부 0인 값은 자리표시이며 validator가 prod 렌더에서 막는다.
+          image: ghcr.io/persona-runtime/mafest-app@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          env:
+            # 실제 vLLM으로 생성한다. 이미지에도 같은 값이 있지만 운영 의도를 선언에 명시한다.
+            - name: LLM_USE_MOCK
+              value: "0"
+            # v1 운영은 벡터 검색을 쓰지 않는다(KURE 모델이 이미지에 없다).
+            - name: MAFEST_ENABLE_VECTOR
+              value: "0"
+            # persona-inference vLLM Service. /v1 앞까지 적는다 — mafest llm/client.py가 /v1/chat/completions를 붙인다.
+            - name: MAFEST_LLM_BASE_URL
+              value: http://persona-vllm.persona-inference.svc.cluster.local:8000
+            # vLLM --served-model-name과 같아야 한다. 다르면 vLLM이 404를 돌려준다.
+            # vLLM이 --api-key 없이 뜨므로(kustomize/base/persona-vllm/deployment.yaml) MAFEST_LLM_API_KEY는
+            # 연결하지 않는다. 접근 통제는 persona-inference의 allow-vllm-gateway(mafest-api Pod만)가 한다.
+            - name: MAFEST_LLM_MODEL
+              value: Qwen/Qwen3-4B-Instruct-2507
+            # 생성 상한 20초(전체 30초 안). Settings 기본값과 같지만 운영 값을 선언에 고정한다.
+            - name: MAFEST_LLM_TIMEOUT_S
+              value: "20"
+            # Pod당 SQL 풀 4·AGE 풀 2(Settings 기본값). 연결 합산의 근거라 선언에 고정한다.
+            - name: MAFEST_DB_POOL_MAX
+              value: "4"
+            - name: MAFEST_GRAPH_POOL_MAX
+              value: "2"
+            # 미확정: 운영 데이터의 승인된 기준일(채권 등 기준일 열이 없는 상품군에 쓴다). 오늘 날짜나 옛
+            # 2026-08-21을 복사하지 않는다. 재적재로 기준일이 바뀌면 API를 재시작한다(기준일은 기동 때 읽는다).
+            - name: MAFEST_DATA_BASE_DATE
+              value: "UNCONFIRMED"
+            # runtime 계정 DSN(mafest_runtime). mafest-data의 mafest-db-runtime은 다른 namespace라 직접 참조할 수
+            # 없어, 사람이 값 출력 없이 mafest-app에 복제한다(런북). owner용 mafest-migrator는 연결하지 않는다.
+            - name: PGURL
+              valueFrom:
+                secretKeyRef:
+                  name: mafest-api-db
+                  key: PGURL
+          resources:
+            # 출발 후보(문서 35): request 1Gi·limit 1536Mi. 근거는 M1 로컬 실측(76문항 순차 580MiB, 8동시
+            # 593MiB)과 A7 검증 Pod peak 580.1MiB다. 운영 API·L2 입력이 같은 부하라고 단정하지 않는다 — 최신 노드
+            # 사용량·예약량을 사람이 확인한 뒤 승인한다. A7의 임시 2Gi는 운영값이 아니다.
+            # CPU limit은 두지 않는다(근거 없는 상한은 생성 지연을 키운다). CPU request는 미확정 후보다.
+            requests:
+              cpu: 100m
+              memory: 1Gi
+            limits:
+              memory: 1536Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+          # startup은 bootstrap(조립·기준일 읽기) 완료를 /healthz 응답으로 본다. liveness도 /healthz다 —
+          # DB·vLLM 장애로 재시작시키면 복구되지 않는 재시작 루프가 된다.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 2
+            timeoutSeconds: 1
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 1
+            failureThreshold: 3
+          # readiness는 기본 /readyz이며 DB·AGE·vLLM 가용성을 넣지 않는다(공개 API 결정 R9-4). 진단용 deep
+          # readiness가 있어도 probe에 쓰지 않는다.
+          # 미확정: 지금 mafest main의 /readyz는 DB·AGE를 조회한다. P7의 프로세스 전용 readiness가 들어오기 전에는
+          # 이 선언을 활성화하지 않는다.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 1
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        # read-only rootfs에서 필요한 유일한 쓰기 경로다(이미지 HOME=/tmp). 크기를 묶어 노드 디스크를 지킨다.
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi

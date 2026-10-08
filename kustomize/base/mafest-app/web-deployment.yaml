@@ -1,0 +1,116 @@
+# mafest 웹(정적 번들을 내보내는 비루트 nginx). 이 컨테이너는 /v1을 프록시하지 않고 404를 돌려준다
+# (mafest-web nginx/default.conf). 브라우저는 같은 origin의 상대 경로 /v1을 부르고, /v1 라우팅은 Traefik
+# HTTPRoute(M8 초안, kustomize/base/mafest-public)의 책임이다. API 주소는 빌드 때 고정돼(VITE_API_MODE=real)
+# 런타임 설정이 없다.
+#
+# **초안이다.** r9 스트림·제안·오류 처리(웹 W)를 담은 승인 이미지 digest가 정해지기 전이라 prod 렌더에
+# 들어가지 않는다(overlay resources 비어 있음). 기존 persona-web 이미지를 재사용하지 않는다.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mafest-web
+  labels:
+    app.kubernetes.io/name: mafest-web
+    app.kubernetes.io/component: web
+    app.kubernetes.io/part-of: persona-platform
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # 두 대이므로 한 대씩 교체해도 서비스가 끊기지 않는다. 새 Pod를 먼저 띄우지 않는다(문서 35).
+      maxSurge: 0
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mafest-web
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mafest-web
+        app.kubernetes.io/component: web
+        app.kubernetes.io/part-of: persona-platform
+    spec:
+      automountServiceAccountToken: false
+      imagePullSecrets:
+        - name: mafest-ghcr
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - k8s-worker1
+                      - k8s-worker2
+        podAntiAffinity:
+          # 두 대를 다른 워커에 두려 하되 강제하지 않는다. 워커가 둘뿐이라 required면 한 워커가 빠질 때 남은
+          # 한 대도 재배치되지 못한다.
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: mafest-web
+      containers:
+        - name: web
+          # 미확정: 웹 W(r9)를 담은 승인 linux/amd64 digest. mafest-web에는 아직 이미지 발행 워크플로가 없어
+          # 이름(ghcr.io/persona-runtime/mafest-web)도 발행 때 확인한다. 전부 0인 값은 자리표시다.
+          image: ghcr.io/persona-runtime/mafest-web@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          resources:
+            # 초기 제안값(persona-web과 같은 nginx 정적 서빙 기준). 실측으로 확정한 수치가 아니다.
+            requests:
+              cpu: 20m
+              memory: 32Mi
+            limits:
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            # nginx-unprivileged 이미지의 기본 사용자다.
+            runAsUser: 101
+            runAsGroup: 101
+          # 세 probe 모두 /healthz다. 외부 의존성이 없어 준비와 생존을 가를 기준이 따로 없다.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 2
+            timeoutSeconds: 2
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        # nginx-unprivileged의 pid·임시 경로가 모두 /tmp 아래다. read-only rootfs에서 유일한 쓰기 경로다.
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi

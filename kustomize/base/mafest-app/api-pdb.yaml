@@ -1,0 +1,17 @@
+# API 두 대 중 최소 한 대는 자발적 중단(kubectl drain, 노드 유지보수) 중에도 남긴다.
+# 노드 장애·OOM kill 같은 비자발적 중단과 롤링 업데이트(strategy가 제어)는 막지 않는다. 한 대가 남아도 그
+# Pod로 가던 진행 중 스트림은 끊긴다 — 웹이 새 request_id로 1회 다시 요청한다.
+# minAvailable 1은 replicas 2일 때만 의미가 있다(replica 1이면 drain이 영원히 막힌다). validator가 함께 본다.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: mafest-api
+  labels:
+    app.kubernetes.io/name: mafest-api
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: persona-platform
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mafest-api

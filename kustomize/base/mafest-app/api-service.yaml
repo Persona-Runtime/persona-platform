@@ -1,0 +1,19 @@
+# mafest API ClusterIP. Traefik(공개 경로, M8)과 내부 검증(port-forward)이 이 Service로 들어온다.
+# NodePort·LoadBalancer를 두지 않는다 — 공개 진입은 Traefik Gateway 하나뿐이다.
+apiVersion: v1
+kind: Service
+metadata:
+  name: mafest-api
+  labels:
+    app.kubernetes.io/name: mafest-api
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: persona-platform
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: mafest-api
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+      protocol: TCP
