@@ -1,11 +1,10 @@
 # mafest 정본 DB(PostgreSQL 16 + Apache AGE 1.6). 문서 35 M5·11 §DB 규약을 따른다.
 # operator 설치는 이 선언의 범위가 아니다 — bootstrap/cnpg/README.md를 먼저 따른다.
 #
-# ⚠️ 이 파일은 .draft라 렌더되지 않는다(kustomization.yaml resources에 없음). 이미지 digest가
-#    자리표시자(0×64)인 동안 Argo Sync로 Cluster가 만들어지면 안 되기 때문이다.
-#    A3(이미지 게시) 뒤 사람이 ① imageName digest를 실제 amd64 child digest로 바꾸고
-#    ② 파일 이름을 cluster.yaml로 바꾸고 ③ kustomization.yaml resources에 넣는다.
-#    scripts/validate-mafest-data-manifests.sh가 이 파일 내용과 "렌더에 자리표시자 없음"을 함께 본다.
+# 이미지는 승인된 릴리스 digest로 고정돼 있어 prod 렌더(kustomization.yaml resources)에 연결한다.
+# 이미지를 바꿀 때는 태그가 아니라 승인된 릴리스의 digest로만 바꾼다 — 같은 태그가 다른 객체를 가리키면
+# Cluster 재시작 때 다른 DB 이미지가 뜬다. scripts/validate-mafest-data-manifests.sh가 digest 고정과
+# "렌더에 자리표시자(0×64) 없음"을 함께 본다.
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata:
@@ -24,9 +23,9 @@ spec:
   instances: 2
 
   # mafest docker/postgres-age/Dockerfile 이미지(CNPG 16.15 standard + AGE 1.6.0 소스 빌드).
-  # 태그는 CNPG가 major 버전을 읽게 남기고, digest(linux/amd64 child manifest)로 실제 객체를 고정한다.
-  # 아래 0×64는 자리표시자다(A3에서 사람이 넣는다).
-  imageName: ghcr.io/persona-runtime/mafest-postgres:16.15-age1.6.0-bookworm@sha256:0000000000000000000000000000000000000000000000000000000000000000
+  # 태그는 CNPG가 major 버전을 읽게 남기고, digest로 실제 객체를 고정한다.
+  # 릴리스 release-20261007-1(mafest 7cb9329d7691)의 승인 이미지.
+  imageName: ghcr.io/persona-runtime/mafest-postgres:16.15-age1.6.0-bookworm-7cb9329d7691@sha256:f0544ab73e405b4d6b115e21bf8376401a36f2d33074015b6491963f957e5c21
   # 비공개 GHCR 이미지. Secret 값은 Git에 없다 — 사람이 mafest-data에 mafest-ghcr를 만든다.
   imagePullSecrets:
     - name: mafest-ghcr
