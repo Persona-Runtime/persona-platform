@@ -8,12 +8,17 @@ set -eu
 # — 마지막에 사람이 실행할 명령을 "출력"만 한다.
 #
 # 사용법:
-#   scripts/argo-preflight.sh <app>     # public-gateway, maintenance-page, persona-edge,
+#   scripts/argo-preflight.sh <app> [--sha <승인 SHA>]   # public-gateway, maintenance-page, persona-edge,
 #                                        # metallb, metallb-config, cert-manager,
 #                                        # cert-manager-issuers, gpu-runtime, dcgm-exporter,
 #                                        # nvidia-device-plugin, mafest-db, mafest-db-netpol,
 #                                        # mafest-app-netpol, mafest-app 중 하나(뒤 둘은 Application이 아직 초안)
 #   scripts/argo-preflight.sh --self-test
+#
+# 승인 SHA: --sha를 주면 렌더·diff·승인 기록·출력하는 Sync 명령이 모두 그 SHA 하나를 쓴다. 안 주면 지금의
+# origin/develop을 쓰는데, 그사이 develop이 움직이면 사람이 승인한 코드와 검사한 코드가 달라질 수 있다.
+# 그래서 M6의 mafest-app-netpol·mafest-app은 --sha 없이는 시작하지 않는다(SHA_REQUIRED_APPS).
+# 줄 SHA는 40자 전체 SHA여야 하고, origin/develop에서 도달할 수 있는(머지된) 커밋이어야 한다.
 #
 # live 조회 전에 kube context가 PREFLIGHT_KUBE_CONTEXT(기본 kubernetes-admin@kubernetes)인지 확인한다.
 # PREFLIGHT_KUBE_SERVER를 주면 그 context의 API server URL도 비교한다.
@@ -26,7 +31,7 @@ repo_dir=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 approved_sync_file="$repo_dir/deploy/approved-sync.md"
 
 usage() {
-  echo "사용법: $0 <app> | $0 --self-test" >&2
+  echo "사용법: $0 <app> [--sha <승인 SHA>] | $0 --self-test" >&2
   exit 1
 }
 
@@ -37,6 +42,49 @@ require_tools() {
       exit 1
     fi
   done
+}
+
+# --- 0. 승인 SHA 결정 ------------------------------------------------------------
+# 승인 SHA를 명시해야 하는 app. M6 mafest-app·mafest-app-netpol은 검사한 코드와 Sync할 코드가 같아야 한다.
+SHA_REQUIRED_APPS=" mafest-app-netpol mafest-app "
+
+# 승인 SHA 후보를 검증해 정규화한 SHA를 stdout으로 낸다. 실패하면 사유를 stderr에 쓰고 1을 돌려준다.
+# 검증은 로컬 git 조회뿐이다(fetch는 호출하는 쪽이 이미 했다).
+#  - 필수 app이 SHA를 안 줬으면 멈춘다.
+#  - 40자 소문자 hex가 아니면 거절한다(짧은 SHA·브랜치 이름은 움직이거나 모호하다).
+#  - 커밋이 이 저장소에 있어야 하고, origin/develop의 조상(=머지된 승인 코드)이어야 한다.
+resolve_approved_sha() {
+  app="$1"
+  given="$2"
+  if [ -z "$given" ]; then
+    case "$SHA_REQUIRED_APPS" in
+      *" $app "*)
+        echo "승인 SHA가 없다: $app → --sha <40자 SHA>를 주어야 한다(움직이는 origin/develop을 검사하고 다른 코드를 Sync하지 않게)" >&2
+        return 1
+        ;;
+    esac
+    git -C "$repo_dir" rev-parse origin/develop
+    return 0
+  fi
+  case "$given" in
+    *[!0-9a-f]* | "")
+      echo "승인 SHA 형식 오류: ${given} — 40자 소문자 hex 전체 SHA만 받는다" >&2
+      return 1
+      ;;
+  esac
+  if [ "${#given}" -ne 40 ]; then
+    echo "승인 SHA 형식 오류: ${given} — 40자 전체 SHA만 받는다(짧은 SHA는 모호하다)" >&2
+    return 1
+  fi
+  if ! git -C "$repo_dir" cat-file -e "$given^{commit}" 2> /dev/null; then
+    echo "승인 SHA를 이 저장소에서 찾지 못했다: ${given}" >&2
+    return 1
+  fi
+  if ! git -C "$repo_dir" merge-base --is-ancestor "$given" origin/develop 2> /dev/null; then
+    echo "승인 SHA가 origin/develop에 머지돼 있지 않다: ${given} — 머지된 커밋만 Sync한다" >&2
+    return 1
+  fi
+  echo "$given"
 }
 
 # argocd/<app>.yaml에서 source.path·destination.namespace를 읽는다. 하드코딩하지 않는
@@ -657,7 +705,56 @@ FAKE_KUBECTL
     exit 1
   fi
   self_test_public_gateway
+self_test_approved_sha
   echo "self-test 통과: App별 선행 조건 실패 시 exit 1과 사유 메시지를 확인했다"
+}
+
+# 승인 SHA 결정 규칙(resolve_approved_sha). 임시 git 저장소에 origin/develop 참조를 만들어 실제 git으로 확인한다.
+# 클러스터·이 저장소의 git은 건드리지 않는다.
+self_test_approved_sha() {
+  sha_dir=$(mktemp -d "${TMPDIR:-/tmp}/argo-preflight-sha-XXXXXX")
+  sha_err="$sha_dir/err.txt"
+  git init -q "$sha_dir/repo"
+  git -C "$sha_dir/repo" -c user.name=t -c user.email=t@example.invalid commit -q --allow-empty -m merged
+  merged=$(git -C "$sha_dir/repo" rev-parse HEAD)
+  git -C "$sha_dir/repo" update-ref refs/remotes/origin/develop "$merged"
+  git -C "$sha_dir/repo" -c user.name=t -c user.email=t@example.invalid commit -q --allow-empty -m unmerged
+  unmerged=$(git -C "$sha_dir/repo" rev-parse HEAD)
+
+  sha_expect() {  # 기대 종료 코드, 기대 문구, app, 입력 SHA
+    expected_code="$1"; expected_text="$2"; sha_app="$3"; sha_in="$4"
+    status=0
+    out=$(repo_dir="$sha_dir/repo" resolve_approved_sha "$sha_app" "$sha_in" 2> "$sha_err") || status=$?
+    if [ "$status" -ne "$expected_code" ]; then
+      echo "self-test 실패: 승인 SHA(${sha_app}, ${sha_in:-없음}) 기대 exit ${expected_code}, 실제 ${status}" >&2
+      cat "$sha_err" >&2
+      exit 1
+    fi
+    if [ -n "$expected_text" ] && ! grep -q "$expected_text" "$sha_err"; then
+      echo "self-test 실패: 승인 SHA 오류 문구에 '${expected_text}'가 없다" >&2
+      cat "$sha_err" >&2
+      exit 1
+    fi
+  }
+
+  # 정상: 머지된 40자 SHA는 그대로 쓴다. M6가 아닌 app은 SHA 없이도 지금의 origin/develop을 쓴다.
+  status=0
+  out=$(repo_dir="$sha_dir/repo" resolve_approved_sha mafest-app "$merged" 2> /dev/null) || status=$?
+  [ "$status" -eq 0 ] && [ "$out" = "$merged" ] ||
+    { echo "self-test 실패: 머지된 승인 SHA를 그대로 돌려주지 않았다" >&2; exit 1; }
+  out=$(repo_dir="$sha_dir/repo" resolve_approved_sha mafest-db "" 2> /dev/null) && [ "$out" = "$merged" ] ||
+    { echo "self-test 실패: 필수가 아닌 app의 SHA 생략을 거부했다" >&2; exit 1; }
+  # 음성: M6 app의 SHA 누락·짧은 SHA·대문자·브랜치 이름·없는 커밋·머지 안 된 커밋
+  sha_expect 1 "승인 SHA가 없다" mafest-app ""
+  sha_expect 1 "승인 SHA가 없다" mafest-app-netpol ""
+  sha_expect 1 "40자 전체 SHA" mafest-app "$(printf %s "$merged" | cut -c1-12)"
+  sha_expect 1 "형식 오류" mafest-app "$(printf %s "$merged" | tr a-f A-F)"
+  sha_expect 1 "형식 오류" mafest-app "develop"
+  sha_expect 1 "찾지 못했다" mafest-app "0000000000000000000000000000000000000001"
+  sha_expect 1 "머지돼 있지 않다" mafest-app "$unmerged"
+  # --sha를 준 필수가 아닌 app도 같은 검증을 받는다(잘못된 SHA를 조용히 무시하지 않는다).
+  sha_expect 1 "머지돼 있지 않다" mafest-db "$unmerged"
+  rm -rf "$sha_dir"
 }
 
 # public-gateway·maintenance-page 사례. 선언 검사는 실제 argocd/public-gateway.yaml과 로컬 렌더를,
@@ -837,14 +934,36 @@ fi
 app="$1"
 require_tools
 
+approved_arg=""
+shift
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --sha)
+      [ $# -ge 2 ] || { echo "--sha에 값이 없다" >&2; exit 1; }
+      approved_arg="$2"
+      shift 2
+      ;;
+    *)
+      echo "알 수 없는 인자: $1" >&2
+      usage
+      ;;
+  esac
+done
+
+git -C "$repo_dir" fetch origin develop --quiet
+# 렌더·diff·승인 기록·출력할 Sync 명령이 모두 이 sha 하나를 쓴다. 필수 app이 SHA 없이 오면 여기서 멈춘다.
+sha=$(resolve_approved_sha "$app" "$approved_arg") || exit 1
+if [ -n "$approved_arg" ]; then
+  echo "승인 SHA: $sha (지정)"
+else
+  echo "승인 SHA: $sha (지정 없음 — 지금의 origin/develop. M6 app은 --sha가 필요하다)"
+fi
+
+# 인자(승인 SHA) 오류가 Application 파일 유무보다 먼저 드러나게 SHA를 결정한 뒤 확인한다.
 if [ ! -f "$repo_dir/argocd/$app.yaml" ]; then
   echo "argocd/$app.yaml이 없다 — Application 이름을 확인하라" >&2
   exit 1
 fi
-
-git -C "$repo_dir" fetch origin develop --quiet
-sha=$(git -C "$repo_dir" rev-parse origin/develop)
-echo "승인 SHA: $sha"
 
 diff_file=$(mktemp "${TMPDIR:-/tmp}/argo-preflight-diff.XXXXXX")
 trap 'rm -f "$diff_file"' EXIT HUP INT TERM

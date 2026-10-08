@@ -7,7 +7,7 @@ Application = 한 종류의 변경**을 목표로 2026-09-19에 `persona-app`·`
 
 Git source를 쓰는 모든 Application은 `targetRevision: develop`, `syncPolicy.automated` 없음
 (자동 Sync·prune 없음, `scripts/validate-*.sh`가 assert)이 원칙이다. Helm chart source는 검토한
-chart version을 고정한다. Sync 전에는 `scripts/argo-preflight.sh <app>`로 승인 SHA·전체 diff·
+chart version을 고정한다. Sync 전에는 `scripts/argo-preflight.sh <app> [--sha <SHA>]`로 승인 SHA·전체 diff·
 선행 조건을 확인한다.
 
 ## Application
