@@ -5,9 +5,9 @@ set -eu
 # mafest 데이터 층(CNPG mafest-db·PodMonitor·적재 Job·Argo Application·namespace·권한 SQL) 선언이 문서 35
 # M5·M5b와 이 레포 규칙을 지키는지 로컬에서만 검사한다. 홈 API를 호출하지 않는다.
 #
-# 이미지 digest가 아직 자리표시자(0×64)라서 Cluster(cluster.yaml.draft)와 Job 파일은 prod 렌더에 연결돼
-# 있지 않다. 그래서 두 가지를 함께 본다.
-#   - 파일 자체: draft·Job 파일을 직접 읽어 계약을 검사한다(연결되면 그대로 렌더될 내용이다).
+# Cluster(cluster.yaml)는 승인 릴리스 digest로 고정돼 prod 렌더에 연결돼 있고, 적재 Job은 runbook 단계에서만
+# 켜므로 평상시 렌더에 없다. 그래서 두 가지를 함께 본다.
+#   - 파일 자체: Cluster·Job 파일을 직접 읽어 계약을 검사한다(Job은 켜면 그대로 렌더될 내용이다).
 #   - prod 렌더: 자리표시자 digest가 렌더에 없고, Cluster·Job이 렌더에 들어왔다면 실제 digest여야 한다.
 #
 # 메시지 태그
@@ -62,7 +62,7 @@ cluster = YAML.load_file(cluster_path)
 # --- prod 렌더: 자리표시자·Namespace -------------------------------------------------
 [["mafest-db", db_render], ["mafest-db-netpol", netpol_render], ["mafest-load", load_render]].each do |name, render|
   raise "[안전] #{name} 렌더에 Namespace가 있다 — namespace는 bootstrap이 소유한다" if render.any? { |i| i["kind"] == "Namespace" }
-  raise "[안전] #{name} 렌더에 자리표시자 digest(0×64)가 있다 — A3 digest 확정 전에는 연결하지 않는다" if YAML.dump(render) =~ PLACEHOLDER
+  raise "[안전] #{name} 렌더에 자리표시자 digest(0×64)가 있다 — 승인된 릴리스 digest만 연결한다" if YAML.dump(render) =~ PLACEHOLDER
 end
 rendered_cluster = db_render.find { |i| i["kind"] == "Cluster" }
 if rendered_cluster
@@ -238,5 +238,5 @@ raise "[안전] runtime 확인 SQL은 쓰기 시도를 ROLLBACK으로 감싸야 
   raise "[안전] runtime 확인 SQL에 #{name} 거부 검사가 없다" unless check.include?(name)
 end
 
-puts "mafest 데이터 층(DB Cluster draft·PodMonitor·NetworkPolicy 이름·적재 Job·Application·namespace·권한 SQL) 검사 통과"
+puts "mafest 데이터 층(DB Cluster·PodMonitor·NetworkPolicy 이름·적재 Job·Application·namespace·권한 SQL) 검사 통과"
 RUBY

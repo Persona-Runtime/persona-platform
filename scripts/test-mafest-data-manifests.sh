@@ -19,7 +19,7 @@ ruby -ryaml - "$test_dir" <<'RUBY'
 Encoding.default_external = Encoding::UTF_8
 
 root = ARGV.fetch(0)
-DRAFT = "kustomize/base/mafest-db/cluster.yaml.draft"
+CLUSTER = "kustomize/base/mafest-db/cluster.yaml"
 STAGE = "kustomize/base/mafest-load/job-stage.yaml"
 GRAPH = "kustomize/base/mafest-load/job-graph.yaml"
 LOAD_K = "kustomize/base/mafest-load/kustomization.yaml"
@@ -42,29 +42,25 @@ end
 
 # [사례 설명, 복사본을 바꾸는 함수, 기대 오류 문구 일부]
 cases = [
-  # Cluster(draft)
-  ["instances 1", ->(r) { mutate_yaml(File.join(r, DRAFT), ["spec", "instances"], 1) }, "instances는 2다"],
-  ["anti-affinity preferred", ->(r) { mutate_yaml(File.join(r, DRAFT), ["spec", "affinity", "podAntiAffinityType"], "preferred") }, "anti-affinity는 required다"],
-  ["anti-affinity off", ->(r) { mutate_yaml(File.join(r, DRAFT), ["spec", "affinity", "enablePodAntiAffinity"], false) }, "enablePodAntiAffinity가 켜져"],
-  ["GPU 노드 후보 추가", ->(r) { mutate_yaml(File.join(r, DRAFT), ["spec", "affinity", "nodeAffinity", "requiredDuringSchedulingIgnoredDuringExecution", "nodeSelectorTerms", 0, "matchExpressions", 0, "values"], %w[k8s-worker1 k8s-worker2 persona-gpu-01]) }, "두 홈 워커"],
-  ["AGE preload 누락", ->(r) { mutate_yaml(File.join(r, DRAFT), ["spec", "postgresql", "shared_preload_libraries"], []) }, "shared_preload_libraries에 age"],
-  ["jit on", ->(r) { mutate_yaml(File.join(r, DRAFT), ["spec", "postgresql", "parameters", "jit"], "on") }, "jit은 off"],
-  ["Delete=false 누락", ->(r) { mutate_yaml(File.join(r, DRAFT), ["metadata", "annotations", "argocd.argoproj.io/sync-options"], "Prune=false") }, "Prune=false·Delete=false"],
-  ["locale 변경", ->(r) { mutate_yaml(File.join(r, DRAFT), ["spec", "bootstrap", "initdb", "localeCType"], "en_US.UTF-8") }, "locale은 C"],
-  ["superuser 활성화", ->(r) { mutate_yaml(File.join(r, DRAFT), ["spec", "enableSuperuserAccess"], true) }, "superuser 계정을 활성화하지"],
-  ["이미지 태그만", ->(r) { mutate_yaml(File.join(r, DRAFT), ["spec", "imageName"], "ghcr.io/persona-runtime/mafest-postgres:16.15-age1.6.0-bookworm") }, "mafest-postgres:<태그>@sha256"],
-  ["runtime 역할에 superuser", ->(r) { mutate_yaml(File.join(r, DRAFT), ["spec", "managed", "roles", 0, "superuser"], true) }, "mafest_runtime에 superuser"],
+  # Cluster
+  ["instances 1", ->(r) { mutate_yaml(File.join(r, CLUSTER), ["spec", "instances"], 1) }, "instances는 2다"],
+  ["anti-affinity preferred", ->(r) { mutate_yaml(File.join(r, CLUSTER), ["spec", "affinity", "podAntiAffinityType"], "preferred") }, "anti-affinity는 required다"],
+  ["anti-affinity off", ->(r) { mutate_yaml(File.join(r, CLUSTER), ["spec", "affinity", "enablePodAntiAffinity"], false) }, "enablePodAntiAffinity가 켜져"],
+  ["GPU 노드 후보 추가", ->(r) { mutate_yaml(File.join(r, CLUSTER), ["spec", "affinity", "nodeAffinity", "requiredDuringSchedulingIgnoredDuringExecution", "nodeSelectorTerms", 0, "matchExpressions", 0, "values"], %w[k8s-worker1 k8s-worker2 persona-gpu-01]) }, "두 홈 워커"],
+  ["AGE preload 누락", ->(r) { mutate_yaml(File.join(r, CLUSTER), ["spec", "postgresql", "shared_preload_libraries"], []) }, "shared_preload_libraries에 age"],
+  ["jit on", ->(r) { mutate_yaml(File.join(r, CLUSTER), ["spec", "postgresql", "parameters", "jit"], "on") }, "jit은 off"],
+  ["Delete=false 누락", ->(r) { mutate_yaml(File.join(r, CLUSTER), ["metadata", "annotations", "argocd.argoproj.io/sync-options"], "Prune=false") }, "Prune=false·Delete=false"],
+  ["locale 변경", ->(r) { mutate_yaml(File.join(r, CLUSTER), ["spec", "bootstrap", "initdb", "localeCType"], "en_US.UTF-8") }, "locale은 C"],
+  ["superuser 활성화", ->(r) { mutate_yaml(File.join(r, CLUSTER), ["spec", "enableSuperuserAccess"], true) }, "superuser 계정을 활성화하지"],
+  ["이미지 태그만", ->(r) { mutate_yaml(File.join(r, CLUSTER), ["spec", "imageName"], "ghcr.io/persona-runtime/mafest-postgres:16.15-age1.6.0-bookworm") }, "digest 고정이 아니다"],
+  ["runtime 역할에 superuser", ->(r) { mutate_yaml(File.join(r, CLUSTER), ["spec", "managed", "roles", 0, "superuser"], true) }, "mafest_runtime에 superuser"],
   # 자리표시자 digest가 prod 렌더에 연결됨
-  ["자리표시자 Cluster 연결", lambda { |r|
-     File.rename(File.join(r, DRAFT), File.join(r, "kustomize/base/mafest-db/cluster.yaml"))
-     mutate_yaml(File.join(r, DB_K), ["resources"], ["podmonitor.yaml", "cluster.yaml"])
+  ["자리표시자 Cluster 이미지", ->(r) { mutate_yaml(File.join(r, CLUSTER), ["spec", "imageName"], "ghcr.io/persona-runtime/mafest-postgres:16.15-age1.6.0-bookworm@sha256:#{"0" * 64}") }, "자리표시자 digest(0×64)"],
+  ["자리표시자 Job 연결", lambda { |r|
+     mutate_yaml(File.join(r, STAGE), C0 + ["image"], "ghcr.io/persona-runtime/mafest-app@sha256:#{"0" * 64}")
+     mutate_yaml(File.join(r, LOAD_K), ["resources"], ["job-stage.yaml"])
    }, "자리표시자 digest(0×64)"],
-  ["자리표시자 Job 연결", ->(r) { mutate_yaml(File.join(r, LOAD_K), ["resources"], ["job-stage.yaml"]) }, "자리표시자 digest(0×64)"],
-  # digest를 실제 모양으로 바꾼 뒤(자리표시자 검사가 먼저 걸리지 않게) 둘을 함께 켠다.
-  ["Job 둘 동시 활성", lambda { |r|
-     [STAGE, GRAPH].each { |f| mutate_yaml(File.join(r, f), C0 + ["image"], "ghcr.io/persona-runtime/mafest-app@sha256:#{"a" * 64}") }
-     mutate_yaml(File.join(r, LOAD_K), ["resources"], ["job-stage.yaml", "job-graph.yaml"])
-   }, "한 번에 하나만"],
+  ["Job 둘 동시 활성", ->(r) { mutate_yaml(File.join(r, LOAD_K), ["resources"], ["job-stage.yaml", "job-graph.yaml"]) }, "한 번에 하나만"],
   # Job 보안·자원
   ["Job backoffLimit 3", ->(r) { mutate_yaml(File.join(r, STAGE), ["spec", "backoffLimit"], 3) }, "backoffLimit 0"],
   ["Job restartPolicy OnFailure", ->(r) { mutate_yaml(File.join(r, GRAPH), POD + ["restartPolicy"], "OnFailure") }, "restartPolicy는 Never"],

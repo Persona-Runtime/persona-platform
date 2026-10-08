@@ -4,5 +4,5 @@ kind: Kustomization
 # runbook(A7)에서 한 단계씩 한 줄만 켜고, 끝나면 다시 비운다(동시에 둘 이상 켜지 않는다).
 #   stage: - job-stage.yaml
 #   graph: - job-graph.yaml
-# 이미지 digest가 자리표시자(0×64)인 동안에는 켜지 않는다(scripts/validate-mafest-data-manifests.sh가 막는다).
+# Job 이미지는 승인된 릴리스 digest로 고정돼 있어도 상시 렌더에 넣지 않는다 — 적재는 runbook 단계에서만 돈다.
 resources: []
