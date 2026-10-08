@@ -14,7 +14,10 @@
   4) 활성 종류의 서로 다른 구조화 schema 마다 합이 가장 큰 표본 1건을 실제 본문 그대로 생성한다(순차, 재시도 없음)
 
 출력에는 프롬프트·응답 본문·토큰 목록·자격증명을 넣지 않는다. 숫자·표본 id·고정 사유 코드만 낸다.
-종료 코드: 0 PASS(범위 한정 포함), 1 한도 초과, 2 실행 불가, 3 응답 실패, 5 부분 확인
+  - VLLM_BUDGET_APPROVED_MAFEST_SHA: 사람이 승인한 mafest SHA. M3 완료 판정에는 manifest 가 evidence_source=db,
+    깨끗한 작업 트리, 이 SHA 와 같은 mafest SHA 를 가져야 한다. 아니면 진단용(5)이다
+
+종료 코드: 0 PASS(범위 한정 포함), 1 한도 초과, 2 실행 불가, 3 응답 실패, 5 부분 확인·진단용
 """
 
 from __future__ import annotations
@@ -22,6 +25,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -375,13 +379,32 @@ def pick_generation_targets(
     return targets, skipped
 
 
+def provenance_problems(manifest: dict, approved_sha: str | None) -> list[str]:
+    """M3 완료로 쓸 수 있는 입력 출처인지. 가짜 Evidence·미승인 SHA·더러운 작업 트리는 진단용이다."""
+    problems: list[str] = []
+    if manifest.get("evidence_source") != "db":
+        problems.append("EVIDENCE_NOT_DB")
+    mafest = manifest.get("mafest") or {}
+    if mafest.get("dirty") is not False:
+        problems.append("MAFEST_TREE_NOT_CLEAN")
+    if not approved_sha:
+        problems.append("APPROVED_SHA_NOT_GIVEN")
+    elif mafest.get("sha") != approved_sha:
+        problems.append("MAFEST_SHA_NOT_APPROVED")
+    return problems
+
+
 def decide(
     measured: list[dict],
     generations: list[dict],
     kinds: dict,
     skipped_schemas: list[str],
+    provenance: list[str] | None = None,
 ) -> tuple[int, str, list[str]]:
-    """(종료 코드, 상태, 사유 코드). 활성 종류가 모두 확인되지 않으면 PASS 로 만들지 않는다."""
+    """(종료 코드, 상태, 사유 코드). 활성 종류가 모두 확인되지 않거나 입력 출처가 진단용이면 PASS 로 만들지 않는다.
+
+    한도 초과와 응답 실패는 입력 출처와 무관한 사실이라 먼저 판정한다. 출처 문제는 PARTIAL(5)이고,
+    가짜 Evidence 면 상태를 DIAGNOSTIC 으로 구분한다."""
     reasons: list[str] = []
     if any(m["verdict"] == "OVER" for m in measured):
         return EXIT_OVER, "OVER", ["INPUT_PLUS_MAX_TOKENS_OVER_LIMIT"]
@@ -406,8 +429,10 @@ def decide(
     if any(m["verdict"] == "UNKNOWN_MAX_TOKENS" for m in measured):
         reasons.append("UNKNOWN_MAX_TOKENS")
     reasons.extend(f"GENERATION_CAP:{key}" for key in skipped_schemas)
+    reasons.extend(provenance or [])
     if reasons:
-        return EXIT_PARTIAL, "PARTIAL", sorted(set(reasons))
+        state = "DIAGNOSTIC" if "EVIDENCE_NOT_DB" in reasons else "PARTIAL"
+        return EXIT_PARTIAL, state, sorted(set(reasons))
     if not active:
         return EXIT_PARTIAL, "PARTIAL", ["NO_ACTIVE_KIND"]
     scoped = sorted(
@@ -470,10 +495,196 @@ def print_report(
             f"gpu_fb_mib_observed_max={g.get('gpu_fb_used_mib_observed_max', 'N/A')} result={g.get('problem', 'OK')}"
         )
     print()
-    print(f"STATE={state} REASONS={','.join(reasons) or '-'}")
+    print(f"MEASURE_STATE={state} REASONS={','.join(reasons) or '-'}")
+
+
+# ── Pod 기준 live 정보와 측정 뒤 확인 ──────────────────────────────────────────────
+#: 출력·판정에 쓰는 인자만 고른다. --api-key 는 있는지 여부만 기록한다(값을 버린다).
+ALLOWED_ARGS = (
+    "--max-model-len",
+    "--served-model-name",
+    "--gpu-memory-utilization",
+    "--max-num-seqs",
+    "--max-num-batched-tokens",
+)
+MODEL_PATH_RE = re.compile(r"/models/[^/]+/[^/]+/([0-9a-f]{7,64})")
+EXIT_HALT = 6
+FINAL_STATE_BY_EXIT = {
+    EXIT_PASS: "PASS",
+    EXIT_OVER: "OVER",
+    EXIT_CANNOT_RUN: "CANNOT_RUN",
+    EXIT_RESPONSE_FAIL: "RESPONSE_FAIL",
+    4: "NOT_READY",
+    EXIT_PARTIAL: "PARTIAL",
+    EXIT_HALT: "HALT",
+}
+
+
+def pod_summary(pods: dict) -> dict:
+    """측정하는 Pod 의 상태와 기동 설정. 인자·모델 revision·image digest 는 Deployment 템플릿이 아니라 Pod 에서 읽는다."""
+    items = pods.get("items") or []
+    summary: dict = {
+        "total": len(items),
+        "ready": 0,
+        "restarts": 0,
+        "terminated_reasons": [],
+        "uid": ",".join(sorted(str(p.get("metadata", {}).get("uid")) for p in items)),
+        "names": ",".join(
+            sorted(str(p.get("metadata", {}).get("name")) for p in items)
+        ),
+        "args": {},
+        "model_revision": None,
+        "image_id": None,
+    }
+    for pod in items:
+        container = next(
+            (
+                c
+                for c in pod.get("spec", {}).get("containers", [])
+                if c.get("name") == "vllm"
+            ),
+            None,
+        )
+        if container and not summary["args"]:
+            args = list(container.get("args", []))
+            for i, arg in enumerate(args):
+                key, _, inline = arg.partition("=")
+                if key == "--api-key":
+                    summary["args"]["--api-key"] = "present"
+                elif key in ALLOWED_ARGS:
+                    summary["args"][key] = inline or (
+                        args[i + 1] if i + 1 < len(args) else ""
+                    )
+            for part in [*container.get("command", []), *args]:
+                match = MODEL_PATH_RE.fullmatch(part)
+                if match:
+                    summary["model_revision"] = match.group(1)
+        for status in pod.get("status", {}).get("containerStatuses", []):
+            if status.get("name") != "vllm":
+                continue
+            summary["ready"] += 1 if status.get("ready") else 0
+            summary["restarts"] += int(status.get("restartCount", 0))
+            reason = (status.get("lastState", {}).get("terminated") or {}).get("reason")
+            if reason:
+                summary["terminated_reasons"].append(reason)
+            image_id = status.get("imageID", "")
+            if "@" in image_id and not summary["image_id"]:
+                summary["image_id"] = image_id.split("@", 1)[1]
+    summary["terminated_reasons"] = sorted(summary["terminated_reasons"])
+    return summary
+
+
+def live_info(pods: dict) -> dict:
+    s = pod_summary(pods)
+    return {
+        "args": s["args"],
+        "image_id": s["image_id"],
+        "model_revision": s["model_revision"],
+        "pod": s["names"],
+        "pod_uid": s["uid"],
+        "restarts_before": s["restarts"],
+        "terminated_reasons_before": s["terminated_reasons"],
+    }
+
+
+def halt_reasons(before: dict, after: dict | None) -> list[str]:
+    """측정 전후 Pod 를 비교한다. 뒤 상태를 못 읽거나 Pod 가 바뀌었으면 성공으로 보지 않는다."""
+    if after is None:
+        return ["POST_STATE_UNREADABLE"]
+    reasons: list[str] = []
+    if after["total"] != 1:
+        reasons.append("POD_COUNT_CHANGED")
+    if after["uid"] != before["uid"]:
+        reasons.append("POD_REPLACED")
+    if after["ready"] != 1:
+        reasons.append("POD_NOT_READY")
+    if after["restarts"] > before["restarts"]:
+        reasons.append("RESTART_INCREASED")
+    new_oom = after["terminated_reasons"].count("OOMKilled") > before[
+        "terminated_reasons"
+    ].count("OOMKilled")
+    if new_oom:
+        reasons.append("OOM_KILLED")
+    return reasons
+
+
+def finalize(
+    result_path: str,
+    measure_exit: int,
+    before_path: str,
+    after_path: str,
+    out_path: str | None,
+) -> int:
+    """측정 뒤 Pod 확인을 합쳐 최종 종료 코드·stdout·result.json 상태를 하나로 맞춘다.
+
+    result_path 는 측정기가 쓴 결과다(없으면 종료 코드로 상태를 정한다). 중단 사유가 있으면 상태 HALT, 종료 6 이다.
+    """
+    with open(before_path, encoding="utf-8") as f:
+        before = pod_summary(json.load(f))
+    after = None
+    if after_path != "-":
+        try:
+            with open(after_path, encoding="utf-8") as f:
+                after = pod_summary(json.load(f))
+        except (OSError, ValueError):
+            after = None
+    result: dict = {}
+    if os.path.exists(result_path):
+        with open(result_path, encoding="utf-8") as f:
+            result = json.load(f)
+    measure_state = result.get("state") or FINAL_STATE_BY_EXIT.get(
+        measure_exit, "UNKNOWN"
+    )
+    halt = halt_reasons(before, after)
+    if halt:
+        final_exit, final_state, final_reasons = EXIT_HALT, "HALT", halt
+    else:
+        final_exit, final_state = measure_exit, measure_state
+        final_reasons = result.get("reasons") or []
+    result.update(
+        {
+            "state": final_state,
+            "exit_code": final_exit,
+            "reasons": final_reasons,
+            "measurement_state": measure_state,
+            "measurement_exit_code": measure_exit,
+            "pod_before": {
+                k: before[k] for k in ("uid", "ready", "restarts", "terminated_reasons")
+            },
+            "pod_after": (
+                {
+                    k: after[k]
+                    for k in ("uid", "ready", "restarts", "terminated_reasons")
+                }
+                if after
+                else None
+            ),
+        }
+    )
+    if out_path:
+        fd = os.open(out_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(result, f, ensure_ascii=False, indent=2)
+    print(
+        f"FINAL_STATE={final_state} REASONS={','.join(final_reasons) or '-'} EXIT={final_exit}"
+    )
+    return final_exit
 
 
 def main(argv: list[str]) -> int:
+    if argv[:1] == ["--live"] and len(argv) == 2:
+        with open(argv[1], encoding="utf-8") as f:
+            print(json.dumps(live_info(json.load(f)), ensure_ascii=False))
+        return 0
+    if argv[:1] == ["--pod-state"] and len(argv) == 2:
+        with open(argv[1], encoding="utf-8") as f:
+            summary = pod_summary(json.load(f))
+        print(summary["ready"], summary["total"])
+        return 0
+    if argv[:1] == ["--finalize"] and len(argv) in (5, 6):
+        return finalize(
+            argv[1], int(argv[2]), argv[3], argv[4], argv[5] if len(argv) == 6 else None
+        )
     if len(argv) != 3:
         print(
             "usage: vllm_budget.py <live.json> <bodies.jsonl> <manifest.json>",
@@ -482,13 +693,13 @@ def main(argv: list[str]) -> int:
         return EXIT_CANNOT_RUN
     base_url = os.environ.get("VLLM_BASE_URL", "")
     if not base_url:
-        print("STATE=CANNOT_RUN REASONS=NO_VLLM_BASE_URL", file=sys.stderr)
+        print("MEASURE_STATE=CANNOT_RUN REASONS=NO_VLLM_BASE_URL", file=sys.stderr)
         return EXIT_CANNOT_RUN
     with open(argv[0], encoding="utf-8") as f:
         live = json.load(f)
     rows, manifest, problems = load_inputs(argv[1], argv[2])
     if problems:
-        print(f"STATE=CANNOT_RUN REASONS={','.join(problems)}")
+        print(f"MEASURE_STATE=CANNOT_RUN REASONS={','.join(problems)}")
         return EXIT_CANNOT_RUN
     kinds = manifest["kinds"]
     include_experimental = os.environ.get("VLLM_BUDGET_GENERATE_EXPERIMENTAL") == "1"
@@ -497,7 +708,7 @@ def main(argv: list[str]) -> int:
     try:
         model, budget, problems = check_target(base_url, live, manifest)
         if problems:
-            print(f"STATE=CANNOT_RUN REASONS={','.join(problems)}")
+            print(f"MEASURE_STATE=CANNOT_RUN REASONS={','.join(problems)}")
             return EXIT_CANNOT_RUN
         measured = measure_tokens(base_url, model, rows, budget)
         generations: list[dict] = []
@@ -513,9 +724,14 @@ def main(argv: list[str]) -> int:
         else:
             gpu_before = gpu_after = None
     except VllmError as e:
-        print(f"STATE=RESPONSE_FAIL REASONS={e.code}")
+        print(f"MEASURE_STATE=RESPONSE_FAIL REASONS={e.code}")
         return EXIT_RESPONSE_FAIL
-    code, state, reasons = decide(measured, generations, kinds, skipped_schemas)
+    provenance = provenance_problems(
+        manifest, os.environ.get("VLLM_BUDGET_APPROVED_MAFEST_SHA")
+    )
+    code, state, reasons = decide(
+        measured, generations, kinds, skipped_schemas, provenance
+    )
     print_report(model, budget, live, manifest, measured, generations, state, reasons)
     print(
         f"gpu_fb_used_mib before={gpu_before if gpu_before is not None else 'N/A'} after={gpu_after if gpu_after is not None else 'N/A'}"
