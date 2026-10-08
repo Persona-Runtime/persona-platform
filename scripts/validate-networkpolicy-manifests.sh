@@ -26,7 +26,8 @@ maintenance_file=$(mktemp "${TMPDIR:-/tmp}/maintenance-page.XXXXXX.yaml")
 edge_file=$(mktemp "${TMPDIR:-/tmp}/persona-edge.XXXXXX.yaml")
 traefik_file=$(mktemp "${TMPDIR:-/tmp}/traefik.XXXXXX.yaml")
 inference_file=$(mktemp "${TMPDIR:-/tmp}/persona-inference.XXXXXX.yaml")
-trap 'rm -f "$maintenance_file" "$edge_file" "$traefik_file" "$inference_file"' EXIT HUP INT TERM
+mafest_data_file=$(mktemp "${TMPDIR:-/tmp}/mafest-data.XXXXXX.yaml")
+trap 'rm -f "$maintenance_file" "$edge_file" "$traefik_file" "$inference_file" "$mafest_data_file"' EXIT HUP INT TERM
 
 # persona-app namespace 정책은 준비 중 페이지 overlay에 함께 들어 있다(워크로드와 같은 Application).
 kubectl kustomize "$repo_dir/kustomize/overlays/prod/maintenance-page"      > "$maintenance_file"
@@ -35,8 +36,10 @@ kubectl kustomize "$repo_dir/kustomize/overlays/prod/traefik-networkpolicy"   > 
 # persona-inference는 Argo Application 없이 사람이 kubectl로 적용한다. Argo가 Sync 전에
 # 막아 주지 않으므로 적용 전에 이 검사로 렌더와 정책 모양을 확인한다.
 kubectl kustomize "$repo_dir/kustomize/overlays/prod/persona-inference-netpol" > "$inference_file"
+# mafest-data(CNPG mafest-db) — mafest-db-netpol Application.
+kubectl kustomize "$repo_dir/kustomize/overlays/prod/mafest-db-netpol"       > "$mafest_data_file"
 
-ruby -ryaml - "$maintenance_file" "$edge_file" "$traefik_file" "$inference_file" <<'RUBY'
+ruby -ryaml - "$maintenance_file" "$edge_file" "$traefik_file" "$inference_file" "$mafest_data_file" <<'RUBY'
 # encoding: utf-8
 #
 # heredoc로 넘긴 Ruby 소스는 파일이 아니라 stdin이라, 로케일이 UTF-8이 아니면(LC_ALL=C,
@@ -47,7 +50,7 @@ ruby -ryaml - "$maintenance_file" "$edge_file" "$traefik_file" "$inference_file"
 # 외부 매니페스트의 인코딩이다.
 Encoding.default_external = Encoding::UTF_8
 
-maintenance_path, edge_path, traefik_path, inference_path = ARGV
+maintenance_path, edge_path, traefik_path, inference_path, mafest_data_path = ARGV
 
 def load(path)
   YAML.load_stream(File.read(path)).compact
@@ -151,7 +154,7 @@ raise "[안전] traefik 인입 포트가 8000·8443이 아니다(entrypoint 실�
 
 backend_egress = resource(traefik, "NetworkPolicy", "allow-egress-backends")
 backend_targets = backend_egress.dig("spec", "egress").flat_map { |rule| (rule["to"] || []).map { |peer| peer.dig("namespaceSelector", "matchLabels", "kubernetes.io/metadata.name") } }.uniq
-raise "[안전] traefik egress 대상이 다르다(persona-app·persona-edge·persona-mock-sse·kube-system이어야 한다)" unless backend_targets.sort == %w[kube-system persona-app persona-edge persona-mock-sse].sort
+raise "[안전] traefik egress 대상이 다르다(persona-app·persona-edge·kube-system이어야 한다)" unless backend_targets.sort == %w[kube-system persona-app persona-edge].sort
 
 apiserver = resource(traefik, "CiliumNetworkPolicy", "allow-egress-kube-apiserver")
 raise "[안전] traefik의 kube-apiserver egress가 예약 엔티티 kube-apiserver를 쓰지 않는다(하드코딩 IP는 노드 교체 때 끊긴다)" unless apiserver.dig("spec", "egress", 0, "toEntities") == ["kube-apiserver"]
@@ -175,6 +178,57 @@ raise "[안전] traefik 클러스터 노드 인입 포트가 8000·8443이 아�
 metrics = resource(traefik, "NetworkPolicy", "allow-ingress-metrics")
 raise "[안전] traefik 메트릭 인입이 monitoring에서만 오지 않는다" unless rule_from_namespaces(metrics.dig("spec", "ingress", 0)) == ["monitoring"]
 raise "[안전] traefik 메트릭 인입 포트가 9100이 아니다" unless rule_ports(metrics.dig("spec", "ingress", 0)) == [["TCP", 9100]]
+
+# --- mafest-data (CNPG mafest-db) -------------------------------------------------
+# 문서 35 §NetworkPolicy: API·loader → 5432, DB 간 복제 5432·8000, operator ↔ instance 8000,
+# Prometheus → exporter 9187, DNS, kube-apiserver. allow(wave 0) → default-deny(wave 1).
+mafest = load(mafest_data_path)
+mafest_db = { "cnpg.io/cluster" => "mafest-db" }
+check_default_deny(mafest, "mafest-data", "mafest-default-deny")
+check_sync_wave(resource(mafest, "NetworkPolicy", "mafest-default-deny"), "1", "mafest-data mafest-default-deny")
+(mafest - [resource(mafest, "NetworkPolicy", "mafest-default-deny")]).each do |policy|
+  check_sync_wave(policy, "0", "mafest-data #{policy.dig("metadata", "name")}")
+end
+
+db_in = resource(mafest, "NetworkPolicy", "mafest-allow-db-ingress")
+raise "[안전] mafest-allow-db-ingress는 mafest-db Pod만 골라야 한다" unless db_in.dig("spec", "podSelector", "matchLabels") == mafest_db
+db_in_rules = db_in.dig("spec", "ingress") || []
+app_rule = db_in_rules.find { |rule| rule_ports(rule) == [["TCP", 5432]] } || raise("[안전] mafest-db 5432 인입 규칙이 없다")
+expected_app_peers = %w[mafest-api mafest-loader].map do |name|
+  { "namespaceSelector" => { "matchLabels" => ns("mafest-app") }, "podSelector" => { "matchLabels" => { "app.kubernetes.io/name" => name } } }
+end
+# namespace·Pod selector를 별도 peer로 나누면 OR가 되어 mafest-app 전체(또는 다른 namespace의 같은 라벨)가 열린다.
+raise "[안전] mafest-db 5432는 mafest-app의 mafest-api·mafest-loader Pod(같은 peer의 AND)에서만 와야 한다(실제: #{app_rule["from"].inspect})" unless app_rule["from"] == expected_app_peers
+operator_rule = db_in_rules.find { |rule| rule_ports(rule) == [["TCP", 8000]] } || raise("[안전] operator → instance 8000 인입 규칙이 없다")
+raise "[안전] 8000 인입은 cnpg-system에서만 와야 한다" unless rule_from_namespaces(operator_rule) == ["cnpg-system"]
+metrics_rule = db_in_rules.find { |rule| rule_ports(rule) == [["TCP", 9187]] } || raise("[안전] exporter 9187 인입 규칙이 없다")
+check_single_and_peer(metrics_rule, "monitoring",
+                      { "app.kubernetes.io/name" => "prometheus", "app.kubernetes.io/instance" => "monitoring-stack-kube-prom-prometheus" },
+                      "Prometheus → mafest-db exporter")
+raise "[안전] mafest-db 인입 규칙은 5432·8000·9187 세 개다(실제: #{db_in_rules.length}개)" unless db_in_rules.length == 3
+
+db_out = resource(mafest, "NetworkPolicy", "mafest-allow-db-egress")
+raise "[안전] mafest-allow-db-egress는 mafest-db Pod만 골라야 한다" unless db_out.dig("spec", "podSelector", "matchLabels") == mafest_db
+out_targets = (db_out.dig("spec", "egress") || []).flat_map { |rule| rule_from_namespaces(rule) }.uniq.sort
+raise "[안전] mafest-db egress 대상은 kube-system(DNS)·cnpg-system이다(실제: #{out_targets})" unless out_targets == %w[cnpg-system kube-system]
+
+replication = resource(mafest, "NetworkPolicy", "mafest-allow-db-replication")
+raise "[안전] 복제 정책은 Ingress·Egress 둘 다다" unless replication.dig("spec", "policyTypes")&.sort == %w[Egress Ingress]
+raise "[안전] 복제 ingress는 같은 Cluster Pod에서만 온다" unless replication.dig("spec", "ingress", 0, "from") == [{ "podSelector" => { "matchLabels" => mafest_db } }]
+raise "[안전] 복제 egress는 같은 Cluster Pod로만 간다" unless replication.dig("spec", "egress", 0, "to") == [{ "podSelector" => { "matchLabels" => mafest_db } }]
+%w[ingress egress].each do |direction|
+  raise "[안전] 복제 #{direction} 포트는 5432(WAL)·8000(instance manager)이다" unless rule_ports(replication.dig("spec", direction, 0)).sort == [["TCP", 5432], ["TCP", 8000]]
+end
+
+mafest_apiserver = resource(mafest, "CiliumNetworkPolicy", "mafest-allow-egress-kube-apiserver")
+raise "[안전] mafest-db kube-apiserver egress endpointSelector가 다르다" unless mafest_apiserver.dig("spec", "endpointSelector", "matchLabels") == mafest_db
+raise "[안전] mafest-db kube-apiserver egress는 예약 엔티티 kube-apiserver를 쓴다(IP 하드코딩 금지)" unless mafest_apiserver.dig("spec", "egress", 0, "toEntities") == ["kube-apiserver"]
+raise "[안전] mafest-db kube-apiserver egress 포트가 6443이 아니다" unless mafest_apiserver.dig("spec", "egress", 0, "toPorts", 0, "ports", 0, "port") == "6443"
+mafest.each do |item|
+  (item.dig("spec", "egress") || []).each do |rule|
+    raise "[안전] mafest-data egress에 ipBlock을 쓰지 않는다" if (rule["to"] || []).any? { |peer| peer.key?("ipBlock") }
+  end
+end
 
 # --- persona-inference (수동 적용) --------------------------------------------
 # 클러스터 적용 여부와 무관하게 "적용하면 무엇이 열리는가"의 모양을 검사한다.
@@ -254,5 +308,5 @@ inference.each do |item|
   end
 end
 
-puts "networkpolicy(persona-app 준비 중 페이지·persona-edge·traefik·persona-inference) 렌더와 매니페스트 정책 검사 통과"
+puts "networkpolicy(persona-app 준비 중 페이지·persona-edge·traefik·mafest-data·persona-inference) 렌더와 매니페스트 정책 검사 통과"
 RUBY

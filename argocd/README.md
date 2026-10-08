@@ -21,6 +21,8 @@ chart version을 고정한다. Sync 전에는 `scripts/argo-preflight.sh <app>`�
 | `public-gateway` | `kustomize/overlays/prod/public-gateway` | `persona-app` | 공개 진입 Gateway 객체 `persona-app`(http+https listener)만. Certificate·TLS Secret `persona-app-tls`는 cert-manager gateway-shim이 만들며 Git에 선언하지 않음 | 소유권 이관(Phase 1) 완료 상태여야 한다 — live Gateway tracking-id가 `public-gateway`, Certificate 소유자가 현재 Gateway(`scripts/argo-preflight.sh public-gateway`) |
 | `maintenance-page` | `kustomize/overlays/prod/maintenance-page` | `persona-app` | 정적 준비 중 페이지(nginx Deployment·Service·ConfigMap), 공개(https)·내부(http) HTTPRoute, `maintenance-security-headers` Middleware, persona-app NetworkPolicy(`maintenance-` 접두사) | Traefik `kubernetesCRD` 프로바이더, Gateway Programmed, Certificate `persona-app-tls` Ready. 다음 서비스 공개(M8) 때 backendRef를 바꾸고 정리한다 |
 | `persona-edge` | `kustomize/overlays/prod/persona-edge` | `persona-edge` | DDNS CronJob + oauth2-proxy + 그 NetworkPolicy(**아직 분리 안 함**) | Secret `oauth2-proxy`·`cloudflare-dns-token` 존재 |
+| `mafest-db` | `kustomize/overlays/prod/mafest-db` | `mafest-data` | CNPG Cluster `mafest-db`(PG16+AGE, 2 인스턴스, `Prune=false,Delete=false`)·PodMonitor. **Cluster 선언은 이미지 digest 확정(A3) 전까지 `cluster.yaml.draft`로 렌더에서 빠져 있다** | CNPG operator·CRD, StorageClass local-path, ns `mafest-data`, Secret `mafest-db-owner`·`mafest-db-runtime`·`mafest-ghcr`(이름만), 두 홈 워커 Ready |
+| `mafest-db-netpol` | `kustomize/overlays/prod/mafest-db-netpol` | `mafest-data` | NetworkPolicy·CiliumNetworkPolicy만(`mafest-` 접두사, allow wave 0 → default-deny wave 1) | Cluster `mafest-db` healthy, Cilium 상태 ok |
 | `monitoring-stack` | (Helm `kube-prometheus-stack`) | `monitoring` | Prometheus·Grafana | 없음(유일하게 `syncOptions: [ServerSideApply=true]` — CRD가 커서, `automated`는 아님) |
 | `gpu-runtime` | `kustomize/overlays/prod/gpu-runtime` | `kube-system` | `RuntimeClass/nvidia`만 | `persona-gpu-01` Ready, `node-pool=gpu`, GPU 전용 taint 확인 |
 | `dcgm-exporter` | (Helm `dcgm-exporter`) | `monitoring` | GPU 전용 DCGM exporter DaemonSet·Service·ServiceMonitor | `gpu-runtime` Sync 뒤 `RuntimeClass/nvidia` 존재, monitoring Prometheus Available, ServiceMonitor CRD 존재 |
@@ -35,6 +37,7 @@ Argo Application이 없는 이유까지 같이 적는다 — "왜 여기 없는�
 | `kustomize/overlays/prod/traefik-networkpolicy` | `kubectl apply -k`(CP 수동) | Traefik 본체가 `helm --create-namespace`로 Argo 밖에 설치돼 있어(`bootstrap/traefik/`), 그 NetworkPolicy도 같은 방식으로 다룬다 |
 | `kustomize/overlays/prod/traefik-observability` | `kubectl apply -k`(CP 수동) | 위와 같은 이유(Traefik 부속) |
 | `kustomize/overlays/prod/mock-sse` | 없음(2026-09-16 de-registered) | 완료된 실험 자원 정리 — 재등록 절차는 `runbooks/test-resource-cleanup.md`(로컬) |
+| `kustomize/overlays/prod/mafest-load` | `kubectl apply -k`(CP 수동, runbook 단계마다 한 Job) | 일회성 적재(stage → graph)라 상시 Sync 대상에 두지 않는다. 평상시 `resources: []` |
 
 ## 폐기한 Application (2026-10-07)
 

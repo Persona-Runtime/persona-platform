@@ -1,0 +1,25 @@
+# CNPG의 Cluster.spec.monitoring.enablePodMonitor(1.30 deprecated)에 의존하지 않고 따로 선언한다.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: mafest-db
+  namespace: mafest-data
+  labels:
+    # monitoring-stack Prometheus의 기본 podMonitorSelector(release: monitoring-stack).
+    release: monitoring-stack
+    app.kubernetes.io/part-of: persona-platform
+spec:
+  namespaceSelector:
+    matchNames:
+      - mafest-data
+  selector:
+    # primary·replica를 모두 수집한다(역할 라벨로 좁히지 않는다).
+    matchLabels:
+      cnpg.io/cluster: mafest-db
+  podMetricsEndpoints:
+    # CNPG exporter 포트(9187)의 이름. 번호 대신 이름을 써서 포트가 바뀌어도 선언이 깨지지 않게 한다.
+    - port: metrics
+      path: /metrics
+      scheme: http
+      interval: 30s
+      scrapeTimeout: 10s

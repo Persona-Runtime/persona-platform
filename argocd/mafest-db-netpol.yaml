@@ -1,0 +1,21 @@
+# mafest-data namespace의 NetworkPolicy·CiliumNetworkPolicy만 관리한다. mafest-db가 2/2로 뜬 뒤
+# 적용한다(allow wave 0 → default-deny wave 1). 선행 조건은 scripts/argo-preflight.sh mafest-db-netpol.
+#
+# syncPolicy·finalizer를 두지 않는다(수동 Sync).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: mafest-db-netpol
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: networkpolicy
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/Persona-Runtime/persona-platform.git
+    targetRevision: develop
+    path: kustomize/overlays/prod/mafest-db-netpol
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: mafest-data
