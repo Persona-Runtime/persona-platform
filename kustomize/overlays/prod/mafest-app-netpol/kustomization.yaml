@@ -1,0 +1,9 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# mafest-app namespace의 NetworkPolicy만 관리한다(워크로드 mafest-app과 분리 — 위험도·롤백 절차가 다르다).
+# Application은 아직 초안(argocd/mafest-app-netpol.yaml.draft)이다. M6에서 API·웹 Sync 전에 이 정책을 먼저 연결한다.
+# 이미 떠 있는 적재 Job(mafest-loader)도 이 정책을 받으므로, 적재 중에는 연결하지 않는다.
+# namespace는 bootstrap/namespaces/mafest-app.yaml이 소유한다.
+namespace: mafest-app
+resources:
+  - ../../../base/networkpolicy/mafest-app

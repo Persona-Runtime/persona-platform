@@ -34,15 +34,15 @@ spec:
     - Ingress
     - Egress
 ---
-# vLLM 추론 ingress. Gateway Pod만 들어온다.
+# vLLM 추론 ingress. mafest API Pod만 들어온다(persona 폐기 뒤 소비자를 persona-gateway에서 mafest-api로 옮겼다.
+# 이름은 기존 정책과의 연속성을 위해 그대로 둔다 — 바꾸면 수동 적용 때 옛 정책이 남는다).
 #
-# 포트가 TCP 8000 하나인 근거: persona-gateway의 adapter는
-# `{PERSONA_VLLM_BASE_URL}/v1/chat/completions` 하나만 POST한다
-# (persona-gateway의 chat/vllm_client.py). 다른 포트·경로를 부르지 않는다.
+# 포트가 TCP 8000 하나인 근거: mafest API의 LLM 클라이언트는
+# `{MAFEST_LLM_BASE_URL}/v1/chat/completions` 하나만 POST한다(mafest llm/client.py). 다른 포트·경로를 부르지 않는다.
 #
-# 보내는 쪽 허용은 persona-app의 allow-gateway egress다. 두 정책이 모두 있어야 통신된다.
+# 보내는 쪽 허용은 mafest-app의 mafest-allow-api-egress다. 두 정책이 모두 있어야 통신된다.
 # namespaceSelector와 podSelector는 같은 peer에 둔다(AND). 별도 `-` 항목으로 나누면 OR가 되어
-# persona-app의 모든 Pod 또는 이 namespace의 persona-gateway 라벨 Pod가 들어올 수 있다.
+# mafest-app의 모든 Pod(웹·적재 Job) 또는 이 namespace의 mafest-api 라벨 Pod가 들어올 수 있다.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -65,20 +65,20 @@ spec:
     - from:
         - namespaceSelector:
             matchLabels:
-              kubernetes.io/metadata.name: persona-app
+              kubernetes.io/metadata.name: mafest-app
           podSelector:
             matchLabels:
-              app.kubernetes.io/name: persona-gateway
+              app.kubernetes.io/name: mafest-api
       ports:
         - protocol: TCP
           port: 8000
 ---
-# /metrics scrape. **Gateway 허용과 합치지 않는다.**
+# /metrics scrape. **추론 허용(allow-vllm-gateway)과 합치지 않는다.**
 #
 # vLLM은 API와 /metrics를 같은 8000에서 낸다. 포트가 같다는 이유로 위 allow-vllm-gateway의
 # from에 monitoring을 더하면, 나중에 누가 그 규칙을 좁힐 때 수집이 함께 끊긴다. 목적이
-# 다른 두 허용을 따로 둬서 각각 이유를 갖게 한다(persona-app의 allow-gateway와
-# allow-gateway-metrics를 나눈 것과 같은 판단).
+# 다른 두 허용을 따로 둬서 각각 이유를 갖게 한다(mafest-app의 mafest-allow-api-ingress와
+# mafest-allow-api-metrics를 나눈 것과 같은 판단).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

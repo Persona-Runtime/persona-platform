@@ -1,5 +1,5 @@
 #!/bin/sh
-# NetworkPolicy 선언의 복사본에 준비 중 페이지·Gateway → vLLM·Prometheus → vLLM 계약 위반을 하나씩 넣어
+# NetworkPolicy 선언의 복사본에 준비 중 페이지·mafest API → vLLM·Prometheus → vLLM·mafest-app 계약 위반을 하나씩 넣어
 # validate-networkpolicy-manifests.sh가 실패하는지 확인한다. 원본 선언·클러스터는 바꾸지 않는다.
 set -eu
 for tool in kubectl ruby mktemp cp mkdir rm; do
@@ -23,6 +23,7 @@ MNT = "kustomize/overlays/prod/maintenance-page/network-policy.yaml"
 MFD = "kustomize/base/networkpolicy/mafest-data/network-policy.yaml"
 TRAEFIK = "kustomize/base/networkpolicy/traefik/network-policy.yaml"
 INF = "kustomize/base/networkpolicy/persona-inference/network-policy.yaml"
+MAPP = "kustomize/base/networkpolicy/mafest-app/network-policy.yaml"
 
 def ns_peer(name)
   { "namespaceSelector" => { "matchLabels" => { "kubernetes.io/metadata.name" => name } } }
@@ -32,7 +33,7 @@ def pod_peer(labels)
   { "podSelector" => { "matchLabels" => labels } }
 end
 
-GATEWAY = { "app.kubernetes.io/name" => "persona-gateway" }
+MAFEST_API = { "app.kubernetes.io/name" => "mafest-api" }
 PROMETHEUS = { "app.kubernetes.io/name" => "prometheus", "app.kubernetes.io/instance" => "monitoring-stack-kube-prom-prometheus" }
 
 # [파일, 정책 이름, 복사본을 바꾸는 함수, 기대 오류 문구]
@@ -58,11 +59,22 @@ cases = [
    "egress 허용을 두지 않는다"],
   [MNT, "maintenance-default-deny", ->(p) { p["spec"]["podSelector"] = { "matchLabels" => { "app.kubernetes.io/name" => "maintenance-page" } } },
    "default-deny: podSelector가 네임스페이스 전체"],
-  # vLLM ingress from Gateway (persona-inference allow-vllm-gateway)
-  [INF, "allow-vllm-gateway", ->(p) { p.dig("spec", "ingress", 0)["from"] = [ns_peer("persona-app")] },
-   "Gateway → vLLM ingress: persona-app namespace AND"],
-  [INF, "allow-vllm-gateway", ->(p) { p.dig("spec", "ingress", 0)["from"] = [ns_peer("persona-app"), pod_peer(GATEWAY)] },
-   "Gateway → vLLM ingress: peer가 정확히 1개가 아니다"],
+  # vLLM ingress from mafest API (persona-inference allow-vllm-gateway)
+  [INF, "allow-vllm-gateway", ->(p) { p.dig("spec", "ingress", 0)["from"] = [ns_peer("mafest-app")] },
+   "mafest API → vLLM ingress: mafest-app namespace AND"],
+  [INF, "allow-vllm-gateway", ->(p) { p.dig("spec", "ingress", 0)["from"] = [ns_peer("mafest-app"), pod_peer(MAFEST_API)] },
+   "mafest API → vLLM ingress: peer가 정확히 1개가 아니다"],
+  # mafest-app — API·웹·적재 Job. AND peer, 정해진 포트, 웹 egress 없음, deny는 마지막 wave
+  [MAPP, "mafest-allow-api-ingress", ->(p) { p.dig("spec", "ingress", 0)["from"] = [ns_peer("traefik")] },
+   "Traefik → mafest API ingress: traefik namespace AND"],
+  [MAPP, "mafest-allow-api-egress", ->(p) { p.dig("spec", "egress") << { "to" => [{ "ipBlock" => { "cidr" => "0.0.0.0/0" } }], "ports" => [{ "protocol" => "TCP", "port" => 443 }] } },
+   "mafest API egress는 DNS·DB·vLLM 세 규칙이어야 한다"],
+  [MAPP, "mafest-allow-loader-egress", ->(p) { p.dig("spec", "egress") << { "to" => [ns_peer("persona-inference")], "ports" => [{ "protocol" => "TCP", "port" => 8000 }] } },
+   "적재 Job egress는 DNS·DB 두 규칙이어야 한다"],
+  [MAPP, "mafest-allow-web-ingress", ->(p) { p["spec"]["egress"] = [{ "to" => [ns_peer("kube-system")], "ports" => [{ "protocol" => "UDP", "port" => 53 }] }] },
+   "mafest 웹에 egress 허용을 두지 않는다"],
+  [MAPP, "mafest-app-default-deny", ->(p) { p.dig("metadata", "annotations")["argocd.argoproj.io/sync-wave"] = "0" },
+   "mafest-app-default-deny: sync-wave가 1"],
   # vLLM ingress from Prometheus (persona-inference allow-vllm-metrics)
   [INF, "allow-vllm-metrics", ->(p) { p.dig("spec", "ingress", 0)["from"] = [ns_peer("monitoring")] },
    "Prometheus → vLLM metrics ingress: monitoring namespace AND"],

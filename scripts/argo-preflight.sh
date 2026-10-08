@@ -11,7 +11,8 @@ set -eu
 #   scripts/argo-preflight.sh <app>     # public-gateway, maintenance-page, persona-edge,
 #                                        # metallb, metallb-config, cert-manager,
 #                                        # cert-manager-issuers, gpu-runtime, dcgm-exporter,
-#                                        # nvidia-device-plugin, mafest-db, mafest-db-netpol 중 하나
+#                                        # nvidia-device-plugin, mafest-db, mafest-db-netpol,
+#                                        # mafest-app-netpol, mafest-app 중 하나(뒤 둘은 Application이 아직 초안)
 #   scripts/argo-preflight.sh --self-test
 #
 # live 조회 전에 kube context가 PREFLIGHT_KUBE_CONTEXT(기본 kubernetes-admin@kubernetes)인지 확인한다.
@@ -469,6 +470,79 @@ check_preconditions() {
         return 1
       fi
       ;;
+mafest-app-netpol)
+  # mafest-app default-deny가 걸리기 전 상태를 본다. 적재 Job이 도는 중이면 정책이 그 연결을 끊을 수 있어 멈춘다.
+  # 짝 정책(Argo 밖, 사람이 kubectl로 먼저 적용)이 live에 있어야 API·웹이 실제로 통신된다.
+  if ! kubectl get namespace mafest-app > /dev/null 2>&1; then
+    echo "선행 조건 실패: mafest-app-netpol → Namespace mafest-app이 없다(bootstrap/namespaces/mafest-app.yaml 먼저 적용)" >&2
+    return 1
+  fi
+  loader_running=$(kubectl -n mafest-app get pods -l app.kubernetes.io/name=mafest-loader \
+    --field-selector=status.phase=Running -o name 2> /dev/null || true)
+  if [ -n "$loader_running" ]; then
+    echo "선행 조건 실패: mafest-app-netpol → 적재 Job이 도는 중이다 — 끝난 뒤 정책을 건다" >&2
+    return 1
+  fi
+  traefik_targets=$(kubectl -n traefik get networkpolicy allow-egress-backends \
+    -o jsonpath='{.spec.egress[*].to[*].namespaceSelector.matchLabels.kubernetes\.io/metadata\.name}' 2> /dev/null || true)
+  case " $traefik_targets " in
+    *" mafest-app "*) : ;;
+    *)
+      echo "선행 조건 실패: mafest-app-netpol → Traefik allow-egress-backends에 mafest-app이 없다(traefik-networkpolicy 먼저 적용)" >&2
+      return 1
+      ;;
+  esac
+  vllm_consumer=$(kubectl -n persona-inference get networkpolicy allow-vllm-gateway \
+    -o jsonpath='{.spec.ingress[0].from[0].podSelector.matchLabels.app\.kubernetes\.io/name}' 2> /dev/null || true)
+  if [ "$vllm_consumer" != "mafest-api" ]; then
+    echo "선행 조건 실패: mafest-app-netpol → persona-inference allow-vllm-gateway 소비자가 mafest-api가 아니다(실제: ${vllm_consumer:-없음})" >&2
+    return 1
+  fi
+  cilium_pod=$(kubectl -n kube-system get pods -l k8s-app=cilium \
+    --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2> /dev/null || true)
+  if [ -z "$cilium_pod" ] || ! kubectl -n kube-system exec "$cilium_pod" -c cilium-agent -- cilium-dbg status --brief > /dev/null 2>&1; then
+    echo "선행 조건 실패: mafest-app-netpol → cilium-dbg status가 ok가 아니다" >&2
+    return 1
+  fi
+  ;;
+mafest-app)
+  # API·웹을 올리기 전에 Secret(이름만), 정책, DB·vLLM·두 워커가 준비돼 있어야 한다. Secret 본문은 읽지 않는다.
+  if ! kubectl get namespace mafest-app > /dev/null 2>&1; then
+    echo "선행 조건 실패: mafest-app → Namespace mafest-app이 없다(bootstrap/namespaces/mafest-app.yaml 먼저 적용)" >&2
+    return 1
+  fi
+  for secret in mafest-api-db mafest-ghcr; do
+    if ! kubectl -n mafest-app get secret "$secret" -o name > /dev/null 2>&1; then
+      echo "선행 조건 실패: mafest-app → Secret ${secret}이 없다(값 없이 이름만 확인)" >&2
+      return 1
+    fi
+  done
+  if ! kubectl -n mafest-app get networkpolicy mafest-allow-api-egress -o name > /dev/null 2>&1; then
+    echo "선행 조건 실패: mafest-app → mafest-app-netpol(allow 정책)이 먼저 적용돼 있어야 한다" >&2
+    return 1
+  fi
+  phase=$(kubectl -n mafest-data get cluster mafest-db -o jsonpath='{.status.phase}' 2> /dev/null || true)
+  case "$phase" in
+    *[Hh]ealthy*) : ;;
+    *)
+      echo "선행 조건 실패: mafest-app → Cluster mafest-db phase가 healthy가 아니다(실제: ${phase:-없음})" >&2
+      return 1
+      ;;
+  esac
+  vllm_available=$(kubectl -n persona-inference get deployment persona-vllm \
+    -o jsonpath='{.status.conditions[?(@.type=="Available")].status}' 2> /dev/null || true)
+  if [ "$vllm_available" != "True" ]; then
+    echo "선행 조건 실패: mafest-app → persona-vllm이 Available=True가 아니다(실제: ${vllm_available:-없음})" >&2
+    return 1
+  fi
+  for node in k8s-worker1 k8s-worker2; do
+    node_ready=$(kubectl get node "$node" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2> /dev/null || true)
+    if [ "$node_ready" != "True" ]; then
+      echo "선행 조건 실패: mafest-app → ${node}가 Ready가 아니다 — API 두 대를 서로 다른 워커에 둔다(실제: ${node_ready:-없음})" >&2
+      return 1
+    fi
+  done
+  ;;
     nvidia-device-plugin)
       if ! kubectl get runtimeclass nvidia > /dev/null 2>&1; then
         echo "선행 조건 실패: nvidia-device-plugin → RuntimeClass/nvidia가 없다(gpu-runtime Sync 먼저)" >&2
@@ -622,6 +696,13 @@ case "$*" in
   *"get crd clusters.postgresql.cnpg.io"*) [ -z "${FAKE_NO_CNPG_CRD:-}" ] || exit 1; echo crd ;;
   *"get deployment cnpg-controller-manager"*) echo "${FAKE_CNPG_AVAILABLE:-True}" ;;
   *"get storageclass local-path"*) echo storageclass ;;
+*"get namespace mafest-app"*) [ -z "${FAKE_NO_APP_NS:-}" ] || exit 1; echo namespace ;;
+*"get secret mafest-api-db"*) [ -z "${FAKE_NO_API_SECRET:-}" ] || exit 1; echo secret ;;
+*"get networkpolicy mafest-allow-api-egress"*) [ -z "${FAKE_NO_APP_NETPOL:-}" ] || exit 1; echo networkpolicy ;;
+*"get pods -l app.kubernetes.io/name=mafest-loader"*) echo "${FAKE_LOADER_RUNNING:-}" ;;
+*"get networkpolicy allow-egress-backends"*) echo "${FAKE_TRAEFIK_TARGETS:-persona-app persona-edge mafest-app kube-system}" ;;
+*"get networkpolicy allow-vllm-gateway"*) echo "${FAKE_VLLM_CONSUMER-mafest-api}" ;;
+*"get deployment persona-vllm"*) echo "${FAKE_VLLM_AVAILABLE:-True}" ;;
   *"get namespace mafest-data"*) [ -z "${FAKE_NO_MAFEST_NS:-}" ] || exit 1; echo namespace ;;
   *"get secret mafest-db-owner"*|*"get secret mafest-db-runtime"*) echo secret ;;
   *"get secret mafest-ghcr"*) [ -z "${FAKE_NO_PULL_SECRET:-}" ] || exit 1; echo secret ;;
@@ -675,6 +756,27 @@ FAKE_HEALTHY
     expect_failure 1 "${netpol_case#*|}" env "${netpol_case%%|*}" PATH="$healthy_bin:$PATH" \
       sh "$repo_dir/scripts/argo-preflight.sh" --check-preconditions mafest-db-netpol
   done
+live_preconditions mafest-app-netpol > /dev/null ||
+  { echo "self-test 실패: 정상 mafest-app-netpol 선행 조건을 거부했다" >&2; exit 1; }
+live_preconditions mafest-app > /dev/null ||
+  { echo "self-test 실패: 정상 mafest-app 선행 조건을 거부했다" >&2; exit 1; }
+# 음성: mafest-app-netpol — 적재 중, 짝 정책(Traefik·vLLM) 미적용, Cilium 이상
+for app_netpol_case in "FAKE_LOADER_RUNNING=pod/mafest-load-stage-abcde|적재 Job이 도는 중이다" \
+  "FAKE_TRAEFIK_TARGETS=persona-app persona-edge kube-system|allow-egress-backends에 mafest-app이 없다" \
+  "FAKE_VLLM_CONSUMER=persona-gateway|소비자가 mafest-api가 아니다" \
+  "FAKE_CILIUM_BAD=1|mafest-app-netpol → cilium-dbg status가 ok가 아니다"; do
+  expect_failure 1 "${app_netpol_case#*|}" env "${app_netpol_case%%|*}" PATH="$healthy_bin:$PATH" \
+    sh "$repo_dir/scripts/argo-preflight.sh" --check-preconditions mafest-app-netpol
+done
+# 음성: mafest-app — Secret 이름, 정책 선행, DB·vLLM·워커
+for app_case in "FAKE_NO_API_SECRET=1|Secret mafest-api-db이 없다" \
+  "FAKE_NO_APP_NETPOL=1|mafest-app-netpol(allow 정책)이 먼저" \
+  "FAKE_MAFEST_PHASE=Setting up primary|mafest-app → Cluster mafest-db phase가 healthy가 아니다" \
+  "FAKE_VLLM_AVAILABLE=False|persona-vllm이 Available=True가 아니다" \
+  "FAKE_WORKER_READY=False|API 두 대를 서로 다른 워커에"; do
+  expect_failure 1 "${app_case#*|}" env "${app_case%%|*}" PATH="$healthy_bin:$PATH" \
+    sh "$repo_dir/scripts/argo-preflight.sh" --check-preconditions mafest-app
+done
   # 정상: 기록값을 주고 그 값이 live와 같으면 통과한다.
   env PREFLIGHT_EXPECTED_GATEWAY_UID=00000000-0000-4000-8000-000000000001 PREFLIGHT_EXPECTED_CERT_NOT_AFTER=2026-12-01T00:00:00Z \
     PATH="$healthy_bin:$PATH" sh "$repo_dir/scripts/argo-preflight.sh" --check-preconditions public-gateway > /dev/null ||
@@ -712,7 +814,7 @@ FAKE_HEALTHY
     { echo "self-test 실패: diff 오류 사유가 없다" >&2; cat "$err_file" >&2; exit 1; }
 
   rm -rf "$case_dir"
-  echo "self-test 통과: public-gateway·maintenance-page·mafest-db·mafest-db-netpol 정상 6건·음성 22건, diff 종료 코드 2건"
+  echo "self-test 통과: public-gateway·maintenance-page·mafest-db·mafest-db-netpol·mafest-app-netpol·mafest-app 정상 8건·음성 31건, diff 종료 코드 2건"
 }
 
 # --- main ------------------------------------------------------------------

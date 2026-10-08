@@ -2,7 +2,7 @@
 
 set -eu
 
-# NetworkPolicy(persona-app의 준비 중 페이지·persona-edge·traefik·persona-inference) 선언이 합의한
+# NetworkPolicy(persona-app의 준비 중 페이지·persona-edge·traefik·persona-inference·mafest-data·mafest-app) 선언이 합의한
 # 계약을 지키는지 로컬에서만 검사한다. 홈 API를 호출하지 않는다.
 # scripts/validate-public-gateway-manifests.sh와 같은 패턴([안전] 태그, kubectl kustomize
 # 렌더 + ruby 검사)을 쓴다.
@@ -27,7 +27,8 @@ edge_file=$(mktemp "${TMPDIR:-/tmp}/persona-edge.XXXXXX.yaml")
 traefik_file=$(mktemp "${TMPDIR:-/tmp}/traefik.XXXXXX.yaml")
 inference_file=$(mktemp "${TMPDIR:-/tmp}/persona-inference.XXXXXX.yaml")
 mafest_data_file=$(mktemp "${TMPDIR:-/tmp}/mafest-data.XXXXXX.yaml")
-trap 'rm -f "$maintenance_file" "$edge_file" "$traefik_file" "$inference_file" "$mafest_data_file"' EXIT HUP INT TERM
+mafest_app_file=$(mktemp "${TMPDIR:-/tmp}/mafest-app.XXXXXX.yaml")
+trap 'rm -f "$maintenance_file" "$edge_file" "$traefik_file" "$inference_file" "$mafest_data_file" "$mafest_app_file"' EXIT HUP INT TERM
 
 # persona-app namespace 정책은 준비 중 페이지 overlay에 함께 들어 있다(워크로드와 같은 Application).
 kubectl kustomize "$repo_dir/kustomize/overlays/prod/maintenance-page"      > "$maintenance_file"
@@ -38,8 +39,10 @@ kubectl kustomize "$repo_dir/kustomize/overlays/prod/traefik-networkpolicy"   > 
 kubectl kustomize "$repo_dir/kustomize/overlays/prod/persona-inference-netpol" > "$inference_file"
 # mafest-data(CNPG mafest-db) — mafest-db-netpol Application.
 kubectl kustomize "$repo_dir/kustomize/overlays/prod/mafest-db-netpol"       > "$mafest_data_file"
+# mafest-app(API·웹·적재 Job) — mafest-app-netpol Application(초안). Application이 초안이어도 정책 모양은 지금 검사한다.
+kubectl kustomize "$repo_dir/kustomize/overlays/prod/mafest-app-netpol"      > "$mafest_app_file"
 
-ruby -ryaml - "$maintenance_file" "$edge_file" "$traefik_file" "$inference_file" "$mafest_data_file" <<'RUBY'
+ruby -ryaml - "$maintenance_file" "$edge_file" "$traefik_file" "$inference_file" "$mafest_data_file" "$mafest_app_file" <<'RUBY'
 # encoding: utf-8
 #
 # heredoc로 넘긴 Ruby 소스는 파일이 아니라 stdin이라, 로케일이 UTF-8이 아니면(LC_ALL=C,
@@ -50,7 +53,7 @@ ruby -ryaml - "$maintenance_file" "$edge_file" "$traefik_file" "$inference_file"
 # 외부 매니페스트의 인코딩이다.
 Encoding.default_external = Encoding::UTF_8
 
-maintenance_path, edge_path, traefik_path, inference_path, mafest_data_path = ARGV
+maintenance_path, edge_path, traefik_path, inference_path, mafest_data_path, mafest_app_path = ARGV
 
 def load(path)
   YAML.load_stream(File.read(path)).compact
@@ -154,7 +157,7 @@ raise "[안전] traefik 인입 포트가 8000·8443이 아니다(entrypoint 실�
 
 backend_egress = resource(traefik, "NetworkPolicy", "allow-egress-backends")
 backend_targets = backend_egress.dig("spec", "egress").flat_map { |rule| (rule["to"] || []).map { |peer| peer.dig("namespaceSelector", "matchLabels", "kubernetes.io/metadata.name") } }.uniq
-raise "[안전] traefik egress 대상이 다르다(persona-app·persona-edge·kube-system이어야 한다)" unless backend_targets.sort == %w[kube-system persona-app persona-edge].sort
+raise "[안전] traefik egress 대상이 다르다(persona-app·persona-edge·mafest-app·kube-system이어야 한다)" unless backend_targets.sort == %w[kube-system mafest-app persona-app persona-edge].sort
 
 apiserver = resource(traefik, "CiliumNetworkPolicy", "allow-egress-kube-apiserver")
 raise "[안전] traefik의 kube-apiserver egress가 예약 엔티티 kube-apiserver를 쓰지 않는다(하드코딩 IP는 노드 교체 때 끊긴다)" unless apiserver.dig("spec", "egress", 0, "toEntities") == ["kube-apiserver"]
@@ -239,15 +242,15 @@ check_sync_wave(resource(inference, "NetworkPolicy", "default-deny"), "1", "pers
 vllm_label = { "app.kubernetes.io/name" => "persona-vllm" }
 seed_label = { "app.kubernetes.io/name" => "persona-vllm-model-seed" }
 
-# 추론 ingress — Gateway Pod 하나만. namespace만 보고 열면 persona-app의 다른 Pod(web·
-# embedding·migrate Job)도 vLLM에 닿는다.
+# 추론 ingress — mafest API Pod 하나만. namespace만 보고 열면 mafest-app의 다른 Pod(웹·
+# 적재 Job)도 vLLM에 닿는다.
 vllm_ingress = resource(inference, "NetworkPolicy", "allow-vllm-gateway")
 check_sync_wave(vllm_ingress, "0", "persona-inference allow-vllm-gateway")
 raise "[안전] allow-vllm-gateway는 vLLM Pod만 골라야 한다" unless vllm_ingress.dig("spec", "podSelector", "matchLabels") == vllm_label
 raise "[안전] allow-vllm-gateway에 Egress를 열지 않는다(모델 다운로드 경로가 생긴다)" if (vllm_ingress.dig("spec", "policyTypes") || []).include?("Egress")
 raise "[안전] allow-vllm-gateway ingress 규칙이 정확히 1개여야 한다" unless (vllm_ingress.dig("spec", "ingress") || []).length == 1
-raise "[안전] Gateway → vLLM ingress가 persona-app에서만 오지 않는다" unless rule_from_namespaces(vllm_ingress.dig("spec", "ingress", 0)) == ["persona-app"]
-check_single_and_peer(vllm_ingress.dig("spec", "ingress", 0), "persona-app", { "app.kubernetes.io/name" => "persona-gateway" }, "Gateway → vLLM ingress")
+raise "[안전] mafest API → vLLM ingress가 mafest-app에서만 오지 않는다" unless rule_from_namespaces(vllm_ingress.dig("spec", "ingress", 0)) == ["mafest-app"]
+check_single_and_peer(vllm_ingress.dig("spec", "ingress", 0), "mafest-app", { "app.kubernetes.io/name" => "mafest-api" }, "mafest API → vLLM ingress")
 raise "[안전] vLLM 추론 포트가 TCP 8000이 아니다(CNPG status 8000·Traefik web 8000과 다른 용도다)" unless rule_ports(vllm_ingress.dig("spec", "ingress", 0)) == [["TCP", 8000]]
 
 # metrics는 별도 정책이어야 한다. vLLM은 API와 /metrics를 같은 8000에서 내므로, 포트가
@@ -264,7 +267,7 @@ raise "[안전] vLLM 메트릭 인입이 monitoring에서만 오지 않는다" u
 prometheus_labels = { "app.kubernetes.io/name" => "prometheus", "app.kubernetes.io/instance" => "monitoring-stack-kube-prom-prometheus" }
 check_single_and_peer(vllm_metrics.dig("spec", "ingress", 0), "monitoring", prometheus_labels, "Prometheus → vLLM metrics ingress")
 raise "[안전] vLLM 메트릭 포트가 TCP 8000이 아니다" unless rule_ports(vllm_metrics.dig("spec", "ingress", 0)) == [["TCP", 8000]]
-raise "[안전] Gateway 허용과 metrics 허용을 한 정책에 합치지 않는다" if rule_from_namespaces(vllm_ingress.dig("spec", "ingress", 0)).include?("monitoring")
+raise "[안전] 추론 허용과 metrics 허용을 한 정책에 합치지 않는다" if rule_from_namespaces(vllm_ingress.dig("spec", "ingress", 0)).include?("monitoring")
 
 # vLLM 운영 Pod의 egress는 DNS 하나뿐이어야 한다 — 모델은 seed Job이 미리 받아 두고
 # 서빙 Pod는 외부로 나갈 이유가 없다.
@@ -308,5 +311,70 @@ inference.each do |item|
   end
 end
 
-puts "networkpolicy(persona-app 준비 중 페이지·persona-edge·traefik·mafest-data·persona-inference) 렌더와 매니페스트 정책 검사 통과"
+# --- mafest-app(API·웹·적재 Job) --------------------------------------------------
+# 순서: allow(wave 0) → default-deny(wave 1). API·적재 Job은 DNS와 정해진 대상만 나가고, 웹은 나가지 않는다.
+# 인입은 Traefik(API 8000·웹 8080)과 Prometheus(API 8000, 별도 정책)뿐이다. 상대쪽 짝은 mafest-data의
+# mafest-allow-db-ingress와 persona-inference의 allow-vllm-gateway다.
+mafest_app = load(mafest_app_path)
+check_default_deny(mafest_app, "mafest-app", "mafest-app-default-deny")
+check_sync_wave(resource(mafest_app, "NetworkPolicy", "mafest-app-default-deny"), "1", "mafest-app-default-deny")
+mafest_app.select { |item| item["kind"] == "NetworkPolicy" }.each do |policy|
+  name = policy.dig("metadata", "name")
+  raise "[안전] mafest-app 정책 #{name}: 이름은 mafest- 접두사여야 한다" unless name.start_with?("mafest-")
+  check_sync_wave(policy, "0", "mafest-app #{name}") unless name == "mafest-app-default-deny"
+end
+traefik_pod = { "app.kubernetes.io/name" => "traefik" }
+api_label = { "app.kubernetes.io/name" => "mafest-api" }
+web_label = { "app.kubernetes.io/name" => "mafest-web" }
+loader_label = { "app.kubernetes.io/name" => "mafest-loader" }
+db_pod = { "cnpg.io/cluster" => "mafest-db" }
+dns_pod = { "k8s-app" => "kube-dns" }
+
+api_in = resource(mafest_app, "NetworkPolicy", "mafest-allow-api-ingress")
+raise "[안전] mafest-allow-api-ingress는 API Pod만 골라야 한다" unless api_in.dig("spec", "podSelector", "matchLabels") == api_label
+raise "[안전] mafest-allow-api-ingress 규칙이 정확히 1개여야 한다" unless (api_in.dig("spec", "ingress") || []).length == 1
+check_single_and_peer(api_in.dig("spec", "ingress", 0), "traefik", traefik_pod, "Traefik → mafest API ingress")
+raise "[안전] mafest API 인입 포트가 TCP 8000이 아니다" unless rule_ports(api_in.dig("spec", "ingress", 0)) == [["TCP", 8000]]
+
+api_metrics = resource(mafest_app, "NetworkPolicy", "mafest-allow-api-metrics")
+raise "[안전] mafest-allow-api-metrics는 API Pod만 골라야 한다" unless api_metrics.dig("spec", "podSelector", "matchLabels") == api_label
+raise "[안전] mafest-allow-api-metrics 규칙이 정확히 1개여야 한다" unless (api_metrics.dig("spec", "ingress") || []).length == 1
+check_single_and_peer(api_metrics.dig("spec", "ingress", 0), "monitoring", prometheus_labels, "Prometheus → mafest API metrics ingress")
+raise "[안전] mafest API 메트릭 포트가 TCP 8000이 아니다" unless rule_ports(api_metrics.dig("spec", "ingress", 0)) == [["TCP", 8000]]
+
+api_out = resource(mafest_app, "NetworkPolicy", "mafest-allow-api-egress")
+raise "[안전] mafest-allow-api-egress는 API Pod만 골라야 한다" unless api_out.dig("spec", "podSelector", "matchLabels") == api_label
+api_rules = api_out.dig("spec", "egress") || []
+raise "[안전] mafest API egress는 DNS·DB·vLLM 세 규칙이어야 한다(실제 #{api_rules.length}개)" unless api_rules.length == 3
+check_single_and_peer(api_rules.fetch(0), "kube-system", dns_pod, "mafest API DNS egress")
+raise "[안전] mafest API DNS egress 포트가 UDP/TCP 53이 아니다" unless rule_ports(api_rules.fetch(0)).sort == [["TCP", 53], ["UDP", 53]]
+check_single_and_peer(api_rules.fetch(1), "mafest-data", db_pod, "mafest API → DB egress")
+raise "[안전] mafest API DB egress 포트가 TCP 5432가 아니다" unless rule_ports(api_rules.fetch(1)) == [["TCP", 5432]]
+check_single_and_peer(api_rules.fetch(2), "persona-inference", vllm_label, "mafest API → vLLM egress")
+raise "[안전] mafest API vLLM egress 포트가 TCP 8000이 아니다" unless rule_ports(api_rules.fetch(2)) == [["TCP", 8000]]
+
+loader_out = resource(mafest_app, "NetworkPolicy", "mafest-allow-loader-egress")
+raise "[안전] mafest-allow-loader-egress는 적재 Job Pod만 골라야 한다" unless loader_out.dig("spec", "podSelector", "matchLabels") == loader_label
+loader_rules = loader_out.dig("spec", "egress") || []
+raise "[안전] 적재 Job egress는 DNS·DB 두 규칙이어야 한다(vLLM·인터넷 없음, 실제 #{loader_rules.length}개)" unless loader_rules.length == 2
+check_single_and_peer(loader_rules.fetch(0), "kube-system", dns_pod, "적재 Job DNS egress")
+check_single_and_peer(loader_rules.fetch(1), "mafest-data", db_pod, "적재 Job → DB egress")
+raise "[안전] 적재 Job DB egress 포트가 TCP 5432가 아니다" unless rule_ports(loader_rules.fetch(1)) == [["TCP", 5432]]
+
+web_in = resource(mafest_app, "NetworkPolicy", "mafest-allow-web-ingress")
+raise "[안전] mafest-allow-web-ingress는 웹 Pod만 골라야 한다" unless web_in.dig("spec", "podSelector", "matchLabels") == web_label
+check_single_and_peer(web_in.dig("spec", "ingress", 0), "traefik", traefik_pod, "Traefik → mafest 웹 ingress")
+raise "[안전] mafest 웹 인입 포트가 TCP 8080이 아니다" unless rule_ports(web_in.dig("spec", "ingress", 0)) == [["TCP", 8080]]
+
+# 웹 egress·mafest-app의 넓은 egress가 생기지 않았는지 본다. 웹은 정적 파일만 내보낸다.
+mafest_app.each do |item|
+  selected = item.dig("spec", "podSelector", "matchLabels")
+  raise "[안전] mafest 웹에 egress 허용을 두지 않는다" if selected == web_label && (item.dig("spec", "egress") || []).any?
+  (item.dig("spec", "egress") || []).each do |rule|
+    raise "[안전] mafest-app egress에 ipBlock을 쓰지 않는다" if (rule["to"] || []).any? { |peer| peer.key?("ipBlock") }
+    raise "[안전] mafest-app egress 규칙에 대상(to)이나 포트가 비어 있다 — 비우면 모든 대상·포트다" if (rule["to"] || []).empty? || (rule["ports"] || []).empty?
+  end
+end
+
+puts "networkpolicy(persona-app 준비 중 페이지·persona-edge·traefik·mafest-data·mafest-app·persona-inference) 렌더와 매니페스트 정책 검사 통과"
 RUBY

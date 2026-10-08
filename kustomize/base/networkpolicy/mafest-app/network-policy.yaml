@@ -1,0 +1,201 @@
+# mafest-app(API·웹·적재 Job) default-deny + 최소 허용. 문서 35 §NetworkPolicy 표와 26D를 따른다.
+# 이름은 모두 mafest- 접두사다. 순서: allow(wave 0) → default-deny(wave 1) — 허용이 먼저 들어가야 차단이 걸리는
+# 순간에도 HTTP·DNS·DB 연결이 끊기지 않는다. kubelet probe는 Cilium tunnel 모드에서 정책과 무관하게 허용된다
+# (kustomize/base/networkpolicy/traefik/network-policy.yaml의 근거와 같다).
+#
+# namespaceSelector와 podSelector는 한 peer에 함께 둔다(AND). 별도 `-` 항목이면 OR가 되어 namespace 전체가 열린다.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mafest-app-default-deny
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: networkpolicy
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# API 인입: Traefik(공개 /v1 경로, M8)만 8000으로. Traefik Pod 라벨까지 AND로 좁힌다.
+# 메트릭 수집은 같은 8000이지만 아래 별도 정책이다 — 합치면 나중에 한쪽을 좁힐 때 다른 쪽이 함께 끊긴다.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mafest-allow-api-ingress
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: networkpolicy
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: mafest-api
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: traefik
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: traefik
+      ports:
+        - protocol: TCP
+          port: 8000
+---
+# Prometheus → API /metrics(8000). monitoring namespace 전체(Grafana 등)는 열지 않는다 — 8000은 공개 API와 같은
+# 포트라 namespace만 열면 Grafana가 API를 호출할 수 있다.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mafest-allow-api-metrics
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: networkpolicy
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: mafest-api
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+              app.kubernetes.io/instance: monitoring-stack-kube-prom-prometheus
+      ports:
+        - protocol: TCP
+          port: 8000
+---
+# API 아웃바운드: DNS, mafest-db 5432(mafest-db-rw Service 뒤 CNPG Pod), vLLM 8000. 그 밖(인터넷 포함)은 없다.
+# 상대쪽 짝: mafest-data의 mafest-allow-db-ingress(5432, mafest-api 라벨), persona-inference의
+# allow-vllm-gateway(8000, mafest-api 라벨). 양쪽이 모두 있어야 통신된다.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mafest-allow-api-egress
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: networkpolicy
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: mafest-api
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: mafest-data
+          podSelector:
+            matchLabels:
+              cnpg.io/cluster: mafest-db
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: persona-inference
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: persona-vllm
+      ports:
+        - protocol: TCP
+          port: 8000
+---
+# 적재 Job(mafest-loader) 아웃바운드: DNS와 mafest-db 5432뿐이다. vLLM·인터넷은 없다(이미지에 원천이 들어 있다).
+# 인입은 없다 — Job은 아무 요청도 받지 않는다.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mafest-allow-loader-egress
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: networkpolicy
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: mafest-loader
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: mafest-data
+          podSelector:
+            matchLabels:
+              cnpg.io/cluster: mafest-db
+      ports:
+        - protocol: TCP
+          port: 5432
+---
+# 웹 인입: Traefik만 8080으로. 웹은 정적 파일만 내보내 아웃바운드가 없다(브라우저가 /v1을 직접 부르고, 그 요청은
+# Traefik이 API로 보낸다 — 웹 Pod를 거치지 않는다).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mafest-allow-web-ingress
+  labels:
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: networkpolicy
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: mafest-web
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: traefik
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: traefik
+      ports:
+        - protocol: TCP
+          port: 8080
