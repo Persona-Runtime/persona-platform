@@ -49,8 +49,7 @@ spec:
       containers:
         - name: load
           # mafest 앱 이미지(Dockerfile, USER 10001, ENTRYPOINT 없음). 태그가 아니라 digest로 고정한다.
-          # 릴리스 release-20261007-1(mafest 7cb9329d7691)의 승인 이미지.
-          image: ghcr.io/persona-runtime/mafest-app@sha256:dda935a2bb19bf260f80e1c96fd2ea579da1768511c647d09dbcd32afb6e9a19
+          image: ghcr.io/persona-runtime/mafest-app@sha256:b84372f3ea8da7dcb277ed869e46f264be6bf1d0d158faf5dedf4b497ab5c22c
           imagePullPolicy: IfNotPresent
           command:
             - python
