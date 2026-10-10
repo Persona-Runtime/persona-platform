@@ -1,0 +1,631 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      },
+      {
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "iconColor": "orange",
+        "name": "실험 구간·장애 주입·설정 변경",
+        "target": {
+          "limit": 100,
+          "matchAny": false,
+          "tags": [
+            "experiment"
+          ],
+          "type": "tags"
+        }
+      }
+    ]
+  },
+  "description": "NVIDIA DCGM Exporter 대시보드 12239 revision 2 의 배치·패널을 유지하되 구형 graph 패널을 timeseries 로 옮기고, 현재 exporter 가 내는 지표만 표시한다. 출처는 dashboards/PROVENANCE.md.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": [
+    "persona-experiment",
+    "gpu",
+    "dcgm"
+  ],
+  "time": {
+    "from": "now-30m",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "utc",
+  "title": "GPU 자원 (DCGM)",
+  "uid": "persona-gpu",
+  "version": 1,
+  "weekStart": "",
+  "templating": {
+    "list": [
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(DCGM_FI_DEV_GPU_UTIL, instance)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "대상(instance)",
+        "multi": true,
+        "name": "instance",
+        "options": [],
+        "query": {
+          "query": "label_values(DCGM_FI_DEV_GPU_UTIL, instance)",
+          "refId": "instance-query"
+        },
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query",
+        "allValue": ".*"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(DCGM_FI_DEV_GPU_UTIL{instance=~\"$instance\"}, gpu)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "GPU",
+        "multi": true,
+        "name": "gpu",
+        "options": [],
+        "query": {
+          "query": "label_values(DCGM_FI_DEV_GPU_UTIL{instance=~\"$instance\"}, gpu)",
+          "refId": "gpu-query"
+        },
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query",
+        "allValue": ".*"
+      }
+    ]
+  },
+  "panels": [
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "DCGM_FI_DEV_GPU_TEMP (섭씨).",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            }
+          },
+          "unit": "celsius"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 18,
+        "h": 8
+      },
+      "id": 12,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "DCGM_FI_DEV_GPU_TEMP{instance=~\"$instance\", gpu=~\"$gpu\"}",
+          "instant": false,
+          "legendFormat": "GPU {{gpu}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "GPU 온도",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "선택한 GPU 의 평균 온도.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "unit": "celsius"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 18,
+        "y": 0,
+        "w": 6,
+        "h": 8
+      },
+      "id": 14,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "avg(DCGM_FI_DEV_GPU_TEMP{instance=~\"$instance\", gpu=~\"$gpu\"})",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "평균 온도",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "DCGM_FI_DEV_POWER_USAGE (W).",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            }
+          },
+          "unit": "watt"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 18,
+        "h": 8
+      },
+      "id": 10,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "DCGM_FI_DEV_POWER_USAGE{instance=~\"$instance\", gpu=~\"$gpu\"}",
+          "instant": false,
+          "legendFormat": "GPU {{gpu}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "GPU 전력",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "선택한 GPU 전력의 합. 청구 비용이 아니다.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "unit": "watt"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 18,
+        "y": 8,
+        "w": 6,
+        "h": 8
+      },
+      "id": 16,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum(DCGM_FI_DEV_POWER_USAGE{instance=~\"$instance\", gpu=~\"$gpu\"})",
+          "instant": true,
+          "legendFormat": "",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "전력 합계",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "DCGM_FI_DEV_GPU_UTIL (0~100 퍼센트). KV 사용률(0~1)과 단위가 다르다.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            }
+          },
+          "unit": "percent",
+          "min": 0,
+          "max": 100
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 16,
+        "w": 12,
+        "h": 8
+      },
+      "id": 6,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "DCGM_FI_DEV_GPU_UTIL{instance=~\"$instance\", gpu=~\"$gpu\"}",
+          "instant": false,
+          "legendFormat": "GPU {{gpu}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "GPU 사용률",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "DCGM_FI_DEV_SM_CLOCK (MHz → Hz 로 환산해 표시).",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            }
+          },
+          "unit": "hertz"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 16,
+        "w": 12,
+        "h": 8
+      },
+      "id": 2,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "DCGM_FI_DEV_SM_CLOCK{instance=~\"$instance\", gpu=~\"$gpu\"} * 1000000",
+          "instant": false,
+          "legendFormat": "GPU {{gpu}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "SM 클럭",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "DCGM_FI_DEV_FB_USED / FB_FREE. 원본 단위는 MiB 이며 Grafana 단위도 mbytes(MiB)로 맞췄다.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            }
+          },
+          "unit": "mbytes"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 24,
+        "w": 12,
+        "h": 8
+      },
+      "id": 18,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "DCGM_FI_DEV_FB_USED{instance=~\"$instance\", gpu=~\"$gpu\"}",
+          "instant": false,
+          "legendFormat": "사용 GPU {{gpu}}",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "DCGM_FI_DEV_FB_FREE{instance=~\"$instance\", gpu=~\"$gpu\"}",
+          "instant": false,
+          "legendFormat": "여유 GPU {{gpu}}",
+          "range": true,
+          "refId": "B"
+        }
+      ],
+      "title": "VRAM 사용·여유",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "FB_USED / (FB_USED + FB_FREE). GPU 메모리 사용이 줄어도 실제 청구 비용이 줄었다는 뜻은 아니다.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            }
+          },
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 24,
+        "w": 12,
+        "h": 8
+      },
+      "id": 19,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "DCGM_FI_DEV_FB_USED{instance=~\"$instance\", gpu=~\"$gpu\"} / (DCGM_FI_DEV_FB_USED{instance=~\"$instance\", gpu=~\"$gpu\"} + DCGM_FI_DEV_FB_FREE{instance=~\"$instance\", gpu=~\"$gpu\"})",
+          "instant": false,
+          "legendFormat": "GPU {{gpu}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "VRAM 사용 비율",
+      "type": "timeseries"
+    },
+    {
+      "gridPos": {
+        "x": 0,
+        "y": 32,
+        "w": 24,
+        "h": 6
+      },
+      "id": 20,
+      "options": {
+        "content": "- **Tensor Core 사용률**(`DCGM_FI_PROF_PIPE_TENSOR_ACTIVE`)은 profiling 지표라 현재 exporter 목록에 없어 패널을 제거했다.\n- **XID 오류**(`DCGM_FI_DEV_XID_ERRORS`)도 현재 확인된 목록에 없다. 없는 값을 정상(0)으로 그리지 않는다.\n- 값이 비어 있거나 DCGM 의 비정상 sentinel(매우 큰 정수)로 오면 정상 관측값이 아니다. 패널에서 이상값은 별도로 확인한다.\n- exporter 설정은 이 대시보드를 채우려고 바꾸지 않는다. GPU 별 식별 라벨(gpu·UUID·modelName·Hostname)은 배포 후 실제 표본으로 확인한다.",
+        "mode": "markdown"
+      },
+      "title": "지원하지 않는 항목",
+      "type": "text"
+    }
+  ]
+}
