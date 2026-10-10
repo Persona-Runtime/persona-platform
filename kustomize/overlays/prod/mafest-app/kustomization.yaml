@@ -1,11 +1,9 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
-# mafest API·웹(M6 내부 배포). **초안이라 비워 둔다** — 실수로 렌더·Sync해도 아무것도 만들어지지 않는다.
-# 켜는 조건(모두 승인 뒤): P7·웹 W 머지, API·웹 linux/amd64 digest 승인(base 자리표시 교체),
-# MAFEST_DATA_BASE_DATE 승인값, mafest-api-db Secret 생성, mafest-app-netpol allow 정책 적용.
-# 켤 때 아래 한 줄을 resources에 넣고 argocd/mafest-app.yaml.draft를 .yaml로 바꾼다. validator가 자리표시 digest·
-# UNCONFIRMED 값이 렌더에 남아 있으면 실패한다.
-#   - ../../../base/mafest-app
+# mafest API·웹(M6 내부 배포). 승인된 이미지 digest·설정을 담은 base를 그대로 연결한다.
+# Argo Application(argocd/mafest-app.yaml)은 자동 Sync가 없다. 사람이 mafest-app-netpol을 먼저 Sync한 뒤
+# 승인 SHA로 수동 Sync한다(argocd/README.md, 런북). 공개 HTTPRoute(M8)는 여기에 넣지 않는다.
 # namespace는 bootstrap/namespaces/mafest-app.yaml이 소유한다.
 namespace: mafest-app
-resources: []
+resources:
+  - ../../../base/mafest-app

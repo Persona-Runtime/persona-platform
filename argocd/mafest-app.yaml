@@ -1,7 +1,6 @@
-# **초안이다(.draft라 Argo·validator 대상이 아니다).** mafest API·웹 워크로드(M6 내부 배포).
-# 켜는 조건: kustomize/overlays/prod/mafest-app/kustomization.yaml 머리 주석의 조건이 모두 승인된 뒤, 그 overlay의
-# resources를 연결하고 이 파일 이름을 mafest-app.yaml로 바꾼다. 선행 조건은 scripts/argo-preflight.sh mafest-app.
-# 정책(mafest-app-netpol)을 먼저 Sync한다 — 이 Application에는 NetworkPolicy가 없다.
+# mafest API·웹 워크로드(M6 내부 배포). 승인 SHA로만 수동 Sync한다.
+# 선행 조건은 scripts/argo-preflight.sh --sha <승인 전체 SHA> mafest-app. 정책(mafest-app-netpol)을 먼저 Sync한다 —
+# 이 Application에는 NetworkPolicy가 없다.
 #
 # syncPolicy·finalizer를 두지 않는다(수동 Sync). 공개 HTTPRoute 전환은 이 Application에 넣지 않는다(M8).
 apiVersion: argoproj.io/v1alpha1

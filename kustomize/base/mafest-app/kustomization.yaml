@@ -2,7 +2,7 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 # mafest-app 워크로드(API·웹)와 API 메트릭 수집. NetworkPolicy는 별도 base(networkpolicy/mafest-app)다 —
 # 워크로드와 정책은 위험도·롤백 절차가 달라 한 Sync에 묶지 않는다.
-# 이미지 digest가 자리표시라 prod overlay는 이 base를 아직 가리키지 않는다(overlays/prod/mafest-app).
+# 승인된 이미지 digest·설정을 담고, prod overlay(overlays/prod/mafest-app)가 이 base를 그대로 연결한다.
 resources:
   - api-deployment.yaml
   - api-service.yaml
