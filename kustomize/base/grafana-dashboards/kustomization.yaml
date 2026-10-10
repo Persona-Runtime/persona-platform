@@ -1,0 +1,28 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Grafana 실험 관측 대시보드 4개. JSON은 persona-ops-lab의 정본에서 생성한 배포 사본이다
+# (scripts/check_dashboards.py --export). 여기서 직접 고치지 않는다 — SOURCE.sha256이 정본 해시이고
+# scripts/validate-grafana-dashboards.sh가 사본과 대조한다.
+#
+# kube-prometheus-stack의 Grafana sidecar(차트 89.2.0 기본값)가 모든 namespace에서 라벨
+# grafana_dashboard: "1" ConfigMap을 읽어 대시보드로 로드한다. 이름 접미사 해시를 붙이지 않아 내용이 바뀌어도
+# 같은 ConfigMap이 갱신된다. Grafana는 emptyDir라 Pod가 다시 뜨면 sidecar가 다시 로드한다.
+generatorOptions:
+  disableNameSuffixHash: true
+  labels:
+    grafana_dashboard: "1"
+    app.kubernetes.io/part-of: persona-platform
+    app.kubernetes.io/component: experiment-dashboards
+configMapGenerator:
+  - name: persona-dashboard-vllm-serving
+    files:
+      - vllm-serving.json
+  - name: persona-dashboard-gpu-dcgm
+    files:
+      - gpu-dcgm.json
+  - name: persona-dashboard-postgres-cnpg
+    files:
+      - postgres-cnpg.json
+  - name: persona-dashboard-mafest-service
+    files:
+      - mafest-service.json
