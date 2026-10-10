@@ -6,7 +6,8 @@ kind: Kustomization
 # - namespace는 bootstrap/namespaces/persona-app.yaml이 소유한다. Namespace를 넣지 않는다.
 # - 이름은 persona 리소스(default-deny·security-headers)와 겹치지 않게 maintenance- 접두사를 쓴다.
 #   persona 정리 전에 이 Application을 먼저 Sync해도 두 Application이 같은 객체를 추적하지 않는다.
-# - 다음 서비스 공개(M8) 때는 HTTPRoute backendRef만 바꾸고 이 overlay를 정리한다.
+# - M8: 공개 Route public-maintenance의 규칙이 mafest 웹·API로 전환됐다(Middleware mafest-*). 준비 중 페이지 Deployment·Service와
+#   internal-maintenance Route는 복구용으로 남긴다. 정리는 공개 전환이 안정된 뒤 별도로 한다.
 namespace: persona-app
 resources:
   - ../../../base/maintenance-page

@@ -25,15 +25,17 @@ repo_dir=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 public_gateway_file=$(mktemp "${TMPDIR:-/tmp}/public-gateway.XXXXXX.yaml")
 maintenance_file=$(mktemp "${TMPDIR:-/tmp}/maintenance-page.XXXXXX.yaml")
 edge_file=$(mktemp "${TMPDIR:-/tmp}/persona-edge.XXXXXX.yaml")
-trap 'rm -f "$public_gateway_file" "$maintenance_file" "$edge_file"' EXIT HUP INT TERM
+mafest_app_file=$(mktemp "${TMPDIR:-/tmp}/mafest-app.XXXXXX.yaml")
+trap 'rm -f "$public_gateway_file" "$maintenance_file" "$edge_file" "$mafest_app_file"' EXIT HUP INT TERM
 
 # 렌더 실패는 그대로 멈춘다(set -e). 빈 렌더를 "선언 없음"으로 읽지 않는다.
 kubectl kustomize "$repo_dir/kustomize/overlays/prod/public-gateway"   > "$public_gateway_file"
 kubectl kustomize "$repo_dir/kustomize/overlays/prod/maintenance-page" > "$maintenance_file"
 kubectl kustomize "$repo_dir/kustomize/overlays/prod/persona-edge"     > "$edge_file"
+kubectl kustomize "$repo_dir/kustomize/overlays/prod/mafest-app"       > "$mafest_app_file"
 
 ruby -ryaml - \
-  "$public_gateway_file" "$maintenance_file" "$edge_file" \
+  "$public_gateway_file" "$maintenance_file" "$edge_file" "$mafest_app_file" \
   "$repo_dir/argocd" \
   "$repo_dir/kustomize/overlays/prod" \
   "$repo_dir/bootstrap/namespaces/persona-app.yaml" <<'RUBY'
@@ -46,7 +48,7 @@ Encoding.default_external = Encoding::UTF_8
 require "json"
 require "digest"
 
-public_gateway_path, maintenance_path, edge_path, argocd_dir, prod_overlays_dir, ns_app_path = ARGV
+public_gateway_path, maintenance_path, edge_path, mafest_app_path, argocd_dir, prod_overlays_dir, ns_app_path = ARGV
 
 def load(path)
   YAML.load_stream(File.read(path)).compact
@@ -141,25 +143,78 @@ maintenance.each do |item|
   raise "[안전] maintenance-page에 Namespace를 넣지 않는다 — bootstrap이 소유한다" if item["kind"] == "Namespace"
   # persona 리소스와 이름이 겹치면 정리 순서 동안 두 Application이 같은 객체를 추적한다.
   name = item.dig("metadata", "name").to_s
-  raise "[안전] maintenance-page 리소스 이름은 maintenance-/-maintenance를 붙인다: #{item["kind"]}/#{name}" unless name.include?("maintenance")
+  # 공개 전환(M8) 뒤 이 overlay는 mafest 공개 Middleware(mafest-*)도 담는다. 그 외에는 maintenance 접두사를 지킨다.
+  mafest_middleware = item["kind"] == "Middleware" && name.start_with?("mafest-")
+  raise "[안전] maintenance-page 리소스 이름은 maintenance-/-maintenance를 붙인다(공개 Middleware mafest-* 제외): #{item["kind"]}/#{name}" unless name.include?("maintenance") || mafest_middleware
   if item["kind"] == "Service"
     raise "[안전] maintenance-page Service는 ClusterIP여야 한다" unless (item.dig("spec", "type") || "ClusterIP") == "ClusterIP"
   end
 end
 
+# --- 공개 Route(M8): 공개 주소는 mafest 웹·API로 간다 ------------------------------------
+# 이름 public-maintenance와 Argo 소유를 유지한 채 규칙만 전환했다(새 Route를 따로 두면 같은 hostname·경로가 겹친다).
 public_route = resource(maintenance, "HTTPRoute", "public-maintenance")
 raise "[안전] public-maintenance는 Gateway persona-app https listener에 붙어야 한다" unless public_route.dig("spec", "parentRefs") == [{ "name" => "persona-app", "sectionName" => "https" }]
 raise "[안전] public-maintenance hostname이 공개 진입 도메인과 다르다" unless public_route.dig("spec", "hostnames") == [PUBLIC_HOST]
 internal_route = resource(maintenance, "HTTPRoute", "internal-maintenance")
 raise "[안전] internal-maintenance는 Gateway persona-app http listener에 붙어야 한다" unless internal_route.dig("spec", "parentRefs") == [{ "name" => "persona-app", "sectionName" => "http" }]
 raise "[안전] internal-maintenance에 hostname을 넣으면 Serve·IP 접근이 끊긴다" if internal_route.dig("spec", "hostnames")
-[public_route, internal_route].each do |route|
-  route.dig("spec", "rules").each do |rule|
-    raise "[안전] #{route.dig("metadata", "name")}: backend는 maintenance-page:8080 하나여야 한다" unless rule["backendRefs"] == [{ "name" => "maintenance-page", "port" => 8080 }]
-  end
+routes = maintenance.select { |i| i["kind"] == "HTTPRoute" }
+public_hosts = routes.select { |r| r.dig("spec", "hostnames") == [PUBLIC_HOST] }
+raise "[안전] #{PUBLIC_HOST}를 받는 HTTPRoute는 하나여야 한다(중복 Route 금지): #{public_hosts.map { |r| r.dig("metadata", "name") }}" unless public_hosts.length == 1
+# 내부 http Route는 복구 경로로 준비 중 페이지에 남긴다.
+internal_route.dig("spec", "rules").each do |rule|
+  raise "[안전] internal-maintenance: backend는 maintenance-page:8080 하나여야 한다" unless rule["backendRefs"] == [{ "name" => "maintenance-page", "port" => 8080 }]
 end
-public_filters = public_route.dig("spec", "rules").flat_map { |rule| (rule["filters"] || []).map { |f| f.dig("extensionRef", "name") } }
-raise "[기준선] public-maintenance는 maintenance-security-headers를 거친다" unless public_filters == ["maintenance-security-headers"]
+
+ALLOWED_PUBLIC_FILTERS = %w[mafest-security-headers mafest-search-rate-limit mafest-detail-rate-limit mafest-general-rate-limit].freeze
+API_BACKEND = [{ "name" => "mafest-api", "namespace" => "mafest-app", "port" => 8000 }].freeze
+WEB_BACKEND = [{ "name" => "mafest-web", "namespace" => "mafest-app", "port" => 8080 }].freeze
+rules = public_route.dig("spec", "rules")
+raise "[안전] 공개 Route 규칙은 검색·상세·/v1·웹 네 개다" unless rules.length == 4
+rules.each do |rule|
+  names = (rule["filters"] || []).map { |f| f.dig("extensionRef", "name") }
+  raise "[안전] 공개 Route 필터는 ExtensionRef Middleware만 쓴다(retry·strip·URL 재작성 금지)" unless (rule["filters"] || []).all? { |f| f["type"] == "ExtensionRef" && f.dig("extensionRef", "kind") == "Middleware" }
+  raise "[안전] 공개 Route 필터는 승인된 mafest Middleware만 쓴다(oauth-forward 등 금지): #{names - ALLOWED_PUBLIC_FILTERS}" unless (names - ALLOWED_PUBLIC_FILTERS).empty?
+  raise "[안전] 공개 Route 규칙마다 보안 헤더를 거친다" unless names.include?("mafest-security-headers")
+end
+search_rule, detail_rule, v1_rule, web_rule = rules
+filter_names = ->(rule) { (rule["filters"] || []).map { |f| f.dig("extensionRef", "name") } }
+raise "[안전] 검색·스트림은 POST PathPrefix /v1/search 한 규칙이다(한 라우터·같은 제한 묶음)" unless search_rule["matches"] == [{ "method" => "POST", "path" => { "type" => "PathPrefix", "value" => "/v1/search" } }]
+raise "[안전] 검색·스트림 규칙은 보안 헤더와 검색 rate-limit만 쓴다 — buffering·retry를 붙이지 않는다(SSE 응답을 모은다)" unless filter_names.call(search_rule) == %w[mafest-security-headers mafest-search-rate-limit]
+raise "[안전] 상품 상세는 GET PathPrefix /v1/products 규칙에 상세 rate-limit이다" unless detail_rule["matches"] == [{ "method" => "GET", "path" => { "type" => "PathPrefix", "value" => "/v1/products" } }] && filter_names.call(detail_rule) == %w[mafest-security-headers mafest-detail-rate-limit]
+raise "[안전] 나머지 /v1은 PathPrefix /v1 규칙에 일반 rate-limit이다" unless v1_rule["matches"] == [{ "path" => { "type" => "PathPrefix", "value" => "/v1" } }] && filter_names.call(v1_rule) == %w[mafest-security-headers mafest-general-rate-limit]
+raise "[안전] 웹은 PathPrefix / 규칙에 일반 rate-limit이다" unless web_rule["matches"] == [{ "path" => { "type" => "PathPrefix", "value" => "/" } }] && filter_names.call(web_rule) == %w[mafest-security-headers mafest-general-rate-limit]
+[search_rule, detail_rule, v1_rule].each { |rule| raise "[안전] /v1 규칙의 backend는 mafest-app의 mafest-api:8000 하나다" unless rule["backendRefs"] == API_BACKEND }
+raise "[안전] 웹 규칙의 backend는 mafest-app의 mafest-web:8080 하나다" unless web_rule["backendRefs"] == WEB_BACKEND
+# /metrics·health·관리 경로는 API에 보내지 않는다. /v1 밖 경로는 웹 규칙으로 끝난다.
+api_paths = [search_rule, detail_rule, v1_rule].flat_map { |rule| rule["matches"].map { |m| m.dig("path", "value") } }
+raise "[안전] API로 가는 경로는 /v1 아래여야 한다: #{api_paths}" unless api_paths.all? { |path| path == "/v1" || path.start_with?("/v1/") }
+
+middlewares = maintenance.select { |i| i["kind"] == "Middleware" }.to_h { |m| [m.dig("metadata", "name"), m["spec"]] }
+ALLOWED_PUBLIC_FILTERS.each { |name| raise "[안전] Middleware #{name} 선언이 없다" unless middlewares.key?(name) }
+middlewares.each do |name, spec|
+  next unless name.start_with?("mafest-")
+  raise "[안전] #{name}: retry·buffering·forwardAuth·stripPrefix는 공개 경로에 연결하지 않는다" if (spec.keys & %w[retry buffering forwardAuth stripPrefix stripPrefixRegex replacePath replacePathRegex]).any?
+  next unless spec.key?("rateLimit")
+  strategy = spec.dig("rateLimit", "sourceCriterion", "ipStrategy")
+  # 접속 IP로 센다. X-Forwarded-For를 믿는 depth>0·excludedIPs는 클라이언트가 보낸 헤더로 우회될 수 있다.
+  raise "[안전] #{name}: rate-limit은 접속 IP(ipStrategy depth 0)로 센다 — X-Forwarded-For를 신뢰하지 않는다" unless strategy == { "depth" => 0 }
+end
+expected_limits = { "mafest-search-rate-limit" => [6, "1m", 3], "mafest-detail-rate-limit" => [30, "1m", nil], "mafest-general-rate-limit" => [20, "1s", 50] }
+expected_limits.each do |name, (average, period, burst)|
+  limit = middlewares.dig(name, "rateLimit")
+  raise "[안전] #{name}: 승인 계약은 평균 #{average}/#{period}다(실제 #{limit.inspect})" unless limit && limit["average"] == average && limit["period"] == period
+  raise "[안전] #{name}: burst는 #{burst}다" if burst && limit["burst"] != burst
+end
+
+# ReferenceGrant는 mafest-app 렌더에서 오고, 대상은 Service 두 개로 한정한다.
+mafest_app = load(mafest_app_path)
+grant = resource(mafest_app, "ReferenceGrant", "persona-app-httproute-to-mafest")
+raise "[안전] ReferenceGrant는 mafest-app namespace에 있어야 한다" unless grant.dig("metadata", "namespace") == "mafest-app"
+raise "[안전] ReferenceGrant from은 persona-app의 HTTPRoute 하나다" unless grant.dig("spec", "from") == [{ "group" => "gateway.networking.k8s.io", "kind" => "HTTPRoute", "namespace" => "persona-app" }]
+raise "[안전] ReferenceGrant to는 Service mafest-api·mafest-web 두 개뿐이다" unless grant.dig("spec", "to") == [{ "group" => "", "kind" => "Service", "name" => "mafest-api" }, { "group" => "", "kind" => "Service", "name" => "mafest-web" }]
+raise "[안전] mafest-app 렌더에 ReferenceGrant가 하나여야 한다" unless mafest_app.count { |i| i["kind"] == "ReferenceGrant" } == 1
 
 deployment = resource(maintenance, "Deployment", "maintenance-page")
 pod = deployment.dig("spec", "template", "spec")

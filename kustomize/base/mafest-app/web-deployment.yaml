@@ -1,10 +1,9 @@
 # mafest 웹(정적 번들을 내보내는 비루트 nginx). 이 컨테이너는 /v1을 프록시하지 않고 404를 돌려준다
 # (mafest-web nginx/default.conf). 브라우저는 같은 origin의 상대 경로 /v1을 부르고, /v1 라우팅은 Traefik
-# HTTPRoute(M8 초안, kustomize/base/mafest-public)의 책임이다. API 주소는 빌드 때 고정돼(VITE_API_MODE=real)
+# 공개 HTTPRoute(kustomize/overlays/prod/maintenance-page의 public-maintenance)의 책임이다. API 주소는 빌드 때 고정돼(VITE_API_MODE=real)
 # 런타임 설정이 없다.
 #
-# **초안이다.** r9 스트림·제안·오류 처리(웹 W)를 담은 승인 이미지 digest가 정해지기 전이라 prod 렌더에
-# 들어가지 않는다(overlay resources 비어 있음). 기존 persona-web 이미지를 재사용하지 않는다.
+# 승인된 이미지 digest로 prod overlay에 연결돼 있다. 기존 persona-web 이미지를 재사용하지 않는다.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
