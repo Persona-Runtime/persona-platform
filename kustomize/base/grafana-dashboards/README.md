@@ -16,7 +16,13 @@
 - 검사: `sh scripts/validate-grafana-dashboards.sh`, 음성 테스트 `sh scripts/test-grafana-dashboards.sh`. 통과는 Grafana 로딩이나 쿼리 결과의 증거가 아니다 — 배포 후 확인 항목이다.
 
 ## 배포 요약 (사람이 실행, 상세는 로컬 런북 `runbooks/grafana-dashboards-deploy.md`)
-1. 승인 머지 SHA를 정한다(40자, `origin/develop` 조상).
-2. 이 Application은 **다중 source**다. Sync 요청에서 **차트 source는 `89.2.0` 그대로 두고 values(Git) source만 승인 SHA를 지정**한다. 앱 전체에 Git SHA 하나를 넘기지 않는다.
-3. Sync 뒤 Grafana에서 4개 대시보드가 보이는지, Prometheus Targets의 실제 `job`/`namespace`/`pod`/`gpu`/`model_name` 라벨이 변수에 잡히는지 확인한다.
-4. 복구: 이전 승인 SHA의 values source로 다시 Sync하거나, 대시보드가 문제면 `kubectl -n monitoring delete configmap -l app.kubernetes.io/component=experiment-dashboards`(Grafana sidecar가 대시보드를 내린다).
+1. 승인 머지 SHA(40자, `origin/develop` 조상)를 정하고, 변경 전 live Application과 Grafana·Prometheus Pod 상태를 기록한다.
+2. **Application 선언을 먼저 반영한다.** `operation.sync`의 source 지정은 이번 Sync 한 번의 override일 뿐 영구 변경이 아니다.
+   승인 SHA의 `argocd/monitoring-stack.yaml`을 `kubectl diff`(기대: `spec.sources[1].path` 추가뿐) → `kubectl apply` 하고,
+   live `spec.sources[1].path`가 `kustomize/overlays/prod/grafana-dashboards`인지 확인한다.
+3. **Sync는 새 ConfigMap 4개로 제한한다.** monitoring-stack은 Helm 리소스 전체를 소유하므로 전체 Sync는 values·라이브 drift까지 적용할 수 있다.
+   `operation.sync.resources`에 ConfigMap 4개(`persona-dashboard-*`)만 넣고 `revisions: ["89.2.0","<승인 SHA>"]`로 차트 revision을 고정한다.
+   요청 전에 OutOfSync 리소스 목록을 보고(ConfigMap 4개 외의 drift는 이번 범위가 아님) 요청 뒤 `syncResult.resources`가 정확히 그 4개인지 확인한다.
+4. Sync 뒤 Grafana에서 4개 대시보드가 보이는지, Prometheus Targets의 실제 `job`/`namespace`/`pod`/`gpu`/`model_name` 라벨이 변수에 잡히는지 확인한다.
+5. **복구(최초 배포 포함)**: 이전 SHA로 Sync만 하면 안 된다 — 부모 커밋에는 새 path가 없어 렌더가 실패하고 ConfigMap도 삭제되지 않는다(prune 없음).
+   변경 전에 기록한 Application 선언(`spec.sources[1]`에 path 없음)을 복원하고, 새 ConfigMap 4개를 이름으로 명시해 삭제한다.

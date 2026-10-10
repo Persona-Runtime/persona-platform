@@ -664,7 +664,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "ok 가 아닌 호출 / 전체 호출. 호출이 없으면(분모 0) 값이 없다 — 0% 로 채우지 않는다.",
+      "description": "ok 가 아닌 호출 / 전체 호출. 앱이 라벨 조합을 호출 시점에 만들어 첫 오류 전에는 오류 시계열이 없으므로, **전체 호출 시계열이 있는 feature 에 한해** 없는 오류 분자를 0 으로 보완한다. 호출이 없거나 수집이 안 되면(분모 없음·0) 값이 없다 — 0% 로 채우지 않는다.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -712,7 +712,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum by (feature) (rate(mafest_llm_calls_total{job=~\"$job\", result!=\"ok\"}[$__rate_interval])) / sum by (feature) (rate(mafest_llm_calls_total{job=~\"$job\"}[$__rate_interval]))",
+          "expr": "(sum by (feature) (rate(mafest_llm_calls_total{job=~\"$job\", result!=\"ok\"}[$__rate_interval])) or (0 * sum by (feature) (rate(mafest_llm_calls_total{job=~\"$job\"}[$__rate_interval])))) / sum by (feature) (rate(mafest_llm_calls_total{job=~\"$job\"}[$__rate_interval]))",
           "instant": false,
           "legendFormat": "{{feature}}",
           "range": true,

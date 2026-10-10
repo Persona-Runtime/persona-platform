@@ -506,7 +506,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "",
+      "description": "cnpg_pg_postmaster_start_time 의 최댓값이다. **승격(failover) 증거가 아니다**: Replica 가 재시작해도 값이 바뀌고, 재시작 없이 승격되면 바뀌지 않는다. 승격은 Primary/Replica 역할 (cnpg_pg_replication_in_recovery)과 rw 대상 변경으로 확인한다.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -570,7 +570,7 @@
           "refId": "A"
         }
       ],
-      "title": "Last failover",
+      "title": "선택한 인스턴스의 최근 서버 시작 시각",
       "transformations": [],
       "type": "stat"
     },

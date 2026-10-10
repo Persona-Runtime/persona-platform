@@ -63,7 +63,7 @@
           "type": "prometheus",
           "uid": "prometheus"
         },
-        "definition": "label_values(vllm:num_requests_running, job)",
+        "definition": "label_values(up{namespace=\"persona-inference\", pod=~\"persona-vllm-.*\"}, job)",
         "hide": 0,
         "includeAll": true,
         "label": "수집 대상(job)",
@@ -71,7 +71,7 @@
         "name": "job",
         "options": [],
         "query": {
-          "query": "label_values(vllm:num_requests_running, job)",
+          "query": "label_values(up{namespace=\"persona-inference\", pod=~\"persona-vllm-.*\"}, job)",
           "refId": "job-query"
         },
         "refresh": 2,
@@ -112,7 +112,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "Prometheus 가 vLLM 대상을 긁은 마지막 결과(up). 대상이 없으면 값이 없다(0 으로 채우지 않는다).",
+      "description": "Prometheus 가 vLLM 대상(persona-inference 네임스페이스의 persona-vllm Pod)을 긁은 마지막 결과(up). vLLM 지표가 사라지는 장애에서도 관측된다. 대상이 없으면 값이 없다(0 으로 채우지 않는다).",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -172,7 +172,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "min(up{job=~\"$job\"})",
+          "expr": "min(up{namespace=\"persona-inference\", pod=~\"persona-vllm-.*\", job=~\"$job\"})",
           "instant": true,
           "legendFormat": "",
           "range": false,
