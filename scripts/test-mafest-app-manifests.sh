@@ -72,6 +72,15 @@ cases = [
   ["API 승인 외 digest", ->(r) { mutate_yaml(File.join(r, API), C0 + ["image"], "ghcr.io/persona-runtime/mafest-app@sha256:" + "a" * 64) }, "승인 digest가 아니다"],
   ["웹 자리표시 digest", ->(r) { mutate_yaml(File.join(r, WEB), C0 + ["image"], "ghcr.io/persona-runtime/mafest-web@sha256:" + "0" * 64) }, "승인 digest가 아니다"],
   ["Application에 자동 Sync", ->(r) { mutate_yaml(File.join(r, "argocd/mafest-app.yaml"), ["spec", "syncPolicy"], { "automated" => {} }) }, "자동 Sync를 두지 않는다"],
+  ["overlay가 API 이미지 digest를 바꿈", ->(r) {
+     path = File.join(r, OVERLAY)
+     File.write(path, File.read(path) + "images:\n  - name: ghcr.io/persona-runtime/mafest-app\n    digest: sha256:" + "b" * 64 + "\n")
+   }, "(prod) API 이미지가 승인 digest가 아니다"],
+  ["overlay가 생성 시한을 바꿈", ->(r) {
+     path = File.join(r, OVERLAY)
+     patch = "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: mafest-api\nspec:\n  template:\n    spec:\n      containers:\n        - name: api\n          env:\n            - name: MAFEST_LLM_TIMEOUT_S\n              value: \"20\"\n"
+     File.write(path, File.read(path) + "patches:\n  - patch: |-\n" + patch.lines.map { |l| "      " + l }.join)
+   }, "(prod) API 환경변수 MAFEST_LLM_TIMEOUT_S는"],
   ["mafest-public을 prod에 연결", ->(r) {
      # 렌더가 되도록 빈 kustomization을 만들어 연결 자체만 검출 대상으로 남긴다.
      File.write(File.join(r, "kustomize/base/mafest-public/kustomization.yaml"), "apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources: []\n")
