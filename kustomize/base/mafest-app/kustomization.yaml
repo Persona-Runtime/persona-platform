@@ -11,3 +11,4 @@ resources:
   - web-deployment.yaml
   - web-service.yaml
   - web-pdb.yaml
+  - referencegrant-public.yaml

@@ -23,7 +23,7 @@ API = "kustomize/base/mafest-app/api-deployment.yaml"
 WEB = "kustomize/base/mafest-app/web-deployment.yaml"
 PDB = "kustomize/base/mafest-app/api-pdb.yaml"
 OVERLAY = "kustomize/overlays/prod/mafest-app/kustomization.yaml"
-ROUTE = "kustomize/base/mafest-public/route.yaml.draft"
+GRANT = "kustomize/base/mafest-app/referencegrant-public.yaml"
 POD = ["spec", "template", "spec"]
 C0 = POD + ["containers", 0]
 
@@ -81,21 +81,10 @@ cases = [
      patch = "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: mafest-api\nspec:\n  template:\n    spec:\n      containers:\n        - name: api\n          env:\n            - name: MAFEST_LLM_TIMEOUT_S\n              value: \"20\"\n"
      File.write(path, File.read(path) + "patches:\n  - patch: |-\n" + patch.lines.map { |l| "      " + l }.join)
    }, "(prod) API 환경변수 MAFEST_LLM_TIMEOUT_S는"],
-  ["mafest-public을 prod에 연결", ->(r) {
-     # 렌더가 되도록 빈 kustomization을 만들어 연결 자체만 검출 대상으로 남긴다.
+  ["옛 공개 초안 경로 연결", ->(r) {
+     FileUtils.mkdir_p(File.join(r, "kustomize/base/mafest-public"))
      File.write(File.join(r, "kustomize/base/mafest-public/kustomization.yaml"), "apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources: []\n")
-     path = File.join(r, OVERLAY)
-     File.write(path, File.read(path) + "  - ../../../base/mafest-public\n")
-   }, "M8 공개 라우트"],
-  ["PDB minAvailable 2", ->(r) { mutate_yaml(File.join(r, PDB), ["spec", "minAvailable"], 2) }, "PDB는 minAvailable 1"],
-  ["웹에 persona-web 이미지", ->(r) { mutate_yaml(File.join(r, WEB), C0 + ["image"], "ghcr.io/persona-runtime/persona-web@sha256:" + "a" * 64) }, "persona-web 이미지를 재사용하지 않는다"],
-  ["스트림 규칙에 body-limit", ->(r) {
-     path = File.join(r, ROUTE)
-     docs = YAML.load_stream(File.read(path)).compact
-     rule = docs.find { |d| d["kind"] == "HTTPRoute" }["spec"]["rules"].first
-     rule["filters"] << { "type" => "ExtensionRef", "extensionRef" => { "group" => "traefik.io", "kind" => "Middleware", "name" => "mafest-body-limit" } }
-     File.write(path, docs.map { |d| YAML.dump(d) }.join)
-   }, "스트림 규칙에 버퍼링 Middleware"],
+   }, "옛 공개 라우트 초안"],
 ]
 
 cases.each do |label, mutate, message|

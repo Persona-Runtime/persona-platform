@@ -1,12 +1,27 @@
-# 공개(https, 인터넷) 경로와 내부(http, Tailnet/Serve) 경로 모두 준비 중 페이지로 보낸다.
-# 경로 분기는 두지 않는다 — /v1 같은 API 경로도 503 페이지를 받는다.
+# 공개(https) 주소 app.personaruntime.xyz를 mafest 웹·API로 보낸다. 로그인 없음 — oauth-forward·옛 persona API 경로·strip·retry를
+# 연결하지 않는다. 이름 public-maintenance와 Argo 소유(maintenance-page Application)를 유지한 채 규칙만 전환한다:
+# 새 Route를 따로 추가하지 않아 같은 hostname·경로를 받는 Route가 겹치지 않는다. 복구는 이 규칙을 준비 중 페이지
+# backend(maintenance-page:8080) 하나로 되돌린다(이전 승인 SHA의 같은 파일, docs 38 런북).
+#
+# 경로 설계:
+#   - /v1만 API로 보낸다. /metrics·/healthz·/readyz·/answer·/openapi.json은 /v1 밖이라 웹 nginx(404·웹 healthz)에서 끝난다.
+#   - 검색과 스트림은 POST PathPrefix /v1/search 한 규칙이다. 두 경로를 한 라우터로 묶어 같은 제한 묶음(분당 6·burst 3)을
+#     쓰기 위해서다. 이 규칙에는 buffering(body-limit)·retry를 붙이지 않는다 — buffering은 SSE 응답을 끝까지 모은다.
+#     그래서 이 경로에는 프록시 본문 크기 제한이 없고, 질문 길이(1000자)는 API가 검사한다.
+#   - Traefik 응답 시한: 앱 전체 요청 시한은 90초이고 스트림은 10초마다 ping을 보낸다. bootstrap/traefik/values.yaml에는
+#     respondingTimeouts 선언이 없어 차트·Traefik 기본값을 쓴다. 이 값이 스트림을 먼저 끊지 않는지는 확인하지 않았다 —
+#     배포 뒤 런북(38)에서 실측한다. 이 선언은 values를 바꾸지 않는다.
+#   - 우선순위: Traefik Gateway provider는 rule 순서가 아니라 매치 모양으로 router priority를 계산한다
+#     (Exact 100000, method +1000, PathPrefix 10000+길이×100). 더 긴 PathPrefix가 먼저 맞는다.
+#   - backend namespace(mafest-app)는 ReferenceGrant(kustomize/base/mafest-app/referencegrant-public.yaml)가 Service
+#     mafest-api·mafest-web 두 개만 허락한다. mafest-app을 먼저 Sync해 그 grant를 만든 뒤 이 Route를 Sync한다.
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
   name: public-maintenance
   labels:
     app.kubernetes.io/part-of: persona-platform
-    app.kubernetes.io/component: maintenance
+    app.kubernetes.io/component: application
   annotations:
     argocd.argoproj.io/sync-wave: "1"
 spec:
@@ -16,6 +31,69 @@ spec:
   hostnames:
     - app.personaruntime.xyz
   rules:
+    # 검색·스트림 — 같은 제한 묶음. buffering·retry 없음.
+    - matches:
+        - method: POST
+          path:
+            type: PathPrefix
+            value: /v1/search
+      filters:
+        - type: ExtensionRef
+          extensionRef:
+            group: traefik.io
+            kind: Middleware
+            name: mafest-security-headers
+        - type: ExtensionRef
+          extensionRef:
+            group: traefik.io
+            kind: Middleware
+            name: mafest-search-rate-limit
+      backendRefs:
+        - name: mafest-api
+          namespace: mafest-app
+          port: 8000
+    # 상품 상세 — 분당 30.
+    - matches:
+        - method: GET
+          path:
+            type: PathPrefix
+            value: /v1/products
+      filters:
+        - type: ExtensionRef
+          extensionRef:
+            group: traefik.io
+            kind: Middleware
+            name: mafest-security-headers
+        - type: ExtensionRef
+          extensionRef:
+            group: traefik.io
+            kind: Middleware
+            name: mafest-detail-rate-limit
+      backendRefs:
+        - name: mafest-api
+          namespace: mafest-app
+          port: 8000
+    # 나머지 /v1(/v1/meta 등) — 일반 제한.
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /v1
+      filters:
+        - type: ExtensionRef
+          extensionRef:
+            group: traefik.io
+            kind: Middleware
+            name: mafest-security-headers
+        - type: ExtensionRef
+          extensionRef:
+            group: traefik.io
+            kind: Middleware
+            name: mafest-general-rate-limit
+      backendRefs:
+        - name: mafest-api
+          namespace: mafest-app
+          port: 8000
+    # 웹(정적 번들) — 나머지 모든 경로.
     - matches:
         - path:
             type: PathPrefix
@@ -25,12 +103,18 @@ spec:
           extensionRef:
             group: traefik.io
             kind: Middleware
-            name: maintenance-security-headers
+            name: mafest-security-headers
+        - type: ExtensionRef
+          extensionRef:
+            group: traefik.io
+            kind: Middleware
+            name: mafest-general-rate-limit
       backendRefs:
-        - name: maintenance-page
+        - name: mafest-web
+          namespace: mafest-app
           port: 8080
 ---
-# http listener에는 hostname이 없다(Serve·IP 접근). 이 Route에도 hostname을 넣지 않는다.
+# http listener에는 hostname이 없다(Serve·IP 접근). 이 Route에도 hostname을 넣지 않는다. 준비 중 페이지 복구 경로로 남긴다.
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:

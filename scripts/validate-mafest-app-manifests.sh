@@ -8,7 +8,7 @@ set -eu
 # 승인값은 아래 APPROVED_* 상수다. 릴리스를 새로 승인할 때 사람이 선언과 이 상수를 함께 바꾼다(전체 허용으로 풀지 않는다).
 #   - base 렌더: 배포될 내용이다. replica·배치·롤링·PDB·probe·보안·Secret·환경변수 값·종료 설정을 본다.
 #   - prod 렌더·Argo: base와 같은 내용이 연결되고, 자리표시 digest·UNCONFIRMED 값이 없으며, 활성 Application 두 개가
-#     자동 Sync·finalizer 없이 있다. 공개 진입(준비 중 페이지·M8 HTTPRoute)으로 가는 선언은 여기서 만들지 않는다.
+#     자동 Sync·finalizer 없이 있다. 공개 Route(maintenance-page overlay의 public-maintenance)는 여기서 만들지 않고, 쓰는 ReferenceGrant만 둔다.
 #
 # 메시지 태그
 #   [안전]   어긴 채로 배포하면 데이터·권한 경계가 무너지거나 서비스가 끊긴다.
@@ -204,28 +204,26 @@ raise "[안전] prod 렌더가 base와 다르다 — overlay는 base를 그대�
   raise "[안전] #{path}: destination namespace는 mafest-app이다" unless app.dig("spec", "destination", "namespace") == "mafest-app"
 end
 
-# --- M8 공개 라우트 초안 ---------------------------------------------------------
-# 초안은 어느 kustomization·Argo Application에도 연결되지 않아야 한다(공개 전환은 M8). 스트림 규칙에는 버퍼링
-# Middleware(body-limit)·retry를 붙이지 않는다 — 문장 단위 이벤트가 모였다가 나가거나 조회·생성이 두 번 돈다.
-route_draft = File.join(repo, "kustomize/base/mafest-public/route.yaml.draft")
-raise "[안전] M8 공개 라우트 초안(kustomize/base/mafest-public/route.yaml.draft)이 없다" unless File.exist?(route_draft)
+# --- 공개 Route(M8) -------------------------------------------------------------
+# 공개 Route는 maintenance-page overlay의 public-maintenance가 맡는다(규칙·Middleware 검사는 validate-public-gateway-
+# manifests.sh). 여기서는 mafest-app 쪽 몫만 본다: 옛 초안 경로(mafest-public)를 어디에도 연결하지 않고, 공개 Route가 쓸
+# ReferenceGrant가 Service 두 개로 한정돼 mafest-app 렌더에 있다. Route·Middleware를 mafest-app에 섞지 않는다.
+raise "[안전] 옛 공개 라우트 초안(kustomize/base/mafest-public)이 남아 있다 — 공개 Route는 maintenance-page overlay 하나다" if File.exist?(File.join(repo, "kustomize/base/mafest-public"))
 Dir.glob(File.join(repo, "kustomize/**/kustomization.yaml")).each do |path|
   refs = (YAML.load_file(path) || {}).values_at("resources", "components").flatten.compact
-  raise "[안전] #{path.sub(repo + "/", "")}가 M8 공개 라우트 초안을 렌더에 넣는다 — M6에서 공개 경로를 바꾸지 않는다" if refs.any? { |ref| ref.to_s.include?("mafest-public") }
+  raise "[안전] #{path.sub(repo + "/", "")}가 옛 공개 라우트 초안 경로(mafest-public)를 연결한다" if refs.any? { |ref| ref.to_s.include?("mafest-public") }
 end
 Dir.glob(File.join(repo, "argocd/*.yaml")).each do |path|
-  raise "[안전] #{path.sub(repo + "/", "")}가 M8 공개 라우트 초안을 Sync 대상으로 둔다" if YAML.load_file(path).dig("spec", "source", "path").to_s.include?("mafest-public")
+  raise "[안전] #{path.sub(repo + "/", "")}가 옛 공개 라우트 초안 경로(mafest-public)를 Sync 대상으로 둔다" if YAML.load_file(path).dig("spec", "source", "path").to_s.include?("mafest-public")
 end
-route_docs = YAML.load_stream(File.read(route_draft)).compact
-middlewares = route_docs.select { |d| d["kind"] == "Middleware" }.to_h { |d| [d.dig("metadata", "name"), d["spec"]] }
-raise "[안전] 공개 라우트 초안에 retry Middleware를 두지 않는다" if middlewares.values.any? { |spec| spec.key?("retry") }
-route = route_docs.find { |d| d["kind"] == "HTTPRoute" } || raise("[안전] 공개 라우트 초안에 HTTPRoute가 없다")
-stream_rule = (route.dig("spec", "rules") || []).find do |rule|
-  (rule["matches"] || []).any? { |m| m.dig("path", "value") == "/v1/search/stream" }
-end || raise("[안전] 공개 라우트 초안에 /v1/search/stream 규칙이 없다")
-stream_mw = (stream_rule["filters"] || []).map { |f| f.dig("extensionRef", "name") }
-raise "[안전] 스트림 규칙에 버퍼링 Middleware를 붙이지 않는다" if stream_mw.any? { |name| middlewares.dig(name)&.key?("buffering") }
-raise "[안전] 스트림 규칙은 POST Exact /v1/search/stream 하나로 고정한다" unless stream_rule["matches"] == [{ "method" => "POST", "path" => { "type" => "Exact", "value" => "/v1/search/stream" } }]
+[["base", base], ["prod", prod]].each do |label, docs|
+  raise "[안전] (#{label}) mafest-app에 HTTPRoute·Middleware를 섞지 않는다 — 공개 Route는 persona-app의 maintenance-page가 가진다" if docs.any? { |d| %w[HTTPRoute Middleware].include?(d["kind"]) }
+  grants = docs.select { |d| d["kind"] == "ReferenceGrant" }
+  raise "[안전] (#{label}) ReferenceGrant는 하나여야 한다" unless grants.length == 1
+  grant = grants.first
+  raise "[안전] (#{label}) ReferenceGrant는 Service mafest-api·mafest-web 두 개만 허락한다" unless grant.dig("spec", "to") == [{ "group" => "", "kind" => "Service", "name" => "mafest-api" }, { "group" => "", "kind" => "Service", "name" => "mafest-web" }]
+  raise "[안전] (#{label}) ReferenceGrant from은 persona-app의 HTTPRoute 하나다" unless grant.dig("spec", "from") == [{ "group" => "gateway.networking.k8s.io", "kind" => "HTTPRoute", "namespace" => "persona-app" }]
+end
 
-puts "mafest-app(API·웹 선언 base·prod 렌더·Argo Application·M8 라우트 초안) 검사 통과"
+puts "mafest-app(API·웹 선언 base·prod 렌더·Argo Application·공개 Route용 ReferenceGrant) 검사 통과"
 RUBY
