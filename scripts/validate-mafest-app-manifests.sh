@@ -4,11 +4,11 @@ set -eu
 
 # mafest API·웹(M6 내부 배포) 선언이 문서 35·26D와 이 레포 규칙을 지키는지 로컬에서만 검사한다. 홈 API를 호출하지 않는다.
 #
-# 워크로드 base(kustomize/base/mafest-app)는 이미지 digest·기준일이 아직 자리표시라 prod overlay가 가리키지 않는다.
-# 그래서 두 가지를 함께 본다.
-#   - base 렌더: 켜면 그대로 배포될 내용이다. replica·worker 1·배치·롤링·PDB·probe·보안·Secret·환경변수·DB 계정을 본다.
-#   - prod 렌더·Argo: 자리표시 digest·UNCONFIRMED 값이 렌더에 없고, mafest-app Application이 초안(.draft)일 때
-#     overlay가 비어 있어야 한다. 공개 진입(준비 중 페이지)으로 가는 선언은 여기서 만들지 않는다.
+# 워크로드 base(kustomize/base/mafest-app)는 승인된 이미지 digest·설정을 담고, prod overlay가 base를 그대로 연결한다.
+# 승인값은 아래 APPROVED_* 상수다. 릴리스를 새로 승인할 때 사람이 선언과 이 상수를 함께 바꾼다(전체 허용으로 풀지 않는다).
+#   - base 렌더: 배포될 내용이다. replica·배치·롤링·PDB·probe·보안·Secret·환경변수 값·종료 설정을 본다.
+#   - prod 렌더·Argo: base와 같은 내용이 연결되고, 자리표시 digest·UNCONFIRMED 값이 없으며, 활성 Application 두 개가
+#     자동 Sync·finalizer 없이 있다. 공개 진입(준비 중 페이지·M8 HTTPRoute)으로 가는 선언은 여기서 만들지 않는다.
 #
 # 메시지 태그
 #   [안전]   어긴 채로 배포하면 데이터·권한 경계가 무너지거나 서비스가 끊긴다.
@@ -40,6 +40,16 @@ base = load_stream.call(File.join(work, "base.yaml"))
 prod = load_stream.call(File.join(work, "prod.yaml"))
 
 PLACEHOLDER = /@sha256:0{64}\b/
+# 승인된 이미지(feedback 승인 입력). 릴리스마다 사람이 갱신한다.
+APPROVED_API_IMAGE = "ghcr.io/persona-runtime/mafest-app@sha256:b84372f3ea8da7dcb277ed869e46f264be6bf1d0d158faf5dedf4b497ab5c22c"
+APPROVED_WEB_IMAGE = "ghcr.io/persona-runtime/mafest-web@sha256:7ab6701ab7bb9cfe175edcd2669453a87c0f613e74b12f14d0757ee29c4c43a2"
+# 이미지 CMD에 --timeout-graceful-shutdown만 더한 승인 실행 형태. 이 외의 args·command는 막는다.
+APPROVED_API_ARGS = %w[
+  uvicorn mafest.serving.api.app:app --host 0.0.0.0 --port 8000 --workers 1
+  --timeout-keep-alive 65 --timeout-graceful-shutdown 100
+].freeze
+# 종료 유예(초): preStop 10 + graceful 100 + 여유 10. 전체 요청 시한 90초보다 길어야 한다.
+APPROVED_GRACE_S = 120
 HOME_WORKER_AFFINITY = {
   "requiredDuringSchedulingIgnoredDuringExecution" => {
     "nodeSelectorTerms" => [
@@ -93,15 +103,19 @@ raise "[안전] API 분산: hostname·maxSkew 1·DoNotSchedule·nodeTaintsPolicy
 raise "[안전] API 분산: matchLabelKeys pod-template-hash가 있어야 롤아웃 뒤 새 Pod끼리 나뉜다" unless s["matchLabelKeys"] == ["pod-template-hash"]
 raise "[안전] API 분산: minDomains를 두지 않는다 — 워커 하나만 남으면 두 번째 Pod가 늘 Pending이다" if s.key?("minDomains")
 raise "[안전] API 분산 selector가 API Pod만 골라야 한다" unless s.dig("labelSelector", "matchLabels") == { "app.kubernetes.io/name" => "mafest-api" }
-raise "[안전] API 종료 유예는 전체 요청 30초보다 길어야 한다" unless api_spec["terminationGracePeriodSeconds"].to_i > 30
+raise "[안전] API 종료 유예는 #{APPROVED_GRACE_S}초다(preStop 10 + graceful 100 + 여유, 전체 요청 90초보다 길다)" unless api_spec["terminationGracePeriodSeconds"] == APPROVED_GRACE_S
 raise "[안전] API 이미지 pull Secret은 mafest-ghcr다" unless api_spec["imagePullSecrets"] == [{ "name" => "mafest-ghcr" }]
 
 containers = api_spec["containers"] || []
 raise "[안전] API Pod 컨테이너는 하나다" unless containers.length == 1
 c = containers.first
 raise "[안전] API 이미지는 mafest-app digest 고정이다(태그 금지)" unless c["image"].to_s =~ %r{\Aghcr\.io/persona-runtime/mafest-app@sha256:[0-9a-f]{64}\z}
+raise "[안전] API 이미지가 승인 digest가 아니다(실제 #{c["image"]})" unless c["image"] == APPROVED_API_IMAGE
 raise "[안전] API 컨테이너 포트는 http 8000 하나다(이미지 CMD --port 8000)" unless c["ports"] == [{ "name" => "http", "containerPort" => 8000, "protocol" => "TCP" }]
-raise "[안전] API에 command·args를 덮어쓰지 않는다 — Uvicorn --workers 1은 이미지 CMD가 정한다" if c.key?("command") || c.key?("args")
+raise "[안전] API에 command를 덮어쓰지 않는다 — 승인 args(이미지 CMD + graceful 100초)만 쓴다" if c.key?("command")
+raise "[안전] API args는 승인 실행 형태와 같아야 한다(Uvicorn --workers 1·--timeout-graceful-shutdown 100)" unless c["args"] == APPROVED_API_ARGS
+pre_stop = c.dig("lifecycle", "preStop", "exec", "command")
+raise "[안전] API preStop은 exec sleep 10이어야 한다(엔드포인트 제거 대기)" unless pre_stop == ["sleep", "10"]
 check_pod_security(api_spec, c, "API", 10001)
 
 env = env_map(c)
@@ -110,18 +124,24 @@ expected_values = {
   "MAFEST_ENABLE_VECTOR" => "0",
   "MAFEST_LLM_BASE_URL" => "http://persona-vllm.persona-inference.svc.cluster.local:8000",
   "MAFEST_LLM_MODEL" => "Qwen/Qwen3-4B-Instruct-2507",
-  "MAFEST_LLM_TIMEOUT_S" => "20",
+  "MAFEST_LLM_TIMEOUT_S" => "60",
+  "MAFEST_REQUEST_TIMEOUT_S" => "90",
+  "MAFEST_READINESS_MODE" => "process",
+  "MAFEST_STREAM_PING_S" => "10",
+  "MAFEST_DEPENDENCY_CHECK_INTERVAL_S" => "15",
+  "MAFEST_DEPENDENCY_CHECK_TIMEOUT_S" => "1",
+  "MAFEST_SEARCH_WORKERS" => "8",
   "MAFEST_DB_POOL_MAX" => "4",
   "MAFEST_GRAPH_POOL_MAX" => "2",
+  "MAFEST_DATA_BASE_DATE" => "2026-08-21",
 }
 expected_values.each do |name, value|
   raise "[안전] API 환경변수 #{name}는 #{value.inspect}여야 한다(실제 #{env.dig(name, "value").inspect})" unless env.dig(name, "value") == value
 end
 # mafest Settings.from_env()가 읽는 이름만 쓴다. 지어낸 이름은 조용히 무시돼 기본값으로 돈다.
-allowed = expected_values.keys + %w[MAFEST_DATA_BASE_DATE PGURL]
+allowed = expected_values.keys + %w[PGURL]
 unknown = env.keys - allowed
 raise "[안전] API에 Settings가 읽지 않는 환경변수가 있다: #{unknown.join(", ")}" unless unknown.empty?
-raise "[안전] API는 MAFEST_DATA_BASE_DATE를 명시한다(승인 기준일)" unless env.key?("MAFEST_DATA_BASE_DATE")
 pgurl = env["PGURL"] || raise("[안전] API에 PGURL이 없다")
 raise "[안전] API DSN은 mafest-app Secret mafest-api-db의 PGURL(runtime 계정)이다" unless pgurl.dig("valueFrom", "secretKeyRef") == { "name" => "mafest-api-db", "key" => "PGURL" }
 raise "[안전] API에 owner용 mafest-migrator를 연결하지 않는다" if YAML.dump(api).include?("mafest-migrator")
@@ -157,6 +177,7 @@ raise "[안전] 웹은 두 홈 워커에만 둔다(required nodeAffinity)" unles
 raise "[안전] 웹 분산은 preferred podAntiAffinity다(required면 워커 하나일 때 재배치가 막힌다)" unless web_spec.dig("affinity", "podAntiAffinity", "preferredDuringSchedulingIgnoredDuringExecution") && !web_spec.dig("affinity", "podAntiAffinity", "requiredDuringSchedulingIgnoredDuringExecution")
 wc = (web_spec["containers"] || []).first || raise("[안전] 웹 컨테이너가 없다")
 raise "[안전] 웹 이미지는 mafest-web digest 고정이다 — persona-web 이미지를 재사용하지 않는다" unless wc["image"].to_s =~ %r{\Aghcr\.io/persona-runtime/mafest-web@sha256:[0-9a-f]{64}\z}
+raise "[안전] 웹 이미지가 승인 digest가 아니다(실제 #{wc["image"]})" unless wc["image"] == APPROVED_WEB_IMAGE
 raise "[안전] 웹 컨테이너 포트는 http 8080 하나다(nginx-unprivileged)" unless wc["ports"] == [{ "name" => "http", "containerPort" => 8080, "protocol" => "TCP" }]
 raise "[안전] 웹에 환경변수·Secret을 넣지 않는다 — API 주소는 빌드 때 상대 /v1로 고정된다" if wc.key?("env") || wc.key?("envFrom")
 check_pod_security(web_spec, wc, "웹", 101)
@@ -168,14 +189,10 @@ check_pdb(base, "mafest-web")
 prod_text = YAML.dump(prod)
 raise "[안전] mafest-app prod 렌더에 자리표시 digest(0×64)가 있다 — 승인된 digest만 연결한다" if prod_text =~ PLACEHOLDER
 raise "[안전] mafest-app prod 렌더에 UNCONFIRMED 값이 있다 — 승인된 기준일을 넣고 연결한다" if prod_text.include?("UNCONFIRMED")
-app_live = File.join(repo, "argocd/mafest-app.yaml")
-app_draft = File.join(repo, "argocd/mafest-app.yaml.draft")
-raise "[안전] mafest-app Application(초안 또는 활성)이 없다" unless File.exist?(app_live) || File.exist?(app_draft)
-raise "[안전] mafest-app Application이 활성인데 prod 렌더가 비어 있다" if File.exist?(app_live) && prod.empty?
-raise "[안전] mafest-app Application이 초안인데 prod overlay가 무언가를 렌더한다" if !File.exist?(app_live) && !prod.empty?
-%w[argocd/mafest-app.yaml argocd/mafest-app.yaml.draft argocd/mafest-app-netpol.yaml argocd/mafest-app-netpol.yaml.draft].each do |path|
+raise "[안전] prod 렌더가 base와 다르다 — overlay는 base를 그대로 연결한다" unless prod.map { |d| [d["kind"], d.dig("metadata", "name")] }.sort == base.map { |d| [d["kind"], d.dig("metadata", "name")] }.sort && !prod.empty?
+%w[argocd/mafest-app.yaml argocd/mafest-app-netpol.yaml].each do |path|
   full = File.join(repo, path)
-  next unless File.exist?(full)
+  raise "[안전] #{path}가 없다(활성 Application 두 개가 필요하다)" unless File.exist?(full)
   app = YAML.load_file(full)
   raise "[안전] #{path}: 자동 Sync를 두지 않는다" if app.dig("spec", "syncPolicy")
   raise "[안전] #{path}: finalizer를 두지 않는다" if app.dig("metadata", "finalizers")
@@ -206,5 +223,5 @@ stream_mw = (stream_rule["filters"] || []).map { |f| f.dig("extensionRef", "name
 raise "[안전] 스트림 규칙에 버퍼링 Middleware를 붙이지 않는다" if stream_mw.any? { |name| middlewares.dig(name)&.key?("buffering") }
 raise "[안전] 스트림 규칙은 POST Exact /v1/search/stream 하나로 고정한다" unless stream_rule["matches"] == [{ "method" => "POST", "path" => { "type" => "Exact", "value" => "/v1/search/stream" } }]
 
-puts "mafest-app(API·웹 선언 base·prod 렌더·Argo 초안·M8 라우트 초안) 검사 통과"
+puts "mafest-app(API·웹 선언 base·prod 렌더·Argo Application·M8 라우트 초안) 검사 통과"
 RUBY

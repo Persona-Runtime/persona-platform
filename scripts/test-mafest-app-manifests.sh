@@ -41,7 +41,13 @@ end
 # [설명, 복사본을 바꾸는 함수, 기대 오류 문구]
 cases = [
   ["API replica 3", ->(r) { mutate_yaml(File.join(r, API), ["spec", "replicas"], 3) }, "API는 replicas 2다"],
-  ["Uvicorn worker를 args로 늘림", ->(r) { mutate_yaml(File.join(r, API), C0 + ["args"], ["--workers", "2"]) }, "command·args를 덮어쓰지 않는다"],
+  ["Uvicorn worker를 args로 늘림", ->(r) { mutate_yaml(File.join(r, API), C0 + ["args"], ["--workers", "2"]) }, "승인 실행 형태"],
+  ["graceful 종료 시간 변경", ->(r) {
+     args = YAML.load_file(File.join(r, API)).dig(*C0, "args").map { |a| a == "100" ? "30" : a }
+     mutate_yaml(File.join(r, API), C0 + ["args"], args)
+   }, "승인 실행 형태"],
+  ["command 덮어씀", ->(r) { mutate_yaml(File.join(r, API), C0 + ["command"], ["python"]) }, "command를 덮어쓰지 않는다"],
+  ["preStop 제거", ->(r) { mutate_yaml(File.join(r, API), C0 + ["lifecycle"], :delete) }, "preStop은 exec sleep 10"],
   ["DB의 required anti-affinity 복사", ->(r) {
      term = { "topologyKey" => "kubernetes.io/hostname", "labelSelector" => { "matchLabels" => { "app.kubernetes.io/name" => "mafest-api" } } }
      mutate_yaml(File.join(r, API), POD + ["affinity", "podAntiAffinity"], { "requiredDuringSchedulingIgnoredDuringExecution" => [term] })
@@ -54,7 +60,24 @@ cases = [
   ["지어낸 환경변수 이름", ->(r) {
      mutate_yaml(File.join(r, API), C0 + ["env"], env_list(File.join(r, API)) + [{ "name" => "VLLM_URL", "value" => "http://x" }])
    }, "Settings가 읽지 않는 환경변수"],
-  ["종료 유예 30초", ->(r) { mutate_yaml(File.join(r, API), POD + ["terminationGracePeriodSeconds"], 30) }, "종료 유예는 전체 요청 30초보다"],
+  ["종료 유예 45초", ->(r) { mutate_yaml(File.join(r, API), POD + ["terminationGracePeriodSeconds"], 45) }, "API 종료 유예는"],
+  ["승인 외 기준일", ->(r) {
+     env = env_list(File.join(r, API)).map { |e| e["name"] == "MAFEST_DATA_BASE_DATE" ? e.merge("value" => "2026-09-01") : e }
+     mutate_yaml(File.join(r, API), C0 + ["env"], env)
+   }, "MAFEST_DATA_BASE_DATE는"],
+  ["생성 시한 20초로 회귀", ->(r) {
+     env = env_list(File.join(r, API)).map { |e| e["name"] == "MAFEST_LLM_TIMEOUT_S" ? e.merge("value" => "20") : e }
+     mutate_yaml(File.join(r, API), C0 + ["env"], env)
+   }, "MAFEST_LLM_TIMEOUT_S는"],
+  ["API 승인 외 digest", ->(r) { mutate_yaml(File.join(r, API), C0 + ["image"], "ghcr.io/persona-runtime/mafest-app@sha256:" + "a" * 64) }, "승인 digest가 아니다"],
+  ["웹 자리표시 digest", ->(r) { mutate_yaml(File.join(r, WEB), C0 + ["image"], "ghcr.io/persona-runtime/mafest-web@sha256:" + "0" * 64) }, "승인 digest가 아니다"],
+  ["Application에 자동 Sync", ->(r) { mutate_yaml(File.join(r, "argocd/mafest-app.yaml"), ["spec", "syncPolicy"], { "automated" => {} }) }, "자동 Sync를 두지 않는다"],
+  ["mafest-public을 prod에 연결", ->(r) {
+     # 렌더가 되도록 빈 kustomization을 만들어 연결 자체만 검출 대상으로 남긴다.
+     File.write(File.join(r, "kustomize/base/mafest-public/kustomization.yaml"), "apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources: []\n")
+     path = File.join(r, OVERLAY)
+     File.write(path, File.read(path) + "  - ../../../base/mafest-public\n")
+   }, "M8 공개 라우트"],
   ["PDB minAvailable 2", ->(r) { mutate_yaml(File.join(r, PDB), ["spec", "minAvailable"], 2) }, "PDB는 minAvailable 1"],
   ["웹에 persona-web 이미지", ->(r) { mutate_yaml(File.join(r, WEB), C0 + ["image"], "ghcr.io/persona-runtime/persona-web@sha256:" + "a" * 64) }, "persona-web 이미지를 재사용하지 않는다"],
   ["스트림 규칙에 body-limit", ->(r) {
@@ -64,10 +87,6 @@ cases = [
      rule["filters"] << { "type" => "ExtensionRef", "extensionRef" => { "group" => "traefik.io", "kind" => "Middleware", "name" => "mafest-body-limit" } }
      File.write(path, docs.map { |d| YAML.dump(d) }.join)
    }, "스트림 규칙에 버퍼링 Middleware"],
-  ["자리표시 digest를 prod에 연결", ->(r) {
-     path = File.join(r, OVERLAY)
-     File.write(path, File.read(path).sub("resources: []", "resources:\n  - ../../../base/mafest-app"))
-   }, "자리표시 digest"],
 ]
 
 cases.each do |label, mutate, message|

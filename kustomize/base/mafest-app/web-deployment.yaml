@@ -59,9 +59,9 @@ spec:
                     app.kubernetes.io/name: mafest-web
       containers:
         - name: web
-          # 미확정: 웹 W(r9)를 담은 승인 linux/amd64 digest. mafest-web에는 아직 이미지 발행 워크플로가 없어
-          # 이름(ghcr.io/persona-runtime/mafest-web)도 발행 때 확인한다. 전부 0인 값은 자리표시다.
-          image: ghcr.io/persona-runtime/mafest-web@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          # 승인된 웹 릴리스(mafest-web 55fa2364…)의 digest. 릴리스마다 사람이 승인한 값으로 바꾸고 validator의
+          # 승인 상수도 함께 갱신한다.
+          image: ghcr.io/persona-runtime/mafest-web@sha256:7ab6701ab7bb9cfe175edcd2669453a87c0f613e74b12f14d0757ee29c4c43a2
           imagePullPolicy: IfNotPresent
           ports:
             - name: http

@@ -40,10 +40,11 @@ spec:
       # private GHCR package. 이 Secret은 Git 밖에서 사람이 만든다(값은 커밋·출력하지 않는다).
       imagePullSecrets:
         - name: mafest-ghcr
-      # 전체 요청 시한 30초(mafest REQUEST_TIMEOUT_S)보다 길게 준다. 후보 45초.
-      # 미확정: P7의 SIGTERM 처리(readiness false → 남은 요청 마무리 → registry·풀 닫기)가 들어와야 이 시간이
-      # 의미가 있다. 지금 main에는 drain이 없다.
-      terminationGracePeriodSeconds: 45
+      # 종료 시간 배분(전부 이 유예 안에서 흐른다): preStop 10초 → SIGTERM → uvicorn graceful 100초 → 여유 10초.
+      # 전체 요청 시한 90초(MAFEST_REQUEST_TIMEOUT_S)보다 길어야 진행 중 요청이 끝까지 간다.
+      # preStop 대기도 유예 시간에 포함된다. SIGTERM 뒤 앱은 /readyz를 503으로 바꾼다. 실제 drain 동작은
+      # 내부 배포 뒤 런북 절차로 확인하며, 이 선언만으로 검증됐다고 보지 않는다.
+      terminationGracePeriodSeconds: 120
       securityContext:
         seccompProfile:
           type: RuntimeDefault
@@ -76,10 +77,31 @@ spec:
                       - k8s-worker2
       containers:
         - name: api
-          # 미확정: P7을 담은 새 앱 릴리스 이미지의 linux/amd64 digest. 최초 적재용 digest(sha256:dda935a2…)로
-          # P7 API를 배포하지 않는다. 아래 전부 0인 값은 자리표시이며 validator가 prod 렌더에서 막는다.
-          image: ghcr.io/persona-runtime/mafest-app@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          # 승인된 앱 릴리스(mafest 2ce83685…)의 digest. 최초 적재용 digest와 다르다. 릴리스마다 사람이 승인한 값으로
+          # 바꾸고 validator의 승인 상수도 함께 갱신한다.
+          image: ghcr.io/persona-runtime/mafest-app@sha256:b84372f3ea8da7dcb277ed869e46f264be6bf1d0d158faf5dedf4b497ab5c22c
           imagePullPolicy: IfNotPresent
+          # 이미지 CMD에 --timeout-graceful-shutdown이 없어 같은 실행 형태에 그 옵션만 더해 명시한다.
+          # command는 쓰지 않는다(이미지에 ENTRYPOINT가 없어 args가 CMD를 대체한다).
+          args:
+            - uvicorn
+            - mafest.serving.api.app:app
+            - --host
+            - 0.0.0.0
+            - --port
+            - "8000"
+            - --workers
+            - "1"
+            - --timeout-keep-alive
+            - "65"
+            - --timeout-graceful-shutdown
+            - "100"
+          # 엔드포인트 제거(로드밸런서 반영) 시간을 벌기 위해 SIGTERM 전에 10초 기다린다. exec sleep은 이미지의
+          # coreutils에 의존한다(런북에서 Pod 안에서 확인). 실패해도 SIGTERM은 이어서 간다.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "10"]
           ports:
             - name: http
               containerPort: 8000
@@ -99,18 +121,32 @@ spec:
             # 연결하지 않는다. 접근 통제는 persona-inference의 allow-vllm-gateway(mafest-api Pod만)가 한다.
             - name: MAFEST_LLM_MODEL
               value: Qwen/Qwen3-4B-Instruct-2507
-            # 생성 상한 20초(전체 30초 안). Settings 기본값과 같지만 운영 값을 선언에 고정한다.
+            # 생성 상한 60초, 전체 요청 상한 90초(생성 포함). 스트림은 10초마다 ping을 보내 유휴 끊김을 막는다.
             - name: MAFEST_LLM_TIMEOUT_S
-              value: "20"
+              value: "60"
+            - name: MAFEST_REQUEST_TIMEOUT_S
+              value: "90"
+            - name: MAFEST_STREAM_PING_S
+              value: "10"
+            # readiness는 프로세스 상태만 본다. DB·vLLM 상태는 15초 주기(시도당 1초)로 따로 점검해 지표로만 남긴다.
+            - name: MAFEST_READINESS_MODE
+              value: process
+            - name: MAFEST_DEPENDENCY_CHECK_INTERVAL_S
+              value: "15"
+            - name: MAFEST_DEPENDENCY_CHECK_TIMEOUT_S
+              value: "1"
+            # 검색 병렬 작업자 수(DB 풀 4·AGE 풀 2 안에서 대기하며 동작한다).
+            - name: MAFEST_SEARCH_WORKERS
+              value: "8"
             # Pod당 SQL 풀 4·AGE 풀 2(Settings 기본값). 연결 합산의 근거라 선언에 고정한다.
             - name: MAFEST_DB_POOL_MAX
               value: "4"
             - name: MAFEST_GRAPH_POOL_MAX
               value: "2"
-            # 미확정: 운영 데이터의 승인된 기준일(채권 등 기준일 열이 없는 상품군에 쓴다). 오늘 날짜나 옛
-            # 2026-08-21을 복사하지 않는다. 재적재로 기준일이 바뀌면 API를 재시작한다(기준일은 기동 때 읽는다).
+            # 승인된 운영 데이터 기준일(채권 등 기준일 열이 없는 상품군에 쓴다). 임의로 바꾸지 않는다.
+            # 재적재로 기준일이 바뀌면 사람이 승인한 값으로 갱신하고 API를 재시작한다(기준일은 기동 때 읽는다).
             - name: MAFEST_DATA_BASE_DATE
-              value: "UNCONFIRMED"
+              value: "2026-08-21"
             # runtime 계정 DSN(mafest_runtime). mafest-data의 mafest-db-runtime은 다른 namespace라 직접 참조할 수
             # 없어, 사람이 값 출력 없이 mafest-app에 복제한다(런북). owner용 mafest-migrator는 연결하지 않는다.
             - name: PGURL
@@ -153,10 +189,8 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 1
             failureThreshold: 3
-          # readiness는 기본 /readyz이며 DB·AGE·vLLM 가용성을 넣지 않는다(공개 API 결정 R9-4). 진단용 deep
-          # readiness가 있어도 probe에 쓰지 않는다.
-          # 미확정: 지금 mafest main의 /readyz는 DB·AGE를 조회한다. P7의 프로세스 전용 readiness가 들어오기 전에는
-          # 이 선언을 활성화하지 않는다.
+          # readiness는 /readyz이며 MAFEST_READINESS_MODE=process라 DB·AGE·vLLM 가용성을 넣지 않는다(공개 API
+          # 결정 R9-4). 종료 신호를 받으면 앱이 503으로 바꿔 Service 대상에서 빠진다.
           readinessProbe:
             httpGet:
               path: /readyz
