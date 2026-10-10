@@ -42,7 +42,7 @@ prod = load_stream.call(File.join(work, "prod.yaml"))
 PLACEHOLDER = /@sha256:0{64}\b/
 # 승인된 이미지(feedback 승인 입력). 릴리스마다 사람이 갱신한다.
 APPROVED_API_IMAGE = "ghcr.io/persona-runtime/mafest-app@sha256:b84372f3ea8da7dcb277ed869e46f264be6bf1d0d158faf5dedf4b497ab5c22c"
-APPROVED_WEB_IMAGE = "ghcr.io/persona-runtime/mafest-web@sha256:7ab6701ab7bb9cfe175edcd2669453a87c0f613e74b12f14d0757ee29c4c43a2"
+APPROVED_WEB_IMAGE = "ghcr.io/persona-runtime/mafest-web@sha256:6e7623e388f02cd65524dba95f3022bad296c5b3006ee0c93a6979214b7eec3f"
 # 이미지 CMD에 --timeout-graceful-shutdown만 더한 승인 실행 형태. 이 외의 args·command는 막는다.
 APPROVED_API_ARGS = %w[
   uvicorn mafest.serving.api.app:app --host 0.0.0.0 --port 8000 --workers 1

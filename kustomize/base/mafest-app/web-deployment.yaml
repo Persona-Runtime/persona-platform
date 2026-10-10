@@ -59,9 +59,9 @@ spec:
                     app.kubernetes.io/name: mafest-web
       containers:
         - name: web
-          # 승인된 웹 릴리스(mafest-web 55fa2364…)의 digest. 릴리스마다 사람이 승인한 값으로 바꾸고 validator의
+          # 승인된 웹 릴리스(mafest-web 57276980…)의 digest. 릴리스마다 사람이 승인한 값으로 바꾸고 validator의
           # 승인 상수도 함께 갱신한다.
-          image: ghcr.io/persona-runtime/mafest-web@sha256:7ab6701ab7bb9cfe175edcd2669453a87c0f613e74b12f14d0757ee29c4c43a2
+          image: ghcr.io/persona-runtime/mafest-web@sha256:6e7623e388f02cd65524dba95f3022bad296c5b3006ee0c93a6979214b7eec3f
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
